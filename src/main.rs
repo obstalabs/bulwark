@@ -2370,7 +2370,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 RC=$?\n\
 rm -rf /tmp/bulwark-remote-42\n\
 exit $RC\n";
-        assert_eq!(script, expected, "gate script must not drift with ");
+        assert_eq!(script, expected, "gate script must not drift from the baseline");
         // The script must NEVER mention hivebus — the handoff is out-of-band.
         assert!(
             !script.contains("hivebus"),
