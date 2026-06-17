@@ -55,6 +55,15 @@ enforcement is open; Obsta-operated managed trust (fleet policy, identity, audit
 signed grants) is a separate commercial tier and not part of this repo. Contributions
 here are accepted under AGPL-3.0-or-later via the DCO above.
 
+### External contributions
+
+We welcome **issues, discussion, bug reports, and small fixes** now. Before merging
+**substantive external code**, we will finalize the contributor-licensing policy
+(the DCO above, or a lightweight CLA — to keep the open-core/commercial line clean).
+If you're considering a larger change, please **open an issue first** so we can
+confirm the licensing path before you invest in the PR. Maintainer commits are
+unaffected.
+
 ## Code of conduct
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
