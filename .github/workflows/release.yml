@@ -1,0 +1,106 @@
+name: Release
+
+# Build Linux binaries on a version tag and publish a GitHub Release to the
+# public distribution repo (obstalabs/bulwark-dist). The source stays private;
+# only the compiled artifacts and checksums are published.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DIST_REPO: obstalabs/bulwark-dist
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (aarch64)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="bulwark-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/bulwark" "dist/${name}/"
+          cp README.md LICENSE CHANGELOG.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          echo "artifact=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bulwark-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.checksum }}
+          retention-days: 1
+
+  publish:
+    name: publish release to dist
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes from CHANGELOG
+        # Pull the section for this tag out of the private CHANGELOG so the
+        # public release notes match exactly what shipped.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "Bulwark ${GITHUB_REF_NAME} — Linux read-gate." > notes.md
+          echo "" >> notes.md
+          echo "See CHANGELOG inside each archive for the full list." >> notes.md
+
+      - name: Publish GitHub Release to dist repo
+        env:
+          # PAT with contents:write on obstalabs/bulwark-dist. Set as a secret on
+          # the private bulwark repo. Without it the release cannot be published.
+          GH_TOKEN: ${{ secrets.DIST_RELEASE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "DIST_RELEASE_TOKEN is not set — cannot publish to ${DIST_REPO}." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$DIST_REPO" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            artifacts/*.tar.gz artifacts/*.sha256

@@ -1,0 +1,21 @@
+# build outputs + run artifacts (source-only repo)
+es_proof
+*.log
+receipt.txt
+deny_err.txt
+es_proof.app
+*.provisionprofile
+notarize-bundle.out
+notarize.out
+notarization.receipt
+.DS_Store
+_CodeSignature/
+*.zip
+es_final_check
+bulwark_es_gate
+bulwark_es_gate.app/
+*.app/
+*.notarization.receipt
+notarize-gate.out
+notarize-bundle.out
+gate-receipt.txt

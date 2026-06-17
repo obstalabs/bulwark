@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Info.plist for the ES proof app bundle. The CFBundleIdentifier
+         MUST exactly match the App ID created on the Developer Portal (the one
+         with the Endpoint Security capability enabled), or the provisioning
+         profile will not match and AMFI error -413 persists. -->
+    <key>CFBundleIdentifier</key>
+    <string>dev.obstalabs.bulwark.es-proof</string>
+    <key>CFBundleName</key>
+    <string>es_proof</string>
+    <key>CFBundleExecutable</key>
+    <string>es_proof</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <!-- Background-only: no UI, run from CLI. -->
+    <key>LSBackgroundOnly</key>
+    <true/>
+</dict>
+</plist>
