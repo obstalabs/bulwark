@@ -32,9 +32,8 @@ becomes an invariant the kernel enforces.
 ## What Bulwark is NOT
 
 - **Not redaction.** It does not scrub or obfuscate secrets out of content. (That
-  is [pastewatch](https://github.com/ppiankov/pastewatch)'s and
-  [NeuroRouter](https://neurorouter.dev)'s job.) It stops the open from happening
-  at all.
+  is [NeuroRouter](https://neurorouter.dev)'s job.) It stops the open from
+  happening at all.
 - **Not an authority/approval system.** It does not decide *who* may act. (That is
   [Verdict](https://obstalabs.dev/verdict)'s job.)
 - **Not a network or routing gate.** It does not see or stop exfiltration over
