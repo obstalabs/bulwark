@@ -3,7 +3,7 @@
 
 CARGO ?= cargo
 
-.PHONY: build release test lint fmt fmt-check clean it
+.PHONY: build release test lint fmt fmt-check clean it leak-guard
 
 build:
 	$(CARGO) build
@@ -22,6 +22,9 @@ it:
 
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
+
+leak-guard:
+	./scripts/leak-guard.sh
 
 fmt:
 	$(CARGO) fmt

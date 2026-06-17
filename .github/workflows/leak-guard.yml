@@ -1,0 +1,16 @@
+name: leak-guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  leak-guard:
+    name: leak-guard (no internal refs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for internal references
+        run: ./scripts/leak-guard.sh
