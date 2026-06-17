@@ -12,14 +12,11 @@ env:
 jobs:
   build-test:
     name: build + test (linux)
-    # Self-hosted Linux runner (nullbot-1, aarch64, kernel 6.12 + Landlock,
-    # passwordless sudo for the root fanotify/Landlock integration steps).
-    # GitHub-hosted minutes are billing-gated; this runner is free + uncapped on
-    # a private repo. Arch is arm64 — fanotify/Landlock are kernel features, not
-    # ISA-specific, so the gate behaves identically; bulwark ships per-arch
-    # binaries. Kernel 6.12 supports the full hardened-mode Landlock suite
-    # (an older 5.10 box could not).
-    runs-on: [self-hosted, linux, ARM64]
+    # GitHub-hosted Ubuntu runner — free + unlimited for public repos, and no
+    # self-hosted box is exposed to PR authors. fanotify/Landlock are kernel
+    # features; the hosted runner's kernel supports the permission-event gate and
+    # passwordless sudo for the root integration steps below.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
