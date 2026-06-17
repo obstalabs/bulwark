@@ -1,0 +1,224 @@
+# Bulwark
+
+> The kernel asks before the bytes leave the disk.
+
+A kernel-boundary file-read gate for AI agent process trees. Launch an agent
+under Bulwark; when any process in its tree tries to `open()` a protected file,
+the Linux kernel **pauses the read** and Bulwark decides — before a single byte
+reaches the agent.
+
+[![CI](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml/badge.svg)](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml)
+![platform](https://img.shields.io/badge/platform-Linux%20%26%20macOS-blue)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
+```sh
+# Run an agent, but deny it any read of your SSH keys — enforced by the kernel.
+brew install obstalabs/tap/bulwark
+sudo bulwark run --protect ~/.ssh -- claude
+#   the agent works normally; cat ~/.ssh/id_ed25519  ->  Permission denied
+```
+
+## What Bulwark is
+
+Bulwark is the missing lower layer of the agent-safety stack: an OS-level read
+gate. It supervises a process tree, installs a fanotify `FAN_OPEN_PERM` mark,
+and judges each open by the file's **inode** — not its path string. A protected
+inode opened by the supervised tree is denied at the kernel; the reader gets
+`EPERM`. Every decision is logged with the process ancestry that caused it.
+
+The boundary stops being a rule in a prompt the agent can be talked past, and
+becomes an invariant the kernel enforces.
+
+## What Bulwark is NOT
+
+- **Not redaction.** It does not scrub or obfuscate secrets out of content. (That
+  is [NeuroRouter](https://neurorouter.dev)'s job.) It stops the open from
+  happening at all.
+- **Not an authority/approval system.** It does not decide *who* may act. (That is
+  [Verdict](https://obstalabs.dev/verdict)'s job.)
+- **Not a network or routing gate.** It does not see or stop exfiltration over
+  the wire. (That is [NeuroRouter](https://neurorouter.dev)'s job.)
+- **Not protection for secrets already inside the allowed workspace.** Bulwark
+  bounds what the tree can *reach*, not what it already holds.
+- **Not protection against an unwrapped process.** Only the tree launched under
+  `bulwark run` is gated.
+
+It does exactly one thing: gate the read at the kernel.
+
+## Philosophy
+
+*Principiis obsta* — resist the beginning. A security boundary must not depend
+on a prompt or a guess. Bulwark prevents the dangerous condition structurally
+rather than detecting it after the fact: the kernel is the evidence source, not
+the agent's self-report; the decision is deterministic, not probabilistic; the
+identity is the inode, not a string a symlink can forge.
+
+## Quick start
+
+> Linux (fanotify) and macOS (Endpoint Security). The gate needs root —
+> `CAP_SYS_ADMIN` for fanotify on Linux, root + Full Disk Access on macOS. Prebuilt
+> binaries: `brew install obstalabs/tap/bulwark` or **[obstalabs/bulwark-dist](https://github.com/obstalabs/bulwark-dist)**.
+
+```sh
+cargo build --release
+
+# Deny the supervised command any read of files under ~/.ssh, by inode.
+sudo ./target/release/bulwark run \
+  --protect ~/.ssh \
+  --receipts /tmp/bulwark-receipts.jsonl \
+  -- bash -c 'cat ~/.ssh/id_ed25519'   # -> cat: Permission denied
+```
+
+A benign-named symlink to a protected file is still denied — the decision is by
+inode, so the name cannot lie.
+
+## Usage
+
+```
+bulwark run --protect <PATH> [--protect <PATH>...] [--receipts <FILE>] -- <CMD>...
+```
+
+- `--protect <PATH>` — protect a file or directory by inode (directories expand
+  to their immediate entries' inodes at launch). Repeatable, at least one
+  required.
+- `--receipts <FILE>` — append one JSON-line receipt per decision.
+- everything after `--` is the supervised command.
+
+Receipts are JSON lines:
+
+```json
+{"ts_ms":1717377600000,"pid":959596,"dev":43,"ino":192214,"decision":"deny","path":"/tmp/guard/secret.env","ancestry":"cat(959596) <- bash(959591)","reason":"protected inode opened by supervised tree"}
+```
+
+## Architecture
+
+```
+bulwark run --protect <path> -- <cmd>
+      │
+      ├── resolve protected paths -> (dev, ino) set          [protect.rs]
+      ├── fanotify_init + FAN_OPEN_PERM mark (before fork)    [gate.rs]
+      ├── fork/exec <cmd>                                     [gate.rs]
+      └── event loop:
+            open() by tree  ──►  kernel pauses the open
+                                  fstat(event fd) -> (dev, ino)   [gate.rs]
+                                  in supervised tree?             [proctree.rs]
+                                  inode protected?                [protect.rs]
+                                    yes -> FAN_DENY (EPERM)
+                                    no  -> FAN_ALLOW
+                                  log decision + ancestry         [receipt.rs]
+```
+
+## Modes
+
+- **Deny-list (default):** protect specific paths; everything else is allowed.
+  With `--consent socket`, a protected open is held and an operator answers
+  off-band (allow-once / allow-session / deny / deny-forever). Without it,
+  protected opens are denied.
+- **Allow-list (`--deny-all`):** default-deny for CI/CD — the agent may read
+  only `--allow` paths plus the runtime base set, every other read denied, no
+  prompt. See `docs/ci-allowlist.md`.
+- **Hardened (`--hardened`):** the allow-list enforced as a kernel-level
+  Landlock floor instead of via the fanotify supervisor. Crash-safe — the
+  restriction is in the kernel on the agent itself, so `SIGKILL`/crash cannot
+  widen access. See `docs/hardened-mode.md`.
+
+## Agent-operated, but the clamp is a ratchet
+
+Bulwark is built to be operated by an agent, not only a human: in a fleet, an
+orchestrator dispatching a sub-agent onto a sensitive host clamps that sub-agent's
+reach at dispatch. The restrainer is itself an agent — which is why Bulwark ships
+an ANCC contract (`docs/SKILL.md` in bulwark-dist), so an orchestrator can read
+its interface and apply the clamp programmatically.
+
+Handing an agent the lever is only safe because the lever turns one way.
+**Tightening** a clamp (adding `--protect`, narrowing an allowlist) is
+agent-initiated and free. **Widening or removing** one routes through the off-band
+consent path (`--consent socket`), where a human answers over a channel the
+supervised tree cannot see or forge. *An agent can clamp; it cannot un-clamp.*
+ANCC-compliance here is about who pulls the lever, not who gets restricted — and
+a lever an agent may pull must be a ratchet.
+
+## Integrity circuit-breaker
+
+Each run records its integrity context — a generation counter, a clean-shutdown
+marker, the policy epoch, and the inode identity of every protected object — to a
+state file. The next run enters **tainted mode** when the prior run ended
+uncleanly (no clean-shutdown marker: a `SIGKILL`, crash, OOM, or power loss) or
+when a protected path now resolves to a different inode (object-identity drift).
+
+A tainted run denies protected reads by default and, in socket mode, bypasses the
+allow-session cache so every protected open is decided fresh — no pre-taint grant
+survives. The taint is sticky and persists across restarts until an operator
+reviews the audit receipt (`source: "integrity"`) and acknowledges it:
+
+```sh
+bulwark reset   # clears the taint marker after review
+```
+
+This bounds the blast radius *after* an unclean recovery. It does not change the
+held-read fail-open behaviour at the instant of a hard kill — that is what
+`--hardened` is for.
+
+## Known limitations
+
+- **Reads, not consequences.** Bulwark gates file opens; it does not stop use of
+  data already read, environment-variable credentials, or network exfiltration.
+  Pair it with an egress control.
+- **fanotify modes fail open on hard supervisor death.** A `SIGKILL`/crash while
+  a read is held releases that read as allowed (documented kernel behaviour); a
+  graceful `SIGTERM` fails closed. The `--hardened` (Landlock) mode is crash-safe
+  and has no this limitation. The integrity circuit-breaker (below) bounds the
+  blast radius *after* such an event but does not change the held read at the
+  moment of the kill.
+- Allow-list/hardened modes allow a runtime base set (`bulwark base-set`) so the
+  agent can execute — a deliberate, inspectable trade-off.
+- macOS support requires a signed Endpoint Security edge and Full Disk Access;
+  see `docs/macos.md`.
+- Requires root (`CAP_SYS_ADMIN` for fanotify; Endpoint Security privilege on
+  macOS; Landlock for `--hardened`).
+
+## Roadmap
+
+- The managed remote trust channel (mutual-TLS, signed grants) — the Pro
+  hardening of `bulwark ssh`.
+- Fleet control plane, centralized audit, signed managed daemons (Pro).
+- Windows support (minifilter gate) — under research.
+
+## License & positioning
+
+**Local enforcement is open. Managed trust is paid.**
+
+The line is architectural, not a feature flag: if it runs entirely on your own
+machines, it is open source; if it depends on Obsta-operated trust, identity,
+availability, fleet policy, audit, or signed grants, it is the commercial tier.
+
+**Bulwark Core** is licensed **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) and
+covers self-managed local enforcement:
+
+- the read gate (`bulwark run --protect`)
+- local off-band consent (`--consent socket`)
+- the CI allowlist (`--deny-all`)
+- the crash-safe Landlock floor (`--hardened`)
+- the peer `bulwark ssh` mechanism, when you own both ends
+
+You can read exactly what the gate does and how it decides; the security
+boundary is inspectable by design. Local Linux functionality is never gated by a
+license check.
+
+**Bulwark Pro / Fleet** is the commercial tier — managed trust for teams, which
+is the part you do not want to run yourself:
+
+- the remote trust channel: mutual-TLS / certificate issuance and a signed-grant
+  authority (the production hardening of `bulwark ssh`)
+- managed daemon identity and fleet policy distribution
+- a centralized, tamper-evident audit pipeline
+- team approval flows and an operator cockpit
+- an SLA on the consent and trust channel
+
+`bulwark ssh` is the *mechanism* and is open; the *managed trust* around it —
+reliable authority across machines, users, agents, and audit boundaries — is the
+product. macOS (Endpoint Security) support and Verdict/NeuroRouter integration
+follow the same line: the local enforcement is open, the managed infrastructure
+is paid.
+
+Copyright © 2026 Obsta Labs.

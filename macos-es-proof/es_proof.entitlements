@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The granted Endpoint Security client entitlement. Without it,
+         es_new_client() returns ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED. Apple
+         grants this entitlement per developer team on request. -->
+    <key>com.apple.developer.endpoint-security.client</key>
+    <true/>
+</dict>
+</plist>

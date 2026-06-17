@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: build + test (linux)
+    # GitHub-hosted Ubuntu runner — free + unlimited for public repos, and no
+    # self-hosted box is exposed to PR authors. fanotify/Landlock are kernel
+    # features; the hosted runner's kernel supports the permission-event gate and
+    # passwordless sudo for the root integration steps below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose
+
+      # compile the Rust macOS cfg path on the existing Linux runner.
+      # `cargo check` does not link an Apple binary, but it catches gate_macos.rs
+      # type errors that Linux-only CI used to miss.
+      - name: macOS Rust cfg check
+        run: cargo check --target x86_64-apple-darwin --verbose
+
+      - name: Unit tests
+        run: cargo test --verbose
+
+      # the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
+      # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
+      # This works on both a passwordless-sudo runner and a runner that runs as
+      # root (no sudo binary), instead of hard-coding `sudo` and failing with
+      # "sudo: command not found".
+      - name: Resolve privileged runner
+        id: priv
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "run=" >> "$GITHUB_OUTPUT"
+          elif command -v sudo >/dev/null 2>&1; then
+            echo "run=sudo -E" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::integration tests need root but this runner is non-root and has no sudo"
+            exit 1
+          fi
+
+      - name: Integration tests (live fanotify gate, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_integration -- --ignored --test-threads=1
+
+      - name: Consent socket integration tests (off-band, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test consent_socket -- --ignored --test-threads=1
+
+      - name: Hardening integration tests (bind-mount, graceful teardown, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test hardening -- --ignored --test-threads=1
+
+      - name: Allow-list CI mode integration tests (default-deny, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test allowlist_ci -- --ignored --test-threads=1
+
+      - name: Hardened mode integration tests (Landlock floor, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test hardened_landlock -- --ignored --test-threads=1
+
+      - name: Remote consent integration tests (decision/prompt split, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test remote_consent -- --ignored --test-threads=1
+
+  macos-swift-edge:
+    name: macOS Swift ES edge compile
+    # enable after registering a self-hosted macOS runner. The current
+    # repo runner inventory has only nullbot-1 (Linux/ARM64), so leaving this
+    # gated avoids a permanently queued required check while preserving the exact
+    # compile/link path that should become mandatory on the first Mac runner.
+    if: ${{ vars.BULWARK_MACOS_SWIFT_CI == 'true' }}
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Typecheck Swift ES clients
+        run: |
+          mkdir -p "$RUNNER_TEMP/swift-module-cache"
+          xcrun --sdk macosx swiftc -typecheck macos-es-proof/es_proof.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
+          xcrun --sdk macosx swiftc -typecheck macos-es-proof/es_gate.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
+
+      - name: Link Swift ES clients
+        run: |
+          mkdir -p "$RUNNER_TEMP/swift-module-cache"
+          xcrun --sdk macosx swiftc -o "$RUNNER_TEMP/es_proof" macos-es-proof/es_proof.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
+          xcrun --sdk macosx swiftc -o "$RUNNER_TEMP/bulwark_es_gate" macos-es-proof/es_gate.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
