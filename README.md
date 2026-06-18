@@ -56,8 +56,9 @@ identity is the inode, not a string a symlink can forge.
 ## Quick start
 
 > Linux (fanotify) and macOS (Endpoint Security). The gate needs root —
-> `CAP_SYS_ADMIN` for fanotify on Linux, root + Full Disk Access on macOS. Prebuilt
-> binaries: `brew install obstalabs/tap/bulwark` or **[obstalabs/bulwark-dist](https://github.com/obstalabs/bulwark-dist)**.
+> `CAP_SYS_ADMIN` for fanotify on Linux, root + Full Disk Access on macOS
+> ([why, and how to set it up](docs/macos-permissions.md)). Prebuilt binaries:
+> `brew install obstalabs/tap/bulwark` or **[obstalabs/bulwark-dist](https://github.com/obstalabs/bulwark-dist)**.
 
 ```sh
 cargo build --release
@@ -172,8 +173,11 @@ held-read fail-open behaviour at the instant of a hard kill — that is what
   moment of the kill.
 - Allow-list/hardened modes allow a runtime base set (`bulwark base-set`) so the
   agent can execute — a deliberate, inspectable trade-off.
-- macOS support requires a signed Endpoint Security edge and Full Disk Access;
-  see `docs/macos.md`.
+- macOS support requires a signed Endpoint Security edge and **Full Disk Access** for
+  the launching terminal (without it the gate cannot start). Why that's needed, how
+  the gate is wired, and the common setup errors are in
+  [docs/macos-permissions.md](docs/macos-permissions.md); see also
+  [docs/macos.md](macos.md).
 - Requires root (`CAP_SYS_ADMIN` for fanotify; Endpoint Security privilege on
   macOS; Landlock for `--hardened`).
 
