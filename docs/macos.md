@@ -3,6 +3,17 @@
 Bulwark's macOS gate uses a root-launched, signed Endpoint Security edge. No
 system extension is installed; recovery is `sudo pkill bulwark_es_gate`.
 
+**macOS docs map** — start here, then go deeper as needed:
+
+- This page — quickstart, build/run, crash posture, consent divergence.
+- **[Permissions & troubleshooting](macos-permissions.md)** — why Full Disk Access is
+  required, how the gate is wired, and the common setup errors (`es_new_client failed:
+  4`, etc.). Read this first if anything doesn't work.
+- **[Running under sudo](macos-sudo.md)** — why root is needed and **why not to make it
+  passwordless** (on macOS the agent runs as root, so a `NOPASSWD` rule is a root hole).
+- **[Behavior matrix](macos-behavior-matrix.md)** — what is/isn't supported on macOS
+  vs Linux at a glance.
+
 ## Crash posture (honest limitation)
 
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,
