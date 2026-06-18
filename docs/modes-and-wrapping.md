@@ -80,6 +80,13 @@ Guidelines:
 - **Protect by category, not by guessing the closure:** credentials, cloud config,
   SSH/GPG, sibling repositories, secret managers' local caches. These are stable and
   small; you don't have to track what the agent legitimately reads.
+- **Never protect the agent's own config/home directory.** Many agents read their own
+  directory to authenticate and run — an OpenAI-style CLI reads `~/.codex/auth.json`
+  for its API key, a Claude CLI reads `~/.claude/` for settings and skills. `--protect`
+  that directory and the agent can't start. The protect-set is therefore
+  *agent-specific*: deny the secrets and the *other* tools' config dirs, but leave the
+  wrapped agent's own dir readable. (Denying tool B's dir while running tool A is free
+  confinement — A never needs it.)
 - **Bulwark needs privilege** (root / `CAP_SYS_ADMIN` on Linux; root + Full Disk
   Access on macOS — see [docs/macos-permissions.md](macos-permissions.md)). A launcher
   that wraps with Bulwark must be able to elevate for the gate while the agent itself

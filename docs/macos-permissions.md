@@ -12,7 +12,9 @@ actually hit.
 **1. Root.** Endpoint Security clients must be privileged — macOS only lets a root
 process subscribe to `ES_EVENT_TYPE_AUTH_OPEN` (the event Bulwark answers to allow or
 deny a file open). This is an Apple platform rule, not a Bulwark choice. So you run
-`sudo bulwark run ...`.
+`sudo bulwark run ...`. (Tempted to make that passwordless? Read
+[docs/macos-sudo.md](macos-sudo.md) first — on macOS the agent runs as root, so a
+`NOPASSWD` rule for `bulwark` is a root-shell hole.)
 
 **2. Full Disk Access (FDA) for the terminal that launches Bulwark.** This is the one
 that surprises people — *"a security tool is asking for Full Disk Access?"* Here's the
