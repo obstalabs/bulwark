@@ -123,6 +123,9 @@ bulwark run --protect <path> -- <cmd>
   restriction is in the kernel on the agent itself, so `SIGKILL`/crash cannot
   widen access. See `docs/hardened-mode.md`.
 
+Not sure which mode fits, or wrapping an agent launcher so every run is confined?
+See [docs/modes-and-wrapping.md](docs/modes-and-wrapping.md).
+
 ## Agent-operated, but the clamp is a ratchet
 
 Bulwark is built to be operated by an agent, not only a human: in a fleet, an
