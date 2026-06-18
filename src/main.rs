@@ -2176,14 +2176,20 @@ fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
         },
     });
 
-    let edge = std::env::var_os(MACOS_ES_GATE_ENV).map(PathBuf::from);
+    // Resolve the edge the same way the gate does: env override, then auto-discovery
+    // relative to the CLI (so a packaged install reports green with no env var set).
+    let env_set = std::env::var_os(MACOS_ES_GATE_ENV).is_some();
+    let edge = gate::resolve_edge_path();
     out.push(DoctorCheck {
-        name: "es-edge-env",
+        name: "es-edge",
         ok: edge.is_some(),
         required: true,
-        detail: match &edge {
-            Some(path) => format!("{MACOS_ES_GATE_ENV}={}", path.display()),
-            None => format!("{MACOS_ES_GATE_ENV} is not set"),
+        detail: match (&edge, env_set) {
+            (Some(path), true) => format!("{MACOS_ES_GATE_ENV}={}", path.display()),
+            (Some(path), false) => format!("found beside CLI: {}", path.display()),
+            (None, _) => format!(
+                "no ES edge found (not beside the CLI; set {MACOS_ES_GATE_ENV} to override)"
+            ),
         },
     });
 
@@ -2520,10 +2526,7 @@ exit $RC\n";
         if cfg!(target_os = "macos") {
             assert!(required.contains(&"os-macos"), "must check the OS");
             assert!(required.contains(&"root"), "must check privilege");
-            assert!(
-                required.contains(&"es-edge-env"),
-                "must check the ES edge path"
-            );
+            assert!(required.contains(&"es-edge"), "must check the ES edge path");
             assert!(
                 required.contains(&"es-edge-entitlement"),
                 "must check the ES entitlement"

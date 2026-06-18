@@ -137,14 +137,53 @@ pub fn run(
     Ok(code)
 }
 
+/// Path inside the gate bundle to the edge executable, relative to a directory that
+/// contains `bulwark_es_gate.app`.
+const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
+
+/// Resolve the ES edge binary. Order:
+///
+/// 1. `BULWARK_MACOS_ES_GATE` if set (explicit override).
+/// 2. Auto-discovery relative to the running CLI, so a packaged install (Homebrew,
+///    release tarball) works with no environment setup. Tried in order:
+///    `<bin>/../libexec/<rel>` (Homebrew: CLI in bin/, bundle in libexec/), then
+///    `<bin>/../<rel>` (extracted tarball: bundle beside the binary), then
+///    `<bin>/<rel>` (bundle in the same dir as the binary).
+///
+/// The first existing path wins; the env override always takes precedence.
+/// Resolve the ES edge path (env override, then auto-discovery) without erroring —
+/// for `doctor`, which reports presence rather than failing. `None` means neither the
+/// env var nor discovery found an edge.
+pub fn resolve_edge_path() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os(ES_EDGE_ENV) {
+        return Some(PathBuf::from(value));
+    }
+    discover_edge()
+}
+
 fn edge_path() -> Result<PathBuf> {
-    let value = std::env::var_os(ES_EDGE_ENV).ok_or_else(|| {
+    resolve_edge_path().ok_or_else(|| {
         anyhow!(
-            "{ES_EDGE_ENV} must point at the signed Endpoint Security edge binary \
+            "could not locate the Endpoint Security edge. It ships beside the CLI in a \
+             packaged install; set {ES_EDGE_ENV} to override \
              (for example bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate)"
         )
-    })?;
-    Ok(PathBuf::from(value))
+    })
+}
+
+/// Look for the gate bundle relative to the current executable. Returns the first
+/// candidate that exists; `None` if discovery comes up empty (caller errors).
+fn discover_edge() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // Canonicalize to resolve a Homebrew bin symlink to the real Cellar path.
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let bin_dir = exe.parent()?;
+    let candidates = [
+        bin_dir.join("..").join("libexec").join(ES_EDGE_REL),
+        bin_dir.join("..").join(ES_EDGE_REL),
+        bin_dir.join(ES_EDGE_REL),
+    ];
+    candidates.into_iter().find(|p| p.exists())
 }
 
 fn ensure_executable(path: &Path) -> Result<()> {
