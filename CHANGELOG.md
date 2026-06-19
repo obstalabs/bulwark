@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-XX
+
+macOS install becomes zero-setup: the gate ships with the CLI and the CLI finds it
+automatically, so `brew install obstalabs/tap/bulwark` gives kernel enforcement, not
+just the binary. No CLI behavior changes for existing users; Linux is unchanged.
+
+### Added
+- macOS CLI auto-discovers the signed Endpoint Security gate beside its own install
+  location (`<bin>/../libexec/bulwark_es_gate.app`, then beside the binary), so no
+  `BULWARK_MACOS_ES_GATE` environment variable is needed for a packaged install. The
+  variable still works as an explicit override. `bulwark doctor` reports which path it
+  resolved.
+
+### Changed
+- macOS release tarballs are now self-contained: each bundles the signed, notarized,
+  stapled `bulwark_es_gate.app` alongside the CLI. The Homebrew formula installs both;
+  the gate no longer has to be fetched or built separately.
+
+### Docs
+- New macOS guides: Full Disk Access (why it's required) and troubleshooting, running
+  under sudo (and why not passwordless), choosing a mode and wrapping an agent runner,
+  and a documentation index.
+
 ## [0.7.0] - 2026-06-06
 
 Makes Bulwark agent-operable (ANCC-compliant): an orchestrator agent can read its
