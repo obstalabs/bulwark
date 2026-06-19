@@ -35,7 +35,7 @@ becomes an invariant the kernel enforces.
   is [NeuroRouter](https://neurorouter.dev)'s job.) It stops the open from
   happening at all.
 - **Not an authority/approval system.** It does not decide *who* may act. (That is
-  [Verdict](https://obstalabs.dev/verdict)'s job.)
+  Verdict's job.)
 - **Not a network or routing gate.** It does not see or stop exfiltration over
   the wire. (That is [NeuroRouter](https://neurorouter.dev)'s job.)
 - **Not protection for secrets already inside the allowed workspace.** Bulwark
