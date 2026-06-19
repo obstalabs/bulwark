@@ -77,6 +77,7 @@ sudo bulwark run --protect <path> -- <agent>
 
 | You see | Cause | Fix |
 |---|---|---|
+| `sudo: bulwark: command not found` (right after `brew install`) | `sudo` uses a locked-down `secure_path` that does **not** include Homebrew's bin (`/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel), so it can't find the CLI. | Run it by full path: `sudo "$(brew --prefix)/bin/bulwark" doctor`. (Note: `sudo -E` does **not** fix this — it preserves env vars but still resolves the command via `secure_path`.) |
 | `es_new_client failed: 4` and `ES edge exited before readiness: exit status: 66` | The launching terminal lacks **Full Disk Access** (`ERR_NOT_PERMITTED`). | Grant FDA to the terminal app (System Settings → Privacy & Security → Full Disk Access), **fully quit + reopen** it. If still failing under `sudo`, grant FDA to the shell binary or use `sudo -i`. |
 | `... is not an executable file` with a `~` in the path | The shell didn't expand `~` (it stays literal inside double quotes). | Use `$HOME` instead of `~` inside quotes, or don't quote the path. With a packaged install you normally don't set this at all (the CLI finds the gate automatically). |
 | `cat: <file>: No such file or directory` | The file you tried to read **doesn't exist** — this is not a gate result. | Test `--protect` against a file that actually exists. A gate denial reads `Operation not permitted`, not `No such file`. |
