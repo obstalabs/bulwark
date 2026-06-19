@@ -1,6 +1,6 @@
 [package]
 name = "bulwark"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Kernel-boundary file-read gate for AI agent process trees (Linux fanotify MVP)"
 license = "AGPL-3.0-or-later"
