@@ -224,8 +224,7 @@ is the part you do not want to run yourself:
 
 `bulwark ssh` is the *mechanism* and is open; the *managed trust* around it —
 reliable authority across machines, users, agents, and audit boundaries — is the
-product. macOS (Endpoint Security) support and Verdict/NeuroRouter integration
-follow the same line: the local enforcement is open, the managed infrastructure
-is paid.
+product. The local enforcement is open; the managed infrastructure on top is the
+paid line.
 
 Copyright © 2026 Obsta Labs.
