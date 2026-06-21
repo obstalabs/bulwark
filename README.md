@@ -41,7 +41,11 @@ becomes an invariant the kernel enforces.
 - **Not protection for secrets already inside the allowed workspace.** Bulwark
   bounds what the tree can *reach*, not what it already holds.
 - **Not protection against an unwrapped process.** Only the tree launched under
-  `bulwark run` is gated.
+  `bulwark run` is gated — including work the agent *delegates* to a separate daemon.
+  An agent that calls `docker run` hands the read to `dockerd` (a different tree), so it
+  is not gated; the standard rule applies — don't give a confined agent a root-equivalent
+  socket. The full tested boundary is in
+  [docs/containment-boundaries.md](docs/containment-boundaries.md).
 
 It does exactly one thing: gate the read at the kernel.
 
@@ -176,6 +180,12 @@ held-read fail-open behaviour at the instant of a hard kill — that is what
   moment of the kill.
 - Allow-list/hardened modes allow a runtime base set (`bulwark base-set`) so the
   agent can execute — a deliberate, inspectable trade-off.
+- **Daemon-delegated reads are outside the tree.** Bulwark governs the process tree it
+  launched. Work the agent hands to a separate daemon — e.g. `docker run`, which
+  delegates to `dockerd` — happens in a different tree and is not gated; this is the
+  standard root-equivalent-socket boundary, not a Bulwark-specific gap. The agent's own
+  attempt to escape into a new mount namespace *is* blocked under `--hardened`. Full
+  tested matrix: [docs/containment-boundaries.md](docs/containment-boundaries.md).
 - macOS support requires a signed Endpoint Security edge and **Full Disk Access** for
   the launching terminal (without it the gate cannot start). Why that's needed, how
   the gate is wired, and the common setup errors are in

@@ -65,6 +65,12 @@ sudo bulwark run --protect <path> -- <agent>
       └─ each open() by the tree → edge answers allow/deny by inode → kernel proceeds
 ```
 
+- **Which process gets gated is decided by ancestry, not by FDA.** The edge reads the
+  opening process's PID from the kernel **audit token** and walks its parent chain up to
+  the supervised root; only the supervised tree is judged. So FDA is what lets the *gate*
+  exist — it is not what confines the agent. A supervised child (even a deep grandchild)
+  inheriting FDA is still gated, because membership is by ancestry, which the process
+  cannot forge. (See [docs/containment-boundaries.md](containment-boundaries.md).)
 - **No system extension is installed.** The gate is a normal (privileged) process.
   Recovery is just `sudo pkill bulwark_es_gate` — there is no OS state to clean up.
 - **Crash posture (honest):** if the ES edge dies mid-run, enforcement stops (the
