@@ -83,6 +83,37 @@ AppArmor, SELinux user policy, and Bulwark alike. The mitigation is not a Bulwar
   (`no_new_privs` + the Landlock ruleset); it just cannot reach a separate privileged
   daemon, which nothing process-scoped can.
 
+## Root agents and cgroup migration
+
+The Linux reparent-proof attribution (above) binds a process through its **cgroup**
+membership. That binding holds for any process that cannot write the cgroup tree — i.e. an
+unprivileged one. A **root** agent is different: writing your own PID into a
+`cgroup.procs` file is an owner-write (uid 0 owns the cgroup filesystem), and a root agent
+with `CAP_SYS_ADMIN` can go further and `mount` a fresh `cgroup2` filesystem that re-exposes
+the whole hierarchy. Either way a root agent can migrate *out* of the supervised scope and,
+combined with a double-`fork()` to shed the ancestry fallback, evade the deny-list/allow-list
+gate. This is the same class as the Docker-socket boundary: **a root agent with
+`CAP_SYS_ADMIN` is not containable by any process-scoped control** — it can also `ptrace`
+the supervisor or unmount state. Trying to "half-contain" root would give false confidence.
+
+So Bulwark does not pretend to. Instead it makes the safe path the default:
+
+- **By default, a would-be-root agent is dropped to the invoking user.** When
+  `bulwark run` is invoked via `sudo` and the agent would otherwise run as root, Bulwark
+  drops the supervised child to `SUDO_UID` (printing a one-line notice). The agent then
+  runs as *you*, not root, and cannot migrate cgroups. The supervisor stays root and keeps
+  the fanotify fd.
+- **`--worker-uid <uid>`** drops to a specific unprivileged account (the explicit form).
+- **`--hardened`** needs none of this: Landlock binds the process regardless of uid, so
+  there is no cgroup to leave.
+- **`--allow-root`** opts out and keeps uid 0 — only safe for a *trusted* agent. Without a
+  `sudo` origin to infer a user from, Bulwark cannot pick a safe uid, so it warns and
+  proceeds at uid 0; pass `--allow-root` to silence that deliberately.
+
+macOS is unaffected: its membership set lives in the gate's own memory (built from kernel
+fork/exec/exit events), not a filesystem the agent can write, so there is nothing to
+migrate.
+
 ## Why `--hardened` is strictly stronger (for what the agent does itself)
 
 `--hardened` (the Landlock floor) is enforced in the kernel on the agent's own threads
