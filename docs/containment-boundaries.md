@@ -14,52 +14,48 @@ Apple Silicon), not asserted.
 | Symlink / rename / hardlink to a protected file | **denied** (by inode) | **denied** | **denied** | **denied** |
 | Bind-mount alias of a protected file | **denied** (`FAN_MARK_FILESYSTEM`) | **denied** | **denied** | **denied** |
 | Deep descendant (child of a child …) | **denied** | **denied** | **denied** | **denied** (PID ancestry) |
-| Deliberately-orphaned descendant (double-`fork()`, reparents to init) | **leaks** ⚠️ | **leaks** ⚠️ | **denied** | **leaks** ⚠️ |
+| Deliberately-orphaned descendant (double-`fork()`, reparents to init) | **denied** (cgroup) | **denied** (cgroup) | **denied** | **denied** (ES set-tracking) |
 | Agent creating its own mount namespace (`unshare`) to escape | n/a | n/a | **blocked** (`no_new_privs`) | n/a |
 | Read delegated to a separate daemon (`docker run`) | **not gated** | **not gated** | **not gated** | **not gated** |
 | A process you did not launch under Bulwark | **not gated** | **not gated** | **not gated** | **not gated** |
 
 The container/unwrapped-process rows are the same fact, and they are the honest edge of
-the *design*. The orphaned-descendant row is different: it is a current limitation of the
-*fanotify/ES attribution mechanism*, with a verified mitigation today (`--hardened`) and a
-fix in progress. The two are not the same kind of edge — see below.
+the *design*: a process Bulwark did not launch, or work handed to a separate daemon, is
+outside the tree it governs. Everything *inside* the launched tree is gated — including a
+descendant that deliberately orphans itself, which is what the next section is about.
 
-## The orphaned-descendant limitation (and how to avoid it today)
+## Orphaned descendants: gated by membership, not by ancestry
 
-The fanotify gate and the macOS ES gate decide whether an open belongs to the supervised
-tree by walking the opener's parent-PID chain (`/proc/<pid>/stat` on Linux, the audit
-token on macOS) up to the launched root. That walk is what makes a deep grandchild still
-gated — membership is by ancestry, which a process cannot forge by *renaming* itself.
+A process can try to escape the gate by **double-`fork()`ing** — forking a child that
+immediately forks a grandchild and exits, so the kernel reparents the orphaned grandchild
+to PID 1 (`init` on Linux, `launchd` on macOS). A naive supervisor decides tree membership
+by walking the opener's parent-PID chain to the launched root; the re-parent severs that
+chain, and such a supervisor would wrongly conclude "not in the tree" and allow the read.
+The orphan is still the agent's own descendant — it has just shed its parent link.
 
-It can, however, *re-parent* itself. A process that **double-`fork()`s** — forks a child
-that immediately forks a grandchild and exits — leaves the grandchild orphaned, and the
-kernel reparents an orphan to PID 1 (`init` on Linux, `launchd` on macOS). Its parent-PID
-chain no longer leads back to the supervised root, so the ancestry walk concludes "not in
-the tree" and the read is **allowed**. Verified on Linux (kernel 6.12) under both
-`--protect` and `--deny-all`, and on macOS (Endpoint Security, macOS 26) under `--protect`.
-This is not the agent escaping *the machine* — the orphan is still the agent's own
-descendant — it is the ancestry-walk attribution being severed by a one-line `fork()` trick.
+Bulwark does **not** decide membership by the parent-chain walk alone. It records
+membership *at process-creation time*, by a label that survives re-parenting:
 
-**`--hardened` is immune, and is the answer for an adversarial or unattended agent.** The
-Landlock floor is a kernel ruleset bound to the agent's threads and **inherited by every
-descendant for life**, regardless of re-parenting — there is no parent chain to sever.
-Verified: the same double-fork read that leaks under `--protect` is denied under
-`--hardened` (`Permission denied`). If the agent is untrusted enough to try a deliberate
-escape, run it under `--hardened`, not the fanotify deny-list.
+- **Linux (`--protect` and `--deny-all`):** the supervised tree is launched into a
+  dedicated **cgroup-v2 scope**. A re-parented orphan keeps that cgroup (PID 1 lives in a
+  different one, e.g. `/init.scope`), and an unprivileged process cannot move itself out of
+  a root-owned cgroup — so the open is still attributed to the tree and gated. The
+  supervisor also keeps enforcing until the scope fully drains, so an orphan that outlives
+  the foreground process cannot win by racing teardown. Verified on the VM (kernel 6.12):
+  the double-fork read is **denied** under both modes.
+- **macOS (Endpoint Security):** the gate tracks the supervised PID set from
+  `NOTIFY_FORK`/`EXEC`/`EXIT` events, inserting each child *at fork time* — before it can
+  run or reparent — and decides `AUTH_OPEN` by set membership. The edge keeps enforcing
+  until the set drains to empty, so an orphan that outlives the foreground process is still
+  gated. Verified on hardware (macOS 26, Apple Silicon): the double-fork read is
+  **denied**.
+- **`--hardened` (Landlock)** was always immune: its kernel ruleset is inherited by every
+  descendant for life, with no parent chain to sever. It remains the strongest option for
+  an adversarial or unattended agent (it is also crash-safe; see below).
 
-**The fix in progress** is to stop attributing tree-membership by parent-PID walk and use
-**control-group membership** instead: a re-parented orphan keeps the run's cgroup, while
-`init` lives in a different one, so the membership test survives the double-fork. (Verified
-on the VM: an orphaned descendant retains the launch cgroup; PID 1 is in `/init.scope`; an
-unprivileged process cannot move itself out of a delegated cgroup.) Until that ships,
-`--hardened` is the structural answer and the deny-list/ES modes carry this documented
-limitation.
-
-macOS leaks for the same reason and has no Landlock-style floor to fall back on: the ES
-gate decides tree membership by walking the audit-token parent chain, which the re-parent
-severs identically. Confirmed on hardware (macOS 26, Apple Silicon) — the orphaned read
-returned the protected file. There is no macOS equivalent of `--hardened` today, so the
-cgroup-style attribution fix is the path for the ES gate as well.
+The ancestry walk is still used — but only as an *additive* fallback for a just-forked PID
+whose creation event has not yet been processed, never as the sole signal. Membership by
+cgroup (Linux) or tracked set (macOS) is what makes the boundary reparent-proof.
 
 ## The container case, precisely
 

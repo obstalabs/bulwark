@@ -41,6 +41,10 @@ mod hardened;
 #[path = "hardened_stub.rs"]
 mod hardened;
 
+// cgroup-v2 membership attribution is a Linux-only fanotify-gate support module.
+#[cfg(target_os = "linux")]
+mod cgroup;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "socket.rs"]
 mod socket;
