@@ -14,11 +14,50 @@ Apple Silicon), not asserted.
 | Symlink / rename / hardlink to a protected file | **denied** (by inode) | **denied** | **denied** | **denied** |
 | Bind-mount alias of a protected file | **denied** (`FAN_MARK_FILESYSTEM`) | **denied** | **denied** | **denied** |
 | Deep descendant (child of a child …) | **denied** | **denied** | **denied** | **denied** (PID ancestry) |
+| Deliberately-orphaned descendant (double-`fork()`, reparents to init) | **leaks** ⚠️ | **leaks** ⚠️ | **denied** | **leaks (expected)** ⚠️ |
 | Agent creating its own mount namespace (`unshare`) to escape | n/a | n/a | **blocked** (`no_new_privs`) | n/a |
 | Read delegated to a separate daemon (`docker run`) | **not gated** | **not gated** | **not gated** | **not gated** |
 | A process you did not launch under Bulwark | **not gated** | **not gated** | **not gated** | **not gated** |
 
-The last two rows are the same fact, and they are the honest edge of the design.
+The container/unwrapped-process rows are the same fact, and they are the honest edge of
+the *design*. The orphaned-descendant row is different: it is a current limitation of the
+*fanotify/ES attribution mechanism*, with a verified mitigation today (`--hardened`) and a
+fix in progress. The two are not the same kind of edge — see below.
+
+## The orphaned-descendant limitation (and how to avoid it today)
+
+The fanotify gate and the macOS ES gate decide whether an open belongs to the supervised
+tree by walking the opener's parent-PID chain (`/proc/<pid>/stat` on Linux, the audit
+token on macOS) up to the launched root. That walk is what makes a deep grandchild still
+gated — membership is by ancestry, which a process cannot forge by *renaming* itself.
+
+It can, however, *re-parent* itself. A process that **double-`fork()`s** — forks a child
+that immediately forks a grandchild and exits — leaves the grandchild orphaned, and the
+kernel reparents an orphan to `init` (PID 1). Its parent-PID chain no longer leads back to
+the supervised root, so the ancestry walk concludes "not in the tree" and the read is
+**allowed**. Verified on Linux (kernel 6.12) under both `--protect` and `--deny-all`. This
+is not the agent escaping *the machine* — the orphan is still the agent's own descendant —
+it is the ancestry-walk attribution being severed by a one-line `fork()` trick.
+
+**`--hardened` is immune, and is the answer for an adversarial or unattended agent.** The
+Landlock floor is a kernel ruleset bound to the agent's threads and **inherited by every
+descendant for life**, regardless of re-parenting — there is no parent chain to sever.
+Verified: the same double-fork read that leaks under `--protect` is denied under
+`--hardened` (`Permission denied`). If the agent is untrusted enough to try a deliberate
+escape, run it under `--hardened`, not the fanotify deny-list.
+
+**The fix in progress** is to stop attributing tree-membership by parent-PID walk and use
+**control-group membership** instead: a re-parented orphan keeps the run's cgroup, while
+`init` lives in a different one, so the membership test survives the double-fork. (Verified
+on the VM: an orphaned descendant retains the launch cgroup; PID 1 is in `/init.scope`; an
+unprivileged process cannot move itself out of a delegated cgroup.) Until that ships,
+`--hardened` is the structural answer and the deny-list/ES modes carry this documented
+limitation.
+
+The macOS cell is marked **expected** rather than hardware-verified: the macOS gate uses
+the same audit-token ancestry walk and has no Landlock-style floor, so the same re-parent
+severs it by construction — but it has not yet been run on hardware for this specific
+attack, so it is named as expected, not asserted as tested.
 
 ## The container case, precisely
 
