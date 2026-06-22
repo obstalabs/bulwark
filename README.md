@@ -186,6 +186,13 @@ held-read fail-open behaviour at the instant of a hard kill — that is what
   standard root-equivalent-socket boundary, not a Bulwark-specific gap. The agent's own
   attempt to escape into a new mount namespace *is* blocked under `--hardened`. Full
   tested matrix: [docs/containment-boundaries.md](docs/containment-boundaries.md).
+- **The fanotify/ES modes attribute by process ancestry, which a `fork()` can sever.** A
+  process that deliberately double-`fork()`s orphans itself to `init`, breaking the
+  parent-chain walk that decides tree membership, so the deny-list/allowlist modes stop
+  gating it. `--hardened` (Landlock) is immune — its kernel ruleset is inherited by every
+  descendant regardless of re-parenting — and is the mode to use for an adversarial or
+  unattended agent. A cgroup-membership fix for the fanotify modes is in progress. See
+  [docs/containment-boundaries.md](docs/containment-boundaries.md).
 - macOS support requires a signed Endpoint Security edge and **Full Disk Access** for
   the launching terminal (without it the gate cannot start). Why that's needed, how
   the gate is wired, and the common setup errors are in
