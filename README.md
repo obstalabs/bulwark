@@ -130,6 +130,13 @@ bulwark run --protect <path> -- <cmd>
 Not sure which mode fits, or wrapping an agent launcher so every run is confined?
 See [docs/modes-and-wrapping.md](docs/modes-and-wrapping.md).
 
+Tree membership is decided by control-group membership (Linux) or a process set
+tracked from kernel fork/exec/exit events (macOS), recorded when each process is
+created — not by walking the parent chain at read time. So a descendant that
+deliberately orphans itself with a double-`fork()` is still attributed to the
+tree and gated, rather than escaping by shedding its parent link. The tested
+matrix is in [docs/containment-boundaries.md](docs/containment-boundaries.md).
+
 ## Agent-operated, but the clamp is a ratchet
 
 Bulwark is built to be operated by an agent, not only a human: in a fleet, an
@@ -186,13 +193,6 @@ held-read fail-open behaviour at the instant of a hard kill — that is what
   standard root-equivalent-socket boundary, not a Bulwark-specific gap. The agent's own
   attempt to escape into a new mount namespace *is* blocked under `--hardened`. Full
   tested matrix: [docs/containment-boundaries.md](docs/containment-boundaries.md).
-- **The fanotify/ES modes attribute by process ancestry, which a `fork()` can sever.** A
-  process that deliberately double-`fork()`s orphans itself to `init`, breaking the
-  parent-chain walk that decides tree membership, so the deny-list/allowlist modes stop
-  gating it. `--hardened` (Landlock) is immune — its kernel ruleset is inherited by every
-  descendant regardless of re-parenting — and is the mode to use for an adversarial or
-  unattended agent. A cgroup-membership fix for the fanotify modes is in progress. See
-  [docs/containment-boundaries.md](docs/containment-boundaries.md).
 - macOS support requires a signed Endpoint Security edge and **Full Disk Access** for
   the launching terminal (without it the gate cannot start). Why that's needed, how
   the gate is wired, and the common setup errors are in
