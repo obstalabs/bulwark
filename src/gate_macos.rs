@@ -50,14 +50,41 @@ pub(crate) fn shutdown_requested() -> bool {
     false
 }
 
-/// Credentials to drop the supervised child to before exec. Same public surface
-/// as the Linux gate (the portable core builds against every backend), but the
-/// macOS Endpoint Security gate does not implement the drop yet — `run` refuses a
-/// `Some` rather than running the agent un-dropped.
+/// Credentials to drop the supervised child to before exec. The supervisor and
+/// the Endpoint Security edge stay root; only the agent child becomes
+/// unprivileged, so it cannot `SIGKILL` the edge and exploit the kernel's
+/// allow-while-no-subscriber window on edge death. Attribution is by audit-token
+/// PID ancestry, which the uid drop does not change.
 #[derive(Clone, Copy)]
 pub struct WorkerCreds {
     pub uid: u32,
     pub gid: u32,
+}
+
+/// Drop the calling process to `creds`, permanently, in the security-critical
+/// order: supplementary groups, then gid, then uid. Returns `Err` on any failure
+/// — the caller MUST NOT exec if this fails. Runs in the forked child before
+/// exec, so it uses only raw libc calls (no allocation, no panics). Mirrors the
+/// Linux gate's `drop_to`.
+///
+/// # Safety
+/// Must be called in the child between `fork()` and `execvp()`.
+unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
+    let groups = [creds.gid as libc::gid_t];
+    if libc::setgroups(1, groups.as_ptr()) != 0 {
+        return Err(libc::EPERM);
+    }
+    if libc::setgid(creds.gid as libc::gid_t) != 0 {
+        return Err(libc::EPERM);
+    }
+    if libc::setuid(creds.uid as libc::uid_t) != 0 {
+        return Err(libc::EPERM);
+    }
+    // The drop must be permanent: regaining root must now fail.
+    if libc::setuid(0) == 0 {
+        return Err(libc::EPERM);
+    }
+    Ok(())
 }
 
 pub fn run(
@@ -73,10 +100,10 @@ pub fn run(
     if unsafe { libc::geteuid() } != 0 {
         bail!("macOS Endpoint Security gate must run as root");
     }
-    if worker.is_some() {
-        // Honest refusal: the privilege drop is implemented + verified only on the
-        // Linux fanotify gate. Don't run the agent un-dropped on macOS.
-        bail!("--worker-uid is not yet supported on the macOS Endpoint Security gate");
+    if let Some(w) = worker {
+        if w.uid == 0 {
+            bail!("worker uid 0 is not a privilege drop");
+        }
     }
 
     let policy = match mode {
@@ -101,7 +128,7 @@ pub fn run(
     ensure_executable(&edge)?;
 
     let temp = GateTemp::new()?;
-    let child = spawn_stopped(command)?;
+    let child = spawn_stopped(command, worker)?;
     let child_pid = child.pid;
     wait_until_stopped(child_pid).with_context(|| {
         let _ = kill_pid(child_pid, libc::SIGKILL);
@@ -127,10 +154,18 @@ pub fn run(
         return Err(err);
     }
 
-    eprintln!(
-        "[bulwark] macOS ES gate live: supervising pid {child_pid}: {}",
-        command.join(" ")
-    );
+    match worker {
+        Some(w) => eprintln!(
+            "[bulwark] macOS ES gate live: supervising pid {child_pid} (uid={} gid={}): {}",
+            w.uid,
+            w.gid,
+            command.join(" ")
+        ),
+        None => eprintln!(
+            "[bulwark] macOS ES gate live: supervising pid {child_pid}: {}",
+            command.join(" ")
+        ),
+    }
     kill_pid(child_pid, libc::SIGCONT).context("resume supervised child")?;
     let code = supervise(child_pid, &mut edge_child)?;
     terminate_edge(&mut edge_child)?;
@@ -371,7 +406,7 @@ struct StoppedChild {
     pid: libc::pid_t,
 }
 
-fn spawn_stopped(command: &[String]) -> Result<StoppedChild> {
+fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<StoppedChild> {
     let prog = CString::new(command[0].as_bytes())?;
     let argv: Vec<CString> = command
         .iter()
@@ -386,7 +421,17 @@ fn spawn_stopped(command: &[String]) -> Result<StoppedChild> {
     }
     if pid == 0 {
         unsafe {
+            // Stop so the edge can subscribe by this PID before the command runs.
             libc::raise(libc::SIGSTOP);
+            // Resumed (SIGCONT) only once the edge is live. Drop privileges now —
+            // after the edge is attributing this PID, before exec — so the agent
+            // runs unprivileged and cannot kill the root edge. A failed drop must
+            // never exec the agent half-dropped.
+            if let Some(creds) = worker {
+                if drop_to(creds).is_err() {
+                    libc::_exit(126);
+                }
+            }
             libc::execvp(prog.as_ptr(), argv_ptr.as_ptr());
             libc::_exit(127);
         }

@@ -73,11 +73,13 @@ sudo bulwark run --protect <path> -- <agent>
   cannot forge. (See [docs/containment-boundaries.md](containment-boundaries.md).)
 - **No system extension is installed.** The gate is a normal (privileged) process.
   Recovery is just `sudo pkill bulwark_es_gate` — there is no OS state to clean up.
-- **Crash posture (honest):** if the ES edge dies mid-run, enforcement stops (the
-  kernel releases its AUTH_OPEN subscription) until the agent exits. macOS has no
-  Landlock-style floor, so unlike Linux `--hardened`, a killed gate fails *open* for
-  an already-running agent. See [docs/macos.md](macos.md) for the full crash-posture
-  discussion.
+- **Crash posture (honest):** if the ES edge dies mid-run, the kernel releases its
+  AUTH_OPEN subscription and opens are allowed in the brief window before the
+  supervisor reaps the tree — macOS has no Landlock-style floor, so unlike Linux
+  `--hardened`, a killed gate fails *open*. The agent cannot trigger this itself:
+  by default it runs unprivileged (dropped to the invoking user) and cannot kill the
+  root edge; only an *external* root process can race that window. See
+  [docs/macos.md](macos.md) for the full crash-posture discussion.
 
 ## Common problems → what they mean
 

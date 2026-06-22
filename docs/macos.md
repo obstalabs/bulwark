@@ -19,13 +19,26 @@ system extension is installed; recovery is `sudo pkill bulwark_es_gate`.
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,
 `--hardened` installs a Landlock LSM floor that the kernel enforces on the agent
 process itself — if the supervisor dies, the restriction remains. **macOS has no
-Landlock analog.** If the Endpoint Security edge dies (crash, kill, panic),
-enforcement is gone: the kernel releases its `AUTH_OPEN` subscription and the
-supervised tree's reads are no longer gated. The Rust launcher SIGKILLs the
-supervised child if the edge fails to come ready, but a mid-run edge death leaves
-the already-running agent ungated until it exits. This gap is inherent to the ES
-interface and is documented rather than hidden; a kernel-enforced macOS floor is
-not currently available.
+Landlock analog.** If the Endpoint Security edge dies (crash, kill, panic), the
+kernel releases its `AUTH_OPEN` subscription and, for a brief window before the
+supervisor reaps the tree, opens by the agent are **allowed** (the kernel
+default-allows when no ES client is subscribed). The supervisor watches the edge
+and SIGKILLs the supervised tree the instant it sees the edge exit, but that
+detection is not instantaneous, so a determined external killer can race that
+window.
+
+**What is closed: the agent cannot trigger this itself.** By default a would-be-root
+agent is dropped to the invoking user (see below), and an unprivileged agent
+**cannot** `SIGKILL` the root edge — so it cannot open the fail-open window on its
+own. Verified on macOS 26: an unprivileged supervised agent's `kill -9` of the edge
+returns `Operation not permitted`, and the protected read stays denied. The residual
+is an **external** root process killing the edge, which is outside the agent's reach
+(a host with a hostile root process is already compromised by any measure). Keep the
+agent unprivileged (the default; `--allow-root` opts out) so this stays closed, and
+prefer an unattended/CI agent that does not need root at all.
+
+This gap is inherent to the ES interface — there is no kernel-enforced macOS floor
+today — and is documented rather than hidden.
 
 ## Build the CLI and ES edge
 

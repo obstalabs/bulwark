@@ -1548,37 +1548,42 @@ fn consent_mode_for_agent_decision(decision: AgentDecision) -> ConsentMode {
 ///   `None` (the agent already runs unprivileged);
 /// - if we were invoked via `sudo` (`SUDO_UID` set to a non-root user), drop the
 ///   agent to that user — the common, least-surprising case: the agent runs as
-///   *you*, not root, and cannot migrate cgroups;
+///   *you*, not root, and cannot reach the platform's root-only evasion;
 /// - otherwise (genuine root with no sudo origin) we have no safe uid to pick, so
 ///   warn loudly and proceed at uid 0 rather than break a legitimately-root host.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn root_default_worker() -> Result<Option<gate::WorkerCreds>> {
+    // Platform-specific reason a root agent is unsafe (same fix: drop the uid).
+    #[cfg(target_os = "linux")]
+    let why_long = "a root agent with CAP_SYS_ADMIN can remount cgroupfs to leave the \
+                    scope and evade the gate";
+    #[cfg(target_os = "macos")]
+    let why_long = "a root agent can SIGKILL the Endpoint Security edge, and the kernel \
+                    allows opens in the brief window before the supervisor reaps it";
+
     let euid = unsafe { libc::geteuid() };
     if euid != 0 {
         return Ok(None);
     }
 
-    // Prefer the invoking user from sudo.
+    // Prefer the invoking user from sudo. Success is the safe, expected path, so
+    // it is SILENT — the effective uid still appears in the gate's startup line
+    // and in every receipt. Only the case where we CANNOT drop is worth a warning.
     let sudo_uid = std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok());
     let sudo_gid = std::env::var("SUDO_GID").ok().and_then(|s| s.parse().ok());
     if let Some(uid) = sudo_uid {
         if uid != 0 {
             let gid = sudo_gid.unwrap_or(uid);
-            eprintln!(
-                "[bulwark] agent would run as root; dropping it to the invoking user \
-                 (uid={uid} gid={gid}) so it cannot migrate out of the cgroup scope. \
-                 Pass --allow-root to keep uid 0, or --worker-uid <uid> to choose."
-            );
             return Ok(Some(gate::WorkerCreds { uid, gid }));
         }
     }
 
-    // Genuine root with no sudo origin: no safe uid to pick.
+    // Genuine root with no sudo origin: no safe uid to pick. THIS is the loud
+    // case — the protection is not in effect, the operator needs to know.
     eprintln!(
-        "[bulwark] WARNING: the supervised agent runs as root (uid 0) and a root agent \
-         with CAP_SYS_ADMIN can remount cgroupfs to leave the scope and evade the gate. \
-         For an untrusted agent use --worker-uid <uid> (drop privilege) or --hardened \
-         (Landlock). Pass --allow-root to silence this and keep uid 0 deliberately."
+        "[bulwark] WARNING: the supervised agent runs as root (uid 0) and {why_long}. \
+         For an untrusted agent use --worker-uid <uid> (drop privilege) or --hardened. \
+         Pass --allow-root to silence this and keep uid 0 deliberately."
     );
     Ok(None)
 }
@@ -1636,20 +1641,24 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
     // resolve the optional worker credentials once, up front, so every
     // forking gate path drops the child the same way. Validation fails the run
     // before any integrity state is written.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(unused_mut))]
     let mut worker = resolve_worker_creds(args.worker_uid, args.worker_gid)?;
 
-    // Root-agent safety: a supervised agent left at uid 0 with CAP_SYS_ADMIN can
-    // migrate out of the cgroup scope (remount cgroupfs) and evade the gate. If
-    // no explicit worker drop was requested and the operator did not pass
+    // Root-agent safety. A supervised agent left at uid 0 can evade the gate,
+    // differently per platform but with the same fix (drop it to a non-root uid):
+    //   - Linux: a root agent with CAP_SYS_ADMIN can remount cgroupfs and migrate
+    //     out of the supervised cgroup scope.
+    //   - macOS: a root agent can SIGKILL the Endpoint Security edge; the kernel
+    //     then allows opens in the brief window before the supervisor reaps it
+    //     (fail-open on edge death). An unprivileged agent cannot kill the root
+    //     edge, so it cannot reach that window.
+    // If no explicit worker drop was requested and the operator did not pass
     // --allow-root, drop a would-be-root agent to the invoking user where we can.
-    // (Linux only; macOS tracks membership in the gate's memory, not a writable
-    // filesystem, so the migration class does not exist there.)
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if worker.is_none() && !args.allow_root {
         worker = root_default_worker()?;
     }
-    let _ = args.allow_root; // consumed only on Linux; keep the field live elsewhere
+    let _ = args.allow_root; // consumed only on unix; keep the field live elsewhere
 
     // Allow-list (CI) mode: default-deny, allow only the grants + runtime base.
     // Non-interactive — there is no consent provider. Mark every mounted

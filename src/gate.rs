@@ -176,10 +176,18 @@ pub fn run(
     // root and holds the fanotify fd; `worker` drops only the agent child. The
     // child joins the cgroup scope (if any) before exec, while still root.
     let child = spawn(command, worker, scope.as_ref())?;
-    if let Some(w) = worker {
-        eprintln!("[bulwark] worker dropped to uid={} gid={}", w.uid, w.gid);
+    // The effective uid is shown inline on the supervising line (no separate
+    // drop banner) — so the auto-drop success path adds no extra noise, while the
+    // uid in effect stays visible for every run.
+    match worker {
+        Some(w) => eprintln!(
+            "[bulwark] supervising pid {child} (uid={} gid={}): {}",
+            w.uid,
+            w.gid,
+            command.join(" ")
+        ),
+        None => eprintln!("[bulwark] supervising pid {child}: {}", command.join(" ")),
     }
-    eprintln!("[bulwark] supervising pid {child}: {}", command.join(" "));
 
     // Event loop: answer permission events until the child exits.
     let exit_code = event_loop(&fan, child, &mut log, mode, scope.as_ref())?;
