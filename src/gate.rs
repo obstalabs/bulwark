@@ -159,16 +159,30 @@ pub fn run(
         bail!("allow-list: could not mark any filesystem — cannot enforce default-deny");
     }
 
+    // Create a dedicated cgroup-v2 scope for the supervised tree. Membership in
+    // it is reparent-proof: a process that double-fork()s to escape the parent
+    // chain still carries the scope, so it stays attributed to the tree. Falls
+    // back to the ancestry walk where cgroup-v2 is unavailable.
+    let scope = crate::cgroup::CgroupScope::create(std::process::id() as i32);
+    match &scope {
+        Some(_) => eprintln!("[bulwark] tree attribution: cgroup-v2 membership (reparent-proof)"),
+        None => eprintln!(
+            "[bulwark] note: cgroup-v2 scope unavailable; tree attribution falls back to \
+             process-ancestry (a deliberately-orphaned descendant may escape — use --hardened)"
+        ),
+    }
+
     // Fork + exec the supervised command. The supervisor (this process) stays
-    // root and holds the fanotify fd; `worker` drops only the agent child.
-    let child = spawn(command, worker)?;
+    // root and holds the fanotify fd; `worker` drops only the agent child. The
+    // child joins the cgroup scope (if any) before exec, while still root.
+    let child = spawn(command, worker, scope.as_ref())?;
     if let Some(w) = worker {
         eprintln!("[bulwark] worker dropped to uid={} gid={}", w.uid, w.gid);
     }
     eprintln!("[bulwark] supervising pid {child}: {}", command.join(" "));
 
     // Event loop: answer permission events until the child exits.
-    let exit_code = event_loop(&fan, child, &mut log, mode)?;
+    let exit_code = event_loop(&fan, child, &mut log, mode, scope.as_ref())?;
     Ok(exit_code)
 }
 
@@ -281,9 +295,15 @@ fn event_loop(
     child: libc::pid_t,
     log: &mut ReceiptLog,
     mut mode: GateMode,
+    scope: Option<&crate::cgroup::CgroupScope>,
 ) -> Result<i32> {
     const BUF_LEN: usize = 8192;
     let mut buf = [0u8; BUF_LEN];
+
+    // Once the foreground child is reaped we record its code but keep enforcing
+    // until the cgroup scope drains (orphaned double-fork descendants). `None`
+    // until the foreground child exits; `Some(code)` while draining the rest.
+    let mut foreground_exit: Option<i32> = None;
 
     loop {
         // Graceful shutdown requested (SIGTERM/SIGINT/SIGHUP): deny every
@@ -320,12 +340,28 @@ fn event_loop(
                 }
                 return Err(anyhow!(err)).context("read fanotify");
             }
-            handle_events(fan, &buf[..n as usize], child, log, &mut mode);
+            handle_events(fan, &buf[..n as usize], child, log, &mut mode, scope);
         }
 
-        // Reap the child if it has exited.
-        if let Some(code) = try_wait(child)? {
-            return Ok(code);
+        // Reap the foreground child once (a second waitpid would return ECHILD).
+        // Its exit is not the end of the tree: a process that double-fork()s
+        // leaves an orphan (reparented to init) that may still read after its
+        // parent is gone. We keep the gate enforcing until the cgroup scope
+        // drains — otherwise the canonical double-fork attack wins by racing the
+        // supervisor's teardown.
+        if foreground_exit.is_none() {
+            if let Some(code) = try_wait(child)? {
+                foreground_exit = Some(code);
+            }
+        }
+
+        if let Some(code) = foreground_exit {
+            // Foreground gone. Exit only once no orphan remains in the scope.
+            // Without a cgroup scope we have no drain signal, so exit as before.
+            match scope {
+                Some(s) if s.is_populated() => { /* orphan alive: keep enforcing */ }
+                _ => return Ok(code),
+            }
         }
     }
 }
@@ -400,6 +436,7 @@ fn handle_events(
     child: libc::pid_t,
     log: &mut ReceiptLog,
     mode: &mut GateMode,
+    scope: Option<&crate::cgroup::CgroupScope>,
 ) {
     let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut offset = 0usize;
@@ -416,7 +453,7 @@ fn handle_events(
         }
 
         if meta.mask & libc::FAN_OPEN_PERM != 0 && meta.fd >= 0 {
-            decide(fan, &meta, child, log, mode);
+            decide(fan, &meta, child, log, mode, scope);
         }
         if meta.fd >= 0 {
             unsafe {
@@ -440,6 +477,7 @@ fn decide(
     child: libc::pid_t,
     log: &mut ReceiptLog,
     mode: &mut GateMode,
+    scope: Option<&crate::cgroup::CgroupScope>,
 ) {
     let pid = meta.pid;
     let (key, path) = match inode_of_fd(meta.fd) {
@@ -452,7 +490,18 @@ fn decide(
         }
     };
 
-    let in_tree = proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH);
+    // Tree membership decides whether this open is ours to judge. Prefer cgroup
+    // membership: it is reparent-proof, so a process that double-fork()s to
+    // orphan itself past the ancestry walk is still attributed to the tree.
+    // Where no cgroup scope exists, fall back to the ancestry walk. The two are
+    // OR'd so the cgroup result can only *add* members the walk would miss — a
+    // reparented orphan whose ppid chain no longer reaches the root.
+    let in_tree = match scope {
+        Some(s) => {
+            s.contains(pid) || proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH)
+        }
+        None => proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
+    };
 
     // Opens from outside the supervised tree are never judged — Bulwark only
     // governs the tree it launched.
@@ -616,7 +665,11 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
 /// Fork and exec the command, returning the child pid. When `worker` is `Some`,
 /// the child drops to those credentials before exec (the supervisor parent stays
 /// root). A failed drop exits the child 126 — never execs the agent half-dropped.
-fn spawn(command: &[String], worker: Option<WorkerCreds>) -> Result<libc::pid_t> {
+fn spawn(
+    command: &[String],
+    worker: Option<WorkerCreds>,
+    scope: Option<&crate::cgroup::CgroupScope>,
+) -> Result<libc::pid_t> {
     let prog = CString::new(command[0].as_bytes())?;
     let argv: Vec<CString> = command
         .iter()
@@ -625,13 +678,28 @@ fn spawn(command: &[String], worker: Option<WorkerCreds>) -> Result<libc::pid_t>
     let mut argv_ptr: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     argv_ptr.push(std::ptr::null());
 
+    // The cgroup.procs path, resolved before fork so the child uses only the
+    // pre-built CString (no allocation in the post-fork path).
+    let procs = scope.map(|s| s.procs_path());
+
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(anyhow!(std::io::Error::last_os_error())).context("fork");
     }
     if pid == 0 {
-        // Child: drop privileges (if requested), then exec the target.
+        // Child: join the cgroup scope (while still root), drop privileges (if
+        // requested), then exec the target. Order is load-bearing: the cgroup
+        // write needs privilege, and membership must be established before exec
+        // so the agent — and anything it later orphans — is already in the scope.
         unsafe {
+            if let Some(p) = procs {
+                if crate::cgroup::join_self(p).is_err() {
+                    // Fail closed: if we cannot place the child in the scope, the
+                    // reparent-proof attribution would silently not apply — refuse
+                    // to run rather than enforce with a hole the operator can't see.
+                    libc::_exit(125);
+                }
+            }
             if let Some(creds) = worker {
                 if drop_to(creds).is_err() {
                     // Fail closed: a botched/partial drop must never run the agent.
