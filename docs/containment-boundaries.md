@@ -24,6 +24,34 @@ the *design*: a process Bulwark did not launch, or work handed to a separate dae
 outside the tree it governs. Everything *inside* the launched tree is gated — including a
 descendant that deliberately orphans itself, which is what the next section is about.
 
+## Evasion coverage (tested on real hardware)
+
+Tree membership is the load-bearing decision, so the ways an agent might try to *shed* its
+membership are worth enumerating. Each row below was reproduced as a working attack and
+then verified denied — not asserted. `n/a` marks a technique that does not apply to that
+platform (e.g. cgroups are Linux-only).
+
+| Escape attempt | Linux | macOS |
+|---|---|---|
+| Double-`fork()` / reparent to init (`launchd`) | **deny** | **deny** |
+| Sub-cgroup move (`mkdir` child cgroup, join it) + double-fork | **deny** | n/a |
+| cgroup-namespace + reparent | **deny** | n/a |
+| Mount-namespace + reparent | **deny** | n/a |
+| `setsid` (new session) + reparent | **deny** | **deny** |
+| Triple / nested fork | **deny** | **deny** |
+| Orphan that outlives the foreground process (delayed read) | **deny** | **deny** |
+| Many concurrent orphans | **deny** | **deny** |
+| `exec` a new binary after fork | **deny** | **deny** |
+| Scope-name squatting (occupy the predictable cgroup path) | **deny** | n/a |
+| symlink / rename / hardlink to the protected inode | **deny** | **deny** |
+| `/proc/self/root`, `/proc/self/cwd` path aliases | **deny** | n/a |
+
+Every cell was reproduced as a working attack and then verified denied on the relevant
+hardware (Linux kernel 6.12; macOS 26 on Apple Silicon) — not asserted.
+
+The mechanism behind these denials — recording membership at process creation rather than
+reconstructing it by ancestry at read time — is described next.
+
 ## Orphaned descendants: gated by membership, not by ancestry
 
 A process can try to escape the gate by **double-`fork()`ing** — forking a child that
