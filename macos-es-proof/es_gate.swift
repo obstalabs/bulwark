@@ -431,7 +431,56 @@ func receiptLine(
     """
 }
 
+// The supervised process set. The ES message handler can be invoked
+// concurrently, so every read/insert/remove goes through `treeLock` — otherwise
+// a fork-insert can race an unrelated event and be lost, which would drop a
+// reparented orphan from the set and reopen the double-fork bypass.
 var supervisedPids = Set<pid_t>([config.rootPid])
+var treeLock = os_unfair_lock()
+
+@inline(__always) func treeContains(_ pid: pid_t) -> Bool {
+    os_unfair_lock_lock(&treeLock)
+    defer { os_unfair_lock_unlock(&treeLock) }
+    return supervisedPids.contains(pid)
+}
+@inline(__always) func treeInsert(_ pids: pid_t...) {
+    os_unfair_lock_lock(&treeLock)
+    defer { os_unfair_lock_unlock(&treeLock) }
+    for p in pids { supervisedPids.insert(p) }
+}
+/// Remove a pid and report whether the supervised tree is now fully drained
+/// (no members remain). Draining is how we know an orphaned double-fork()
+/// descendant — which outlives the foreground child — has finally exited.
+@inline(__always) func treeRemoveAndDrained(_ pid: pid_t) -> Bool {
+    os_unfair_lock_lock(&treeLock)
+    defer { os_unfair_lock_unlock(&treeLock) }
+    supervisedPids.remove(pid)
+    return supervisedPids.isEmpty
+}
+@inline(__always) func treeIsEmpty() -> Bool {
+    os_unfair_lock_lock(&treeLock)
+    defer { os_unfair_lock_unlock(&treeLock) }
+    return supervisedPids.isEmpty
+}
+
+// Serializes drain-exit handling. The ES handler may be invoked concurrently, so
+// a NOTIFY_EXIT that empties the set could, in principle, be processed before a
+// causally-prior NOTIFY_FORK of an orphan. We never exit on the first empty
+// observation: we re-check after a short grace, by which time any in-flight fork
+// insert has landed. The set can only be empty after root_pid's own EXIT (root
+// is a member from the start), so this only ever fires at genuine teardown.
+let drainQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.drain")
+let drainGrace: DispatchTimeInterval = .milliseconds(100)
+func scheduleDrainExit() {
+    drainQueue.asyncAfter(deadline: .now() + drainGrace) {
+        if treeIsEmpty() {
+            exit(0)
+        }
+        // Not empty after the grace — an orphan was recorded; keep enforcing.
+        // Its eventual EXIT will reschedule this check.
+    }
+}
+
 var allowOnce = config.allowOnce
 var client: OpaquePointer?
 
@@ -443,28 +492,41 @@ let res = es_new_client(&client) { clientPtr, message in
     case ES_EVENT_TYPE_NOTIFY_FORK:
         let child = msg.event.fork.child.pointee
         let childPid = pidFromAuditToken(child.audit_token)
-        if supervisedPids.contains(eventPid) || hasAncestor(eventPid, root: config.rootPid) {
-            supervisedPids.insert(eventPid)
-            supervisedPids.insert(childPid)
+        // Insert the child AT FORK TIME, before it can run or reparent. Recording
+        // membership at creation (not reconstructing it by ancestry at open time)
+        // is what survives a double-fork: the orphan stays in the set even after
+        // it reparents to launchd and its parent chain no longer reaches root.
+        if treeContains(eventPid) || hasAncestor(eventPid, root: config.rootPid) {
+            treeInsert(eventPid, childPid)
         }
         return
 
     case ES_EVENT_TYPE_NOTIFY_EXEC:
-        if supervisedPids.contains(eventPid) || hasAncestor(eventPid, root: config.rootPid) {
-            supervisedPids.insert(eventPid)
+        if treeContains(eventPid) || hasAncestor(eventPid, root: config.rootPid) {
+            treeInsert(eventPid)
         }
         return
 
     case ES_EVENT_TYPE_NOTIFY_EXIT:
-        supervisedPids.remove(eventPid)
+        // When the supervised tree drains to empty, every member — including any
+        // orphaned double-fork() descendant — has exited. Only then is teardown
+        // safe. We do not exit immediately on the first empty observation:
+        // schedule a re-checked drain-exit after a short grace, so a concurrently
+        // dispatched orphan FORK that has not yet landed cannot be raced past.
+        if treeRemoveAndDrained(eventPid) {
+            scheduleDrainExit()
+        }
         return
 
     case ES_EVENT_TYPE_AUTH_OPEN:
         let file = msg.event.open.file
         let key = inodeKey(file)
-        let treeHit = supervisedPids.contains(eventPid) || hasAncestor(eventPid, root: config.rootPid)
+        // Membership-set first (reparent-proof), ancestry walk only as an
+        // additive fallback for a pid we have not yet seen fork (e.g. the very
+        // first opens before its NOTIFY_FORK is processed).
+        let treeHit = treeContains(eventPid) || hasAncestor(eventPid, root: config.rootPid)
         if treeHit {
-            supervisedPids.insert(eventPid)
+            treeInsert(eventPid)
         }
 
         let allow: Bool

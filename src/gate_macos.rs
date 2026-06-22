@@ -426,13 +426,38 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
 }
 
 fn supervise(child_pid: libc::pid_t, edge: &mut Child) -> Result<i32> {
+    // The foreground child exiting is NOT the end of the supervised tree: a
+    // process that double-fork()s leaves an orphan (reparented to launchd) that
+    // may still read after its parent is gone. The ES edge tracks the whole tree
+    // and self-exits (status 0) only once it drains to empty — every member,
+    // orphan included, has fired NOTIFY_EXIT. So we keep the edge running past
+    // the foreground child's exit and tear down only when the edge itself exits;
+    // otherwise the canonical double-fork attack wins by racing teardown.
+    let mut foreground_code: Option<i32> = None;
     loop {
         if let Some(status) = edge.try_wait().context("poll ES edge")? {
-            let _ = kill_pid(child_pid, libc::SIGKILL);
-            bail!("ES edge exited while child was running: {status}");
+            // Edge exited. Reap the child one last time first: with no orphan, the
+            // child and the edge exit almost simultaneously (child exits -> ES
+            // delivers its NOTIFY_EXIT -> edge drains -> edge exits), so the child
+            // may be a zombie we have not yet collected this iteration. Only if
+            // the child is genuinely still running did the edge die unexpectedly.
+            if foreground_code.is_none() {
+                foreground_code = try_wait(child_pid)?;
+            }
+            match foreground_code {
+                Some(code) => return Ok(code),
+                None => {
+                    let _ = kill_pid(child_pid, libc::SIGKILL);
+                    bail!("ES edge exited while child was running: {status}");
+                }
+            }
         }
-        if let Some(code) = try_wait(child_pid)? {
-            return Ok(code);
+        if foreground_code.is_none() {
+            if let Some(code) = try_wait(child_pid)? {
+                // Record the foreground exit code but keep the edge alive so it
+                // can drain any orphaned descendants before we collect it.
+                foreground_code = Some(code);
+            }
         }
         thread::sleep(EDGE_POLL_INTERVAL);
     }
