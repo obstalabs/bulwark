@@ -169,11 +169,7 @@ pub unsafe fn join_self(procs_cstr: &CString) -> std::result::Result<(), i32> {
     if fd < 0 {
         return Err(errno());
     }
-    let written = libc::write(
-        fd,
-        buf.as_ptr().add(i) as *const libc::c_void,
-        len,
-    );
+    let written = libc::write(fd, buf.as_ptr().add(i) as *const libc::c_void, len);
     libc::close(fd);
     if written < 0 || written as usize != len {
         return Err(errno());

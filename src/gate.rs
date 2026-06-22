@@ -497,9 +497,7 @@ fn decide(
     // OR'd so the cgroup result can only *add* members the walk would miss — a
     // reparented orphan whose ppid chain no longer reaches the root.
     let in_tree = match scope {
-        Some(s) => {
-            s.contains(pid) || proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH)
-        }
+        Some(s) => s.contains(pid) || proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
         None => proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
     };
 
