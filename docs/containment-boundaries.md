@@ -46,9 +46,19 @@ platform (e.g. cgroups are Linux-only).
 | Root agent migrates out of the cgroup scope (`cgroup.procs` / remount) | **deny** † | n/a |
 | symlink / rename / hardlink to the protected inode | **deny** | **deny** |
 | `/proc/self/root`, `/proc/self/cwd` path aliases | **deny** | n/a |
+| `open_by_handle_at` (open by file handle, `CAP_DAC_READ_SEARCH`) | **deny** | n/a |
+| io_uring `openat2` direct descriptor + `read` fixed-file | **deny** | n/a |
+| Descriptor passed in from a cooperating **outside** process (`SCM_RIGHTS`) | **leak** ‡ | n/a ‡ |
 
 Every cell was reproduced as a working attack and then verified denied on the relevant
 hardware (Linux kernel 6.12; macOS 26 on Apple Silicon) — not asserted.
+
+**‡** A read on a descriptor opened *outside* the supervised tree and passed in has no
+`open()` for the gate to see. It requires a cooperating outside process that already has the
+secret — the agent cannot reach it alone (if it spawns the sender, the sender's open is
+gated). `--hardened` (Landlock) denies it. See *Reads that never call `open()`* below. On
+macOS the same boundary applies; closing the inherited-fd `mmap` variant is tracked
+separately.
 
 **†** Denied by default because a would-be-root agent is dropped to an unprivileged uid (see
 *Root agents and cgroup migration* below), and an unprivileged process cannot migrate
@@ -147,6 +157,30 @@ So Bulwark does not pretend to. Instead it makes the safe path the default:
 macOS is unaffected: its membership set lives in the gate's own memory (built from kernel
 fork/exec/exit events), not a filesystem the agent can write, so there is nothing to
 migrate.
+
+## Reads that never call `open()` — a passed-in file descriptor
+
+Bulwark gates the `open()`. A read that never opens the file in the supervised tree has no
+event to gate. The realistic instance is a **descriptor passed in from outside**: a process
+Bulwark did **not** launch opens the protected file (it has its own access to it) and hands
+the live fd to the supervised tree over a Unix socket (`SCM_RIGHTS`); the agent then reads
+the bytes with `read`/`pread`/`mmap`/`splice` without ever calling `open()` itself.
+
+This is the same boundary as the container/unwrapped-process case, seen from the fd angle:
+it requires a **cooperating process outside the tree that already has the secret**. The
+agent cannot reach it alone — if the agent spawns the sender, the sender is *in* the tree
+and its `open()` is gated, so it never obtains a descriptor to pass (verified: the in-tree
+sender's open is denied). And `--hardened` closes it outright: the Landlock floor binds the
+agent's own credential, so a read on any descriptor — however obtained — is denied unless it
+is in the allowlist (verified). Tested matrix: deny-list **leaks** to a passed-in fd from a
+cooperating outside process; `--hardened` **denies** it; agent-spawns-the-sender **denies**
+it. Treat fd-passing across the tree boundary the same way you treat the Docker socket:
+don't hand a confined agent a live descriptor to something it shouldn't read.
+
+(For completeness: an inode opened with `open_by_handle_at`, io_uring's `openat2` direct
+descriptors, and a renamed/hardlinked/bind-mounted path are all **gated** — they still issue
+an open the kernel reports, and Bulwark decides by inode, so the indirection does not help.
+Verified on kernel 6.12.)
 
 ## Why `--hardened` is strictly stronger (for what the agent does itself)
 
