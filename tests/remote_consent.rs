@@ -87,7 +87,14 @@ fn remote_split_denies_then_caches_allow_session() {
         out = agent_out.display(),
     );
     let status = Command::new(bin())
-        .args(["run", "--consent", "remote", "--host-label", "test"])
+        .args([
+            "run",
+            "--allow-root",
+            "--consent",
+            "remote",
+            "--host-label",
+            "test",
+        ])
         .arg("--prompt-out")
         .arg(&prompts)
         .arg("--verdict-in")

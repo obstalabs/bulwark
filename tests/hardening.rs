@@ -49,7 +49,7 @@ fn bind_mount_alias_is_gated() {
     assert!(mount.success(), "bind mount setup failed");
 
     let out = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--")
         .arg("cat")
@@ -85,7 +85,13 @@ fn graceful_sigterm_denies_held_read() {
         agent_read.display()
     );
     let mut child = Command::new(bin())
-        .args(["run", "--consent", "socket", "--consent-socket"])
+        .args([
+            "run",
+            "--allow-root",
+            "--consent",
+            "socket",
+            "--consent-socket",
+        ])
         .arg(&sock)
         .args(["--consent-timeout", "30", "--protect"])
         .arg(&secret)
@@ -121,7 +127,7 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     fs::write(&public, "public-ok\n").unwrap();
 
     let denied = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--")
         .arg("cat")
@@ -134,7 +140,7 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     );
 
     let allowed = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--")
         .arg("cat")
