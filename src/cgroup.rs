@@ -54,13 +54,42 @@ impl CgroupScope {
             return None;
         }
 
-        let name = format!("bulwark.run-{supervisor_pid}");
-        let dir = root.join(&name);
-        // A stale dir from a crashed prior run with the same pid is unlikely but
-        // possible; remove it if empty, then (re)create.
-        let _ = fs::remove_dir(&dir);
-        if fs::create_dir(&dir).is_err() {
-            // No permission to create a scope (not root, or delegation denied).
+        // Find a free scope name and create it atomically with `create_dir`
+        // (which fails if the path already exists). We do NOT reuse or rmdir an
+        // existing directory: an occupied `bulwark.run-<pid>` must not silently
+        // downgrade us to the ancestry-only fallback (that would let anyone able
+        // to pre-create the predictable path disable reparent-proof attribution).
+        // Instead we pick the next free `bulwark.run-<pid>-<n>` — so a squatted
+        // name costs the attacker nothing and changes nothing.
+        let mut dir = PathBuf::new();
+        let mut name = String::new();
+        let mut created = false;
+        for n in 0..64 {
+            let candidate = if n == 0 {
+                format!("bulwark.run-{supervisor_pid}")
+            } else {
+                format!("bulwark.run-{supervisor_pid}-{n}")
+            };
+            let path = root.join(&candidate);
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    name = candidate;
+                    dir = path;
+                    created = true;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Name taken (stale run or a squatter) — try the next.
+                    continue;
+                }
+                Err(_) => {
+                    // No permission to create a scope (not root, or delegation
+                    // denied). Genuine no-cgroup host → fall back.
+                    return None;
+                }
+            }
+        }
+        if !created {
             return None;
         }
 
