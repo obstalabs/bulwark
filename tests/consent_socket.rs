@@ -43,14 +43,20 @@ fn scenario(tag: &str, verdict: &str) -> (String, String) {
         agent_read.display()
     );
     let mut gate = Command::new(bin());
-    gate.args(["run", "--consent", "socket", "--consent-socket"])
-        .arg(&sock)
-        .args(["--consent-timeout", "20", "--protect"])
-        .arg(&secret)
-        .arg("--receipts")
-        .arg(&receipts)
-        .arg("--")
-        .args(["bash", "-c", &inner]);
+    gate.args([
+        "run",
+        "--allow-root",
+        "--consent",
+        "socket",
+        "--consent-socket",
+    ])
+    .arg(&sock)
+    .args(["--consent-timeout", "20", "--protect"])
+    .arg(&secret)
+    .arg("--receipts")
+    .arg(&receipts)
+    .arg("--")
+    .args(["bash", "-c", &inner]);
     let mut gate_child = gate.spawn().expect("spawn gate");
 
     // Operator: wait for the socket, then answer.
@@ -128,7 +134,13 @@ fn agent_cannot_answer_its_own_consent() {
         out = agent_read.display(),
     );
     let status = Command::new(bin())
-        .args(["run", "--consent", "socket", "--consent-socket"])
+        .args([
+            "run",
+            "--allow-root",
+            "--consent",
+            "socket",
+            "--consent-socket",
+        ])
         .arg(&sock)
         .args(["--consent-timeout", "6", "--protect"])
         .arg(&secret)

@@ -54,13 +54,42 @@ impl CgroupScope {
             return None;
         }
 
-        let name = format!("bulwark.run-{supervisor_pid}");
-        let dir = root.join(&name);
-        // A stale dir from a crashed prior run with the same pid is unlikely but
-        // possible; remove it if empty, then (re)create.
-        let _ = fs::remove_dir(&dir);
-        if fs::create_dir(&dir).is_err() {
-            // No permission to create a scope (not root, or delegation denied).
+        // Find a free scope name and create it atomically with `create_dir`
+        // (which fails if the path already exists). We do NOT reuse or rmdir an
+        // existing directory: an occupied `bulwark.run-<pid>` must not silently
+        // downgrade us to the ancestry-only fallback (that would let anyone able
+        // to pre-create the predictable path disable reparent-proof attribution).
+        // Instead we pick the next free `bulwark.run-<pid>-<n>` — so a squatted
+        // name costs the attacker nothing and changes nothing.
+        let mut dir = PathBuf::new();
+        let mut name = String::new();
+        let mut created = false;
+        for n in 0..64 {
+            let candidate = if n == 0 {
+                format!("bulwark.run-{supervisor_pid}")
+            } else {
+                format!("bulwark.run-{supervisor_pid}-{n}")
+            };
+            let path = root.join(&candidate);
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    name = candidate;
+                    dir = path;
+                    created = true;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Name taken (stale run or a squatter) — try the next.
+                    continue;
+                }
+                Err(_) => {
+                    // No permission to create a scope (not root, or delegation
+                    // denied). Genuine no-cgroup host → fall back.
+                    return None;
+                }
+            }
+        }
+        if !created {
             return None;
         }
 
@@ -181,15 +210,23 @@ unsafe fn errno() -> i32 {
     *libc::__errno_location()
 }
 
-/// True if a `/proc/<pid>/cgroup` body places the process in the v2 scope `rel`.
+/// True if a `/proc/<pid>/cgroup` body places the process in the v2 scope `rel`
+/// **or any cgroup nested under it**.
 ///
 /// The v2 unified line is `0::<relpath>`. Hybrid hosts may also list v1
 /// controllers as `N:ctrl:<relpath>`; we trust only the unified `0::` line so a
 /// v1 controller path can never be mistaken for scope membership.
+///
+/// Membership is hierarchical, not exact: an agent can `mkdir` a child cgroup
+/// (`<rel>/esc`) and move itself into it, which is still inside the supervised
+/// scope. We must treat `<rel>` and everything under `<rel>/` as members —
+/// otherwise a sub-cgroup move (combined with a double-fork to evade the ancestry
+/// fallback) escapes the gate. The `/` boundary is required so `/bulwark.run-1`
+/// does not spuriously match a sibling `/bulwark.run-12`.
 fn proc_cgroup_is(body: &str, rel: &str) -> bool {
     for line in body.lines() {
         if let Some(path) = line.strip_prefix("0::") {
-            return path == rel;
+            return path == rel || path.starts_with(&format!("{rel}/"));
         }
     }
     false
@@ -225,6 +262,14 @@ mod tests {
             "1:name=systemd:/something\n0::/bulwark.run-123\n",
             rel
         ));
+        // A cgroup NESTED under our scope is still a member: an agent that
+        // mkdir's a child cgroup and moves into it has not left the tree.
+        assert!(proc_cgroup_is("0::/bulwark.run-123/esc\n", rel));
+        assert!(proc_cgroup_is("0::/bulwark.run-123/a/b/c\n", rel));
+        // But a SIBLING scope sharing a name prefix is NOT a member — the `/`
+        // boundary prevents /bulwark.run-123 from matching /bulwark.run-1234.
+        assert!(!proc_cgroup_is("0::/bulwark.run-1234\n", rel));
+        assert!(!proc_cgroup_is("0::/bulwark.run-123x\n", rel));
         // Empty / garbage → not a member (fail safe to the ancestry fallback).
         assert!(!proc_cgroup_is("", rel));
     }

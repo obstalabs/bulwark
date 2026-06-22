@@ -34,7 +34,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// startup, before the gate forks, so it does not matter what the agent does.
 fn run_gate(secret: &Path, state: &Path, cmd: &[&str]) -> String {
     let out = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(secret)
         .arg("--state")
         .arg(state)
@@ -81,7 +81,7 @@ fn unclean_restart_taints_then_reset_clears() {
     // Run 1: a gate that sleeps long enough for us to SIGKILL it mid-flight, so
     // mark_clean_shutdown never runs.
     let mut child = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--state")
         .arg(&state)
@@ -165,7 +165,7 @@ fn taint_receipt_is_recorded() {
 
     // Cause an unclean restart.
     let mut child = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--state")
         .arg(&state)
@@ -181,7 +181,7 @@ fn taint_receipt_is_recorded() {
 
     // Next run writes a taint receipt to the receipts file.
     Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
         .arg("--state")
         .arg(&state)

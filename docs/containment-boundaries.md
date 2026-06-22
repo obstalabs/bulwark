@@ -24,6 +24,40 @@ the *design*: a process Bulwark did not launch, or work handed to a separate dae
 outside the tree it governs. Everything *inside* the launched tree is gated — including a
 descendant that deliberately orphans itself, which is what the next section is about.
 
+## Evasion coverage (tested on real hardware)
+
+Tree membership is the load-bearing decision, so the ways an agent might try to *shed* its
+membership are worth enumerating. Each row below was reproduced as a working attack and
+then verified denied — not asserted. `n/a` marks a technique that does not apply to that
+platform (e.g. cgroups are Linux-only).
+
+| Escape attempt | Linux | macOS |
+|---|---|---|
+| Double-`fork()` / reparent to init (`launchd`) | **deny** | **deny** |
+| Sub-cgroup move (`mkdir` child cgroup, join it) + double-fork | **deny** | n/a |
+| cgroup-namespace + reparent | **deny** | n/a |
+| Mount-namespace + reparent | **deny** | n/a |
+| `setsid` (new session) + reparent | **deny** | **deny** |
+| Triple / nested fork | **deny** | **deny** |
+| Orphan that outlives the foreground process (delayed read) | **deny** | **deny** |
+| Many concurrent orphans | **deny** | **deny** |
+| `exec` a new binary after fork | **deny** | **deny** |
+| Scope-name squatting (occupy the predictable cgroup path) | **deny** | n/a |
+| Root agent migrates out of the cgroup scope (`cgroup.procs` / remount) | **deny** † | n/a |
+| symlink / rename / hardlink to the protected inode | **deny** | **deny** |
+| `/proc/self/root`, `/proc/self/cwd` path aliases | **deny** | n/a |
+
+Every cell was reproduced as a working attack and then verified denied on the relevant
+hardware (Linux kernel 6.12; macOS 26 on Apple Silicon) — not asserted.
+
+**†** Denied by default because a would-be-root agent is dropped to an unprivileged uid (see
+*Root agents and cgroup migration* below), and an unprivileged process cannot migrate
+cgroups. It *does* leak only if you deliberately keep the agent at uid 0 with `--allow-root`
+— a trusted-agent opt-out Bulwark warns about. `--worker-uid` and `--hardened` also deny it.
+
+The mechanism behind these denials — recording membership at process creation rather than
+reconstructing it by ancestry at read time — is described next.
+
 ## Orphaned descendants: gated by membership, not by ancestry
 
 A process can try to escape the gate by **double-`fork()`ing** — forking a child that
@@ -82,6 +116,37 @@ AppArmor, SELinux user policy, and Bulwark alike. The mitigation is not a Bulwar
   namespace — stay gated. `--hardened` blocks the agent-driven namespace escape outright
   (`no_new_privs` + the Landlock ruleset); it just cannot reach a separate privileged
   daemon, which nothing process-scoped can.
+
+## Root agents and cgroup migration
+
+The Linux reparent-proof attribution (above) binds a process through its **cgroup**
+membership. That binding holds for any process that cannot write the cgroup tree — i.e. an
+unprivileged one. A **root** agent is different: writing your own PID into a
+`cgroup.procs` file is an owner-write (uid 0 owns the cgroup filesystem), and a root agent
+with `CAP_SYS_ADMIN` can go further and `mount` a fresh `cgroup2` filesystem that re-exposes
+the whole hierarchy. Either way a root agent can migrate *out* of the supervised scope and,
+combined with a double-`fork()` to shed the ancestry fallback, evade the deny-list/allow-list
+gate. This is the same class as the Docker-socket boundary: **a root agent with
+`CAP_SYS_ADMIN` is not containable by any process-scoped control** — it can also `ptrace`
+the supervisor or unmount state. Trying to "half-contain" root would give false confidence.
+
+So Bulwark does not pretend to. Instead it makes the safe path the default:
+
+- **By default, a would-be-root agent is dropped to the invoking user.** When
+  `bulwark run` is invoked via `sudo` and the agent would otherwise run as root, Bulwark
+  drops the supervised child to `SUDO_UID` (printing a one-line notice). The agent then
+  runs as *you*, not root, and cannot migrate cgroups. The supervisor stays root and keeps
+  the fanotify fd.
+- **`--worker-uid <uid>`** drops to a specific unprivileged account (the explicit form).
+- **`--hardened`** needs none of this: Landlock binds the process regardless of uid, so
+  there is no cgroup to leave.
+- **`--allow-root`** opts out and keeps uid 0 — only safe for a *trusted* agent. Without a
+  `sudo` origin to infer a user from, Bulwark cannot pick a safe uid, so it warns and
+  proceeds at uid 0; pass `--allow-root` to silence that deliberately.
+
+macOS is unaffected: its membership set lives in the gate's own memory (built from kernel
+fork/exec/exit events), not a filesystem the agent can write, so there is nothing to
+migrate.
 
 ## Why `--hardened` is strictly stronger (for what the agent does itself)
 
