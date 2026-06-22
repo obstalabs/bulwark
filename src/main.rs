@@ -246,6 +246,16 @@ enum Cmd {
         #[arg(long = "worker-gid", value_name = "GID")]
         worker_gid: Option<u32>,
 
+        /// Keep the supervised agent running as root (uid 0). A root agent with
+        /// `CAP_SYS_ADMIN` can migrate out of the cgroup scope (remount cgroupfs)
+        /// and evade the deny-list/allow-list read gate, so by default Bulwark
+        /// auto-drops a would-be-root agent to the invoking user (`SUDO_UID`) when
+        /// it can. Pass `--allow-root` to opt out and keep uid 0 — only safe for a
+        /// trusted agent. `--hardened` does not need this (Landlock binds the
+        /// process regardless of uid).
+        #[arg(long = "allow-root")]
+        allow_root: bool,
+
         /// Path to the integrity state file (circuit-breaker). Defaults to
         /// `/var/lib/bulwark/state.toml`. Hidden — primarily for tests.
         #[arg(long = "state", value_name = "FILE", hide = true)]
@@ -492,6 +502,7 @@ fn main() -> Result<()> {
             hardened,
             worker_uid,
             worker_gid,
+            allow_root,
             state,
             command,
         } => {
@@ -512,6 +523,7 @@ fn main() -> Result<()> {
                 hardened,
                 worker_uid,
                 worker_gid,
+                allow_root,
                 state: state.as_deref(),
                 command: &command,
             })?;
@@ -1376,6 +1388,9 @@ struct RunArgs<'a> {
     /// behavior). The paired gid, if not given explicitly, defaults to the uid.
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,
+    /// Keep a would-be-root agent at uid 0 instead of auto-dropping it to the
+    /// invoking user. Opt-out of the safe default; only for a trusted agent.
+    allow_root: bool,
     state: Option<&'a Path>,
     command: &'a [String],
 }
@@ -1445,6 +1460,7 @@ fn cmd_launch(
         hardened: false,
         worker_uid: None,
         worker_gid: None,
+        allow_root: false,
         state,
         command: &plan.command,
     })
@@ -1522,6 +1538,51 @@ fn consent_mode_for_agent_decision(decision: AgentDecision) -> ConsentMode {
 /// Refuses two foot-guns up front: dropping to uid 0 (a no-op that hides intent),
 /// and requesting a drop when the supervisor is not root (it cannot drop
 /// privileges it does not hold — fail loudly rather than exec un-dropped).
+/// Safe default for an agent that would otherwise run as root. A uid-0 agent
+/// with `CAP_SYS_ADMIN` can leave the cgroup scope by remounting cgroupfs, which
+/// evades the deny-list/allow-list read gate (the reparent-proof attribution
+/// only binds a process that cannot write the cgroup tree). So, when no explicit
+/// `--worker-uid` was given and the operator did not pass `--allow-root`:
+///
+/// - if the supervisor itself is not root, there is nothing to drop — return
+///   `None` (the agent already runs unprivileged);
+/// - if we were invoked via `sudo` (`SUDO_UID` set to a non-root user), drop the
+///   agent to that user — the common, least-surprising case: the agent runs as
+///   *you*, not root, and cannot migrate cgroups;
+/// - otherwise (genuine root with no sudo origin) we have no safe uid to pick, so
+///   warn loudly and proceed at uid 0 rather than break a legitimately-root host.
+#[cfg(target_os = "linux")]
+fn root_default_worker() -> Result<Option<gate::WorkerCreds>> {
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        return Ok(None);
+    }
+
+    // Prefer the invoking user from sudo.
+    let sudo_uid = std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok());
+    let sudo_gid = std::env::var("SUDO_GID").ok().and_then(|s| s.parse().ok());
+    if let Some(uid) = sudo_uid {
+        if uid != 0 {
+            let gid = sudo_gid.unwrap_or(uid);
+            eprintln!(
+                "[bulwark] agent would run as root; dropping it to the invoking user \
+                 (uid={uid} gid={gid}) so it cannot migrate out of the cgroup scope. \
+                 Pass --allow-root to keep uid 0, or --worker-uid <uid> to choose."
+            );
+            return Ok(Some(gate::WorkerCreds { uid, gid }));
+        }
+    }
+
+    // Genuine root with no sudo origin: no safe uid to pick.
+    eprintln!(
+        "[bulwark] WARNING: the supervised agent runs as root (uid 0) and a root agent \
+         with CAP_SYS_ADMIN can remount cgroupfs to leave the scope and evade the gate. \
+         For an untrusted agent use --worker-uid <uid> (drop privilege) or --hardened \
+         (Landlock). Pass --allow-root to silence this and keep uid 0 deliberately."
+    );
+    Ok(None)
+}
+
 fn resolve_worker_creds(
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,
@@ -1575,7 +1636,20 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
     // resolve the optional worker credentials once, up front, so every
     // forking gate path drops the child the same way. Validation fails the run
     // before any integrity state is written.
-    let worker = resolve_worker_creds(args.worker_uid, args.worker_gid)?;
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut worker = resolve_worker_creds(args.worker_uid, args.worker_gid)?;
+
+    // Root-agent safety: a supervised agent left at uid 0 with CAP_SYS_ADMIN can
+    // migrate out of the cgroup scope (remount cgroupfs) and evade the gate. If
+    // no explicit worker drop was requested and the operator did not pass
+    // --allow-root, drop a would-be-root agent to the invoking user where we can.
+    // (Linux only; macOS tracks membership in the gate's memory, not a writable
+    // filesystem, so the migration class does not exist there.)
+    #[cfg(target_os = "linux")]
+    if worker.is_none() && !args.allow_root {
+        worker = root_default_worker()?;
+    }
+    let _ = args.allow_root; // consumed only on Linux; keep the field live elsewhere
 
     // Allow-list (CI) mode: default-deny, allow only the grants + runtime base.
     // Non-interactive — there is no consent provider. Mark every mounted
