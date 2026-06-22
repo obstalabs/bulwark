@@ -43,11 +43,17 @@ platform (e.g. cgroups are Linux-only).
 | Many concurrent orphans | **deny** | **deny** |
 | `exec` a new binary after fork | **deny** | **deny** |
 | Scope-name squatting (occupy the predictable cgroup path) | **deny** | n/a |
+| Root agent migrates out of the cgroup scope (`cgroup.procs` / remount) | **deny** † | n/a |
 | symlink / rename / hardlink to the protected inode | **deny** | **deny** |
 | `/proc/self/root`, `/proc/self/cwd` path aliases | **deny** | n/a |
 
 Every cell was reproduced as a working attack and then verified denied on the relevant
 hardware (Linux kernel 6.12; macOS 26 on Apple Silicon) — not asserted.
+
+**†** Denied by default because a would-be-root agent is dropped to an unprivileged uid (see
+*Root agents and cgroup migration* below), and an unprivileged process cannot migrate
+cgroups. It *does* leak only if you deliberately keep the agent at uid 0 with `--allow-root`
+— a trusted-agent opt-out Bulwark warns about. `--worker-uid` and `--hardened` also deny it.
 
 The mechanism behind these denials — recording membership at process creation rather than
 reconstructing it by ancestry at read time — is described next.
