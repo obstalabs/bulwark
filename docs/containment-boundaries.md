@@ -14,7 +14,7 @@ Apple Silicon), not asserted.
 | Symlink / rename / hardlink to a protected file | **denied** (by inode) | **denied** | **denied** | **denied** |
 | Bind-mount alias of a protected file | **denied** (`FAN_MARK_FILESYSTEM`) | **denied** | **denied** | **denied** |
 | Deep descendant (child of a child …) | **denied** | **denied** | **denied** | **denied** (PID ancestry) |
-| Deliberately-orphaned descendant (double-`fork()`, reparents to init) | **leaks** ⚠️ | **leaks** ⚠️ | **denied** | **leaks (expected)** ⚠️ |
+| Deliberately-orphaned descendant (double-`fork()`, reparents to init) | **leaks** ⚠️ | **leaks** ⚠️ | **denied** | **leaks** ⚠️ |
 | Agent creating its own mount namespace (`unshare`) to escape | n/a | n/a | **blocked** (`no_new_privs`) | n/a |
 | Read delegated to a separate daemon (`docker run`) | **not gated** | **not gated** | **not gated** | **not gated** |
 | A process you did not launch under Bulwark | **not gated** | **not gated** | **not gated** | **not gated** |
@@ -33,11 +33,12 @@ gated — membership is by ancestry, which a process cannot forge by *renaming* 
 
 It can, however, *re-parent* itself. A process that **double-`fork()`s** — forks a child
 that immediately forks a grandchild and exits — leaves the grandchild orphaned, and the
-kernel reparents an orphan to `init` (PID 1). Its parent-PID chain no longer leads back to
-the supervised root, so the ancestry walk concludes "not in the tree" and the read is
-**allowed**. Verified on Linux (kernel 6.12) under both `--protect` and `--deny-all`. This
-is not the agent escaping *the machine* — the orphan is still the agent's own descendant —
-it is the ancestry-walk attribution being severed by a one-line `fork()` trick.
+kernel reparents an orphan to PID 1 (`init` on Linux, `launchd` on macOS). Its parent-PID
+chain no longer leads back to the supervised root, so the ancestry walk concludes "not in
+the tree" and the read is **allowed**. Verified on Linux (kernel 6.12) under both
+`--protect` and `--deny-all`, and on macOS (Endpoint Security, macOS 26) under `--protect`.
+This is not the agent escaping *the machine* — the orphan is still the agent's own
+descendant — it is the ancestry-walk attribution being severed by a one-line `fork()` trick.
 
 **`--hardened` is immune, and is the answer for an adversarial or unattended agent.** The
 Landlock floor is a kernel ruleset bound to the agent's threads and **inherited by every
@@ -54,10 +55,11 @@ unprivileged process cannot move itself out of a delegated cgroup.) Until that s
 `--hardened` is the structural answer and the deny-list/ES modes carry this documented
 limitation.
 
-The macOS cell is marked **expected** rather than hardware-verified: the macOS gate uses
-the same audit-token ancestry walk and has no Landlock-style floor, so the same re-parent
-severs it by construction — but it has not yet been run on hardware for this specific
-attack, so it is named as expected, not asserted as tested.
+macOS leaks for the same reason and has no Landlock-style floor to fall back on: the ES
+gate decides tree membership by walking the audit-token parent chain, which the re-parent
+severs identically. Confirmed on hardware (macOS 26, Apple Silicon) — the orphaned read
+returned the protected file. There is no macOS equivalent of `--hardened` today, so the
+cgroup-style attribution fix is the path for the ES gate as well.
 
 ## The container case, precisely
 
