@@ -240,3 +240,70 @@ fn worker_uid_agent_cannot_kill_the_root_supervisor() {
         "gate must stay up (read denied) after the failed kill attempt; got:\n{combined}"
     );
 }
+
+/// Regression: a fanotify permission-event-queue OVERFLOW must FAIL CLOSED.
+///
+/// The default permission queue is bounded; when it overflows the kernel drops
+/// the undeliverable event and lets the access proceed *as allowed* — a fail-open
+/// an unprivileged supervised process can reach by flooding opens. `FAN_UNLIMITED_QUEUE`
+/// removes the bound so the gate applies backpressure instead of leaking.
+///
+/// This test forces the failure mode by shrinking `fs.fanotify.max_queued_events`
+/// to a tiny value, then floods opens while hammering the protected secret. With the
+/// fix the secret is never read; without it, it leaks thousands of times.
+#[test]
+#[ignore = "requires Linux + root for fanotify + sysctl write"]
+fn queue_overflow_fails_closed() {
+    let dir = scratch("overflow");
+    let secret = dir.join("secret.env");
+    let pool = dir.join("pool");
+    fs::write(&secret, "SECRETVALUE=overflow\n").unwrap();
+    fs::create_dir_all(&pool).unwrap();
+    for i in 0..3000 {
+        fs::write(pool.join(format!("f{i}")), b"x").unwrap();
+    }
+
+    // Shrink the queue to force overflow under the flood; restore on the way out.
+    let knob = "/proc/sys/fs/fanotify/max_queued_events";
+    let original = fs::read_to_string(knob).unwrap_or_else(|_| "16384".into());
+    fs::write(knob, "1").expect("write max_queued_events (need root)");
+
+    // The supervised command: flood opens on the pool in the background while a tight
+    // loop tries the protected secret. Echo a marker only if the secret content appears.
+    // Flood opens on the pool (16 background loops) to overflow the tiny queue, while a
+    // bounded attack loop tries the protected secret. The whole probe is wrapped in
+    // `timeout` so it cannot hang the suite. The leak, when present, is massive
+    // (~160k reads), so a few hundred attack iterations are more than enough to catch it.
+    let probe = format!(
+        "for i in $(seq 1 16); do ( while :; do cat {pool}/* >/dev/null 2>&1; done ) & done; \
+         leaks=0; for i in $(seq 1 400); do \
+           if cat {secret} 2>/dev/null | grep -q SECRETVALUE; then leaks=$((leaks+1)); fi; done; \
+         echo LEAKS=$leaks",
+        pool = pool.display(),
+        secret = secret.display()
+    );
+    let out = Command::new("timeout")
+        .arg("30")
+        .arg(bin())
+        .args(["run", "--allow-root", "--protect"])
+        .arg(&secret)
+        .arg("--")
+        .arg("bash")
+        .arg("-c")
+        .arg(&probe)
+        .output()
+        .expect("spawn");
+
+    // Restore the sysctl before asserting so a failure doesn't leave the host shrunk.
+    fs::write(knob, original.trim()).expect("restore max_queued_events");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("LEAKS=0"),
+        "queue overflow must fail closed (zero protected reads); got:\n{combined}"
+    );
+}

@@ -205,9 +205,19 @@ impl FanFd {
     fn init() -> Result<Self> {
         // FAN_CLASS_CONTENT: permission events on content access.
         // O_RDONLY|O_LARGEFILE: how the event fds are opened.
+        //
+        // FAN_UNLIMITED_QUEUE is load-bearing for security, not a tuning knob. The
+        // default permission-event queue is bounded (fs.fanotify.max_queued_events,
+        // 16384). When a bounded queue overflows, the kernel drops the undeliverable
+        // permission event and lets the access proceed *as allowed* — a fail-OPEN: an
+        // unprivileged supervised process can flood opens to overflow the queue and
+        // read protected files in the window. FAN_UNLIMITED_QUEUE removes the bound, so
+        // the gate applies backpressure (slows the agent) instead of leaking. Verified:
+        // with a forced-tiny queue the bounded build leaks ~160k protected reads under
+        // flood; with this flag, zero. Needs CAP_SYS_ADMIN, which the gate already has.
         let fd = unsafe {
             libc::fanotify_init(
-                libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC,
+                libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC | libc::FAN_UNLIMITED_QUEUE,
                 (libc::O_RDONLY | libc::O_LARGEFILE) as u32,
             )
         };
