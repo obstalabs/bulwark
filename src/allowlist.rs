@@ -248,8 +248,20 @@ impl AllowList {
 
     /// operator grants only, excluding the platform runtime base set.
     #[cfg(target_os = "macos")]
+    #[allow(dead_code)] // retained for diagnostics / a future recursive-witness layer
     pub fn grant_globs(&self) -> &[String] {
         &self.grants
+    }
+
+    /// Snapshotted grant inode identities for the macOS ES edge. The edge gates
+    /// grants on inode membership (the same `allow_inode` set it already
+    /// enforces), NOT a path-beneath grant root — so a hardlink/rename of a
+    /// foreign file into a granted path presents an inode the snapshot never
+    /// recorded and is denied (the macOS analog of the Linux grant inode gate).
+    /// Requires [`AllowList::snapshot_grants`] to have run (the launch path does).
+    #[cfg(target_os = "macos")]
+    pub fn grant_inode_keys(&self) -> impl Iterator<Item = InodeKey> + '_ {
+        self.grant_inodes.iter().copied()
     }
 
     /// runtime base globs included for this platform.
