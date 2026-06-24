@@ -45,6 +45,10 @@ mod hardened;
 #[cfg(target_os = "linux")]
 mod cgroup;
 
+// Grant create/move witness for allow-list mode is Linux-only (fanotify FID).
+#[cfg(target_os = "linux")]
+mod grantwatch;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "socket.rs"]
 mod socket;

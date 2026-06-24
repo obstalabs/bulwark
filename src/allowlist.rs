@@ -314,6 +314,35 @@ impl AllowList {
         false
     }
 
+    /// True if `path` matches a grant glob (ignoring inode identity). Used by the
+    /// create-witness layer: a witnessed-created, single-link inode is allowed
+    /// only when opened on a grant path.
+    pub fn grant_path_matches(&self, path: &str) -> bool {
+        self.grants.iter().any(|g| glob::matches(g, path))
+    }
+
+    /// The distinct concrete directory prefixes of the grants, for the Linux
+    /// create-witness to mark. `/var/log/app/**` and `/var/log/app/*.log` both
+    /// contribute `/var/log/app`.
+    #[cfg(target_os = "linux")]
+    pub fn grant_concrete_dirs(&self) -> Vec<std::path::PathBuf> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for g in &self.grants {
+            let p = concrete_prefix(g);
+            if !p.is_empty() && seen.insert(p.to_string()) {
+                out.push(std::path::PathBuf::from(p));
+            }
+        }
+        out
+    }
+
+    /// The grant globs, for the create-witness path match.
+    #[cfg(target_os = "linux")]
+    pub fn grants_list(&self) -> &[String] {
+        &self.grants
+    }
+
     /// Test-only: inject a snapshotted grant inode without touching the
     /// filesystem, for decision-logic unit tests.
     #[cfg(test)]
