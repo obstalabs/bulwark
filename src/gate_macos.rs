@@ -61,11 +61,22 @@ pub struct WorkerCreds {
     pub gid: u32,
 }
 
-/// Drop the calling process to `creds`, permanently, in the security-critical
-/// order: supplementary groups, then gid, then uid. Returns `Err` on any failure
-/// — the caller MUST NOT exec if this fails. Runs in the forked child before
-/// exec, so it uses only raw libc calls (no allocation, no panics). Mirrors the
-/// Linux gate's `drop_to`.
+/// Drop the calling process to `creds`, in the security-critical order:
+/// supplementary groups, then gid, then uid. Returns `Err` on any failure — the
+/// caller MUST NOT exec if this fails. Runs in the forked child before exec, so it
+/// uses only raw libc calls (no allocation, no panics). Mirrors the Linux gate's
+/// `drop_to`.
+///
+/// LIMITATION (honest): unlike Linux, macOS has no `PR_SET_NO_NEW_PRIVS`, so this
+/// drop is NOT irreversible — a dropped agent that execs a setuid-root binary can
+/// regain root, and a re-rooted agent could then `SIGKILL` the ES edge (re-opening
+/// the edge-death fail-open window). The `setuid(0)`-must-fail check below proves
+/// only that the *current* credentials cannot regain root. There is no macOS
+/// primitive to ignore setuid bits on future execs; this residual is documented in
+/// `docs/macos.md`. The mitigations that do hold: the agent runs unprivileged for
+/// its own opens, and the ES membership set lives in the gate's memory (not an
+/// agent-writable filesystem), so a re-rooted agent cannot rewrite tree membership
+/// the way a Linux root agent can rewrite cgroup membership.
 ///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
@@ -80,7 +91,8 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     if libc::setuid(creds.uid as libc::uid_t) != 0 {
         return Err(libc::EPERM);
     }
-    // The drop must be permanent: regaining root must now fail.
+    // The drop must be permanent for the *current* credentials: regaining root must
+    // now fail. (macOS cannot also block setuid-bit exec — see the doc comment.)
     if libc::setuid(0) == 0 {
         return Err(libc::EPERM);
     }

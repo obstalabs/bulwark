@@ -307,3 +307,70 @@ fn queue_overflow_fails_closed() {
         "queue overflow must fail closed (zero protected reads); got:\n{combined}"
     );
 }
+
+/// Regression: the privilege drop must be IRREVERSIBLE — a dropped agent cannot
+/// regain root by exec'ing a setuid-root binary. Without `PR_SET_NO_NEW_PRIVS` in
+/// `drop_to`, the kernel still honors the setuid bit on a later `execve`, so the
+/// dropped agent re-roots and can then migrate out of the cgroup scope (A-1).
+///
+/// Plants a setuid-root helper on a suid-honoring filesystem (NOT /tmp, which is
+/// usually `nosuid`), runs the agent under the default drop, and asserts the helper
+/// runs as the dropped uid — i.e. the setuid bit was ignored.
+#[test]
+#[ignore = "requires Linux + root + a suid-honoring fs (/usr/local)"]
+fn privilege_drop_is_irreversible_to_setuid_exec() {
+    let dir = scratch("nnp");
+    let control = dir.join("control.txt");
+    fs::write(&control, "CTRL=ok\n").unwrap();
+    let secret = dir.join("secret.env");
+    fs::write(&secret, "SECRETVALUE=nnp\n").unwrap();
+
+    // A setuid-root helper that prints its effective uid at entry. /tmp is commonly
+    // mounted nosuid (which would mask the bug), so place it under /usr/local.
+    let helper_src = dir.join("suid.c");
+    fs::write(
+        &helper_src,
+        "#include <stdio.h>\n#include <unistd.h>\nint main(){printf(\"ENTER_EUID=%d\\n\",geteuid());return 0;}\n",
+    )
+    .unwrap();
+    let helper = std::path::Path::new("/usr/local/bin/bulwark-nnp-test-helper");
+    let cc = Command::new("cc")
+        .arg(&helper_src)
+        .arg("-o")
+        .arg(helper)
+        .status()
+        .expect("cc");
+    assert!(cc.success(), "compile setuid helper");
+    // setuid-root bit
+    let _ = Command::new("chown").arg("root:root").arg(helper).status();
+    let _ = Command::new("chmod").arg("4755").arg(helper).status();
+
+    let probe = format!(
+        "id -u; cat {} >/dev/null 2>&1; {}",
+        control.display(),
+        helper.display()
+    );
+    let out = Command::new(bin())
+        .args(["run", "--protect"])
+        .arg(&secret)
+        .arg("--")
+        .arg("bash")
+        .arg("-c")
+        .arg(&probe)
+        .output()
+        .expect("spawn");
+
+    // Clean up the host-level helper regardless of assertion outcome.
+    let _ = fs::remove_file(helper);
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The helper must NOT have regained root: its entry euid is the dropped uid, not 0.
+    assert!(
+        combined.contains("ENTER_EUID=") && !combined.contains("ENTER_EUID=0"),
+        "setuid-exec must NOT regain root after the drop (no_new_privs); got:\n{combined}"
+    );
+}

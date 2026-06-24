@@ -653,9 +653,24 @@ pub struct WorkerCreds {
 /// fail — we assert that, so a saved-set-uid that could be restored is caught
 /// rather than silently leaving the agent able to regain root.
 ///
+/// `PR_SET_NO_NEW_PRIVS` is set FIRST and is load-bearing: without it the uid drop
+/// is reversible — a dropped agent can `execve` a setuid-root binary (stock hosts
+/// ship `mount`, `su`, `sudo`, `pkexec`) to regain euid 0 and then do exactly what
+/// the drop was meant to prevent (remount cgroupfs, migrate out of the supervised
+/// scope, kill the supervisor). The `setuid(0)`-must-fail check below only proves
+/// the *current* credentials cannot regain root, not that a later setuid-exec
+/// cannot. `no_new_privs` makes the kernel ignore the setuid bit on every
+/// subsequent exec, closing that path. (`hardened.rs` sets the same flag for the
+/// Landlock floor, for the same reason.)
+///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
 unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
+    // No-new-privs first, while still privileged: makes the uid drop irreversible
+    // by ignoring setuid/setgid bits on all future execs in this process tree.
+    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+        return Err(libc::EPERM);
+    }
     // Supplementary groups: clear to exactly the target gid. We do not call
     // initgroups() (it reads NSS, not async-signal-safe in the forked child);
     // setgroups([gid]) is the minimal, predictable set for an unprivileged worker.
