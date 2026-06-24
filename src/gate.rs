@@ -619,7 +619,10 @@ fn decide_denylist(
     log: &mut ReceiptLog,
     consent: &mut dyn ConsentDecider,
 ) {
-    if !protected.contains(&key) {
+    // `protects` matches the inode against the launch snapshot AND, for files
+    // not in it, against the inodes of protected ancestor directories — so a
+    // nested or post-launch file under a protected directory is still denied.
+    if !protected.protects(&key, path) {
         log.record(&Receipt {
             pid,
             dev: key.dev,
