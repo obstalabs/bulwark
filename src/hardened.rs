@@ -112,7 +112,7 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
         // Landlock rules are added by an O_PATH fd to the directory/file. A
         // glob like `/lib/**` is reduced to its concrete prefix `/lib` — a
         // path_beneath rule already means "this path and everything below it".
-        let concrete = glob_prefix(p);
+        let concrete = crate::glob::landlock_prefix(p);
         let cpath = match CString::new(concrete.as_bytes()) {
             Ok(c) => c,
             Err(_) => continue,
@@ -153,41 +153,4 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
     }
     eprintln!("[bulwark] hardened: kernel-enforced read floor applied ({allowed} allow path(s))");
     Ok(())
-}
-
-/// Reduce a glob to the concrete directory prefix Landlock should allow.
-/// `/lib/**` -> `/lib`; `/var/log/app/**` -> `/var/log/app`. A path_beneath
-/// rule already covers everything below the prefix, so trailing wildcards are
-/// dropped. A bare path with no wildcard is returned unchanged.
-fn glob_prefix(glob: &str) -> String {
-    let mut prefix = String::new();
-    for seg in glob.split('/') {
-        if seg.contains('*') || seg.contains('?') {
-            break;
-        }
-        if !seg.is_empty() {
-            prefix.push('/');
-            prefix.push_str(seg);
-        }
-    }
-    if prefix.is_empty() {
-        "/".to_string()
-    } else {
-        prefix
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glob_prefix_strips_wildcards() {
-        assert_eq!(glob_prefix("/lib/**"), "/lib");
-        assert_eq!(glob_prefix("/var/log/app/**"), "/var/log/app");
-        assert_eq!(glob_prefix("/usr/bin/**"), "/usr/bin");
-        assert_eq!(glob_prefix("/etc/ld.so.cache"), "/etc/ld.so.cache");
-        assert_eq!(glob_prefix("/proc/*/stat"), "/proc");
-        assert_eq!(glob_prefix("**/*secret*"), "/");
-    }
 }

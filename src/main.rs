@@ -820,6 +820,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         if allow.is_empty() {
             anyhow::bail!("--hardened requires at least one --allow <glob>");
         }
+        reject_widening_hardened_grants(allow)?;
         return cmd_ssh_hardened(target, allow, no_base_set, deploy_mode, command);
     }
     if protect.is_empty() {
@@ -1617,6 +1618,30 @@ fn resolve_worker_creds(
 }
 
 /// Build the gate mode + mark paths for a `run` and dispatch.
+/// Refuse operator `--hardened --allow` grants that Landlock cannot enforce
+/// faithfully. Hardened mode maps each grant to a `path_beneath` rule keyed on
+/// the glob's concrete directory prefix; a glob with a non-trailing or
+/// single-segment wildcard silently widens to that whole subtree (a `*.log`
+/// grant becomes the whole directory; `**/*.log` becomes `/`). Rather than grant
+/// a broad read floor by surprise, require the operator to state it explicitly
+/// as a concrete path or a trailing `/**` subtree. The runtime base set is
+/// exempt — it is a documented, printable floor and is not operator input.
+fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
+    for g in grants {
+        if !glob::is_landlock_faithful(g) {
+            let prefix = glob::landlock_prefix(g);
+            anyhow::bail!(
+                "--hardened --allow {g:?} cannot be enforced faithfully: Landlock is \
+                 path-based and would grant the entire subtree {prefix:?} — broader than \
+                 the pattern. Re-grant explicitly as a concrete path or a trailing '/**' \
+                 subtree (e.g. '{prefix}/**' to accept the whole subtree, or name the exact \
+                 file/dir)."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_run(args: RunArgs) -> Result<i32> {
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
@@ -1626,6 +1651,7 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         if !args.protect.is_empty() {
             anyhow::bail!("--hardened uses --allow grants, not --protect");
         }
+        reject_widening_hardened_grants(args.allow)?;
         let mut al = AllowList::new(args.allow.to_vec());
         if args.no_base_set {
             al = al.without_base();

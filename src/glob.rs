@@ -96,9 +96,71 @@ fn glob_match(pat: &[u8], text: &[u8]) -> bool {
     }
 }
 
+/// The concrete directory prefix a glob reduces to for a path-based subtree
+/// grant (Landlock `path_beneath`): segments are taken until the first one
+/// containing a wildcard. `/var/log/app/**` -> `/var/log/app`; `/proc/*/stat`
+/// -> `/proc`; `**/*.log` -> `/`. A wildcard-free glob is returned unchanged.
+pub fn landlock_prefix(glob: &str) -> String {
+    let mut prefix = String::new();
+    for seg in glob.split('/') {
+        if seg.contains('*') || seg.contains('?') {
+            break;
+        }
+        if !seg.is_empty() {
+            prefix.push('/');
+            prefix.push_str(seg);
+        }
+    }
+    if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        prefix
+    }
+}
+
+/// True if `glob` maps to its [`landlock_prefix`] WITHOUT silently widening —
+/// it is either wildcard-free (the prefix is the path itself) or a trailing
+/// `/**` subtree (a `path_beneath` grant is exactly what `/**` means). Any other
+/// wildcard — mid-path (`/a/*/b`), single-segment (`/a/*.log`), or a pattern
+/// after `**` (`**/*.log`) — makes the path-based grant BROADER than the
+/// pattern. Used to refuse `--hardened` operator grants that would silently
+/// widen to a whole subtree the operator did not ask for.
+pub fn is_landlock_faithful(glob: &str) -> bool {
+    if !glob.contains('*') && !glob.contains('?') {
+        return true;
+    }
+    if let Some(prefix) = glob.strip_suffix("/**") {
+        return !prefix.is_empty() && !prefix.contains('*') && !prefix.contains('?');
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landlock_prefix_strips_wildcards() {
+        assert_eq!(landlock_prefix("/lib/**"), "/lib");
+        assert_eq!(landlock_prefix("/var/log/app/**"), "/var/log/app");
+        assert_eq!(landlock_prefix("/etc/ld.so.cache"), "/etc/ld.so.cache");
+        assert_eq!(landlock_prefix("/proc/*/stat"), "/proc");
+        assert_eq!(landlock_prefix("**/*secret*"), "/");
+    }
+
+    #[test]
+    fn faithful_grants_are_concrete_or_trailing_doublestar() {
+        // Faithful: the Landlock prefix equals the pattern's intent.
+        assert!(is_landlock_faithful("/var/log/app"));
+        assert!(is_landlock_faithful("/var/log/app/file.log"));
+        assert!(is_landlock_faithful("/var/log/app/**"));
+        // Widening: prefix is broader than the pattern -> not faithful.
+        assert!(!is_landlock_faithful("/var/log/app/*.log"));
+        assert!(!is_landlock_faithful("/var/log/app/**/*.log"));
+        assert!(!is_landlock_faithful("/var/log/*/current"));
+        assert!(!is_landlock_faithful("**/*.log"));
+        assert!(!is_landlock_faithful("/**")); // prefix empty -> whole fs
+    }
 
     #[test]
     fn exact_match() {
