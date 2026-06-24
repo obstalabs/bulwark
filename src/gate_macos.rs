@@ -44,6 +44,15 @@ pub enum GateMode<'a> {
 /// startup consent decisions from its config, then answers AUTH_OPEN from memory.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Receive the supervised tree's membership scope identifier, mirroring the
+    /// Linux gate so the shared `CachingProvider` impl type-checks on every
+    /// platform. macOS attributes the tree by the Endpoint Security PID set held
+    /// in the supervisor (not a cgroup path), so the consent socket has no scope
+    /// string to bind here yet and this is a no-op: socket membership stays the
+    /// ancestry check. Wiring the ES PID set into the consent socket (the macOS
+    /// analog of the cgroup fix) is tracked as a documented residual.
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 pub(crate) fn shutdown_requested() -> bool {

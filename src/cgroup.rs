@@ -110,6 +110,13 @@ impl CgroupScope {
         &self.procs_cstr
     }
 
+    /// The scope's cgroup path relative to the cgroup root (e.g.
+    /// `/bulwark.run-12345`). The off-band consent channel takes this so it can
+    /// reject in-tree answerers by the same membership primitive as the gate.
+    pub fn rel(&self) -> &str {
+        &self.rel
+    }
+
     /// True if `pid` is a member of this scope. Reads `/proc/<pid>/cgroup`,
     /// whose v2 line is `0::<relpath>`, and compares `<relpath>` to ours.
     ///
@@ -117,11 +124,7 @@ impl CgroupScope {
     /// tree reports a different path. Unreadable (process gone, or a race) →
     /// `false`, and the caller's ancestry-walk fallback decides.
     pub fn contains(&self, pid: i32) -> bool {
-        let raw = match fs::read_to_string(format!("/proc/{pid}/cgroup")) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        proc_cgroup_is(&raw, &self.rel)
+        pid_in_scope(pid, &self.rel)
     }
 
     /// True while the scope still has at least one member process. Reads the
@@ -210,6 +213,21 @@ unsafe fn errno() -> i32 {
     *libc::__errno_location()
 }
 
+/// True if `pid` reports cgroup-v2 membership in scope `rel` (or a cgroup nested
+/// under it). Standalone — needs no [`CgroupScope`] handle — so the consent
+/// socket and other off-band lanes can reject an in-tree answerer by the gate's
+/// own membership primitive rather than the defeatable ancestry walk. The read
+/// is from the supervisor's `/proc` view (the root cgroup namespace), so a peer
+/// that enters its own cgroup namespace cannot hide its true scope. Unreadable
+/// (process gone, or a race) → `false`.
+pub fn pid_in_scope(pid: i32, rel: &str) -> bool {
+    let raw = match fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    proc_cgroup_is(&raw, rel)
+}
+
 /// True if a `/proc/<pid>/cgroup` body places the process in the v2 scope `rel`
 /// **or any cgroup nested under it**.
 ///
@@ -272,6 +290,20 @@ mod tests {
         assert!(!proc_cgroup_is("0::/bulwark.run-123x\n", rel));
         // Empty / garbage → not a member (fail safe to the ancestry fallback).
         assert!(!proc_cgroup_is("", rel));
+    }
+
+    /// `pid_in_scope` must not report membership in a scope the process is not
+    /// in, and must fail safe (false) for an unreadable pid. The positive case
+    /// (an orphan genuinely in a bulwark scope) needs a live cgroup and is a VM
+    /// integration test. This is the standalone primitive the consent socket
+    /// uses to refuse in-tree answerers by membership rather than ancestry.
+    #[test]
+    fn pid_in_scope_negative_controls() {
+        assert!(!pid_in_scope(
+            std::process::id() as i32,
+            "/bulwark.run-does-not-exist"
+        ));
+        assert!(!pid_in_scope(-1, "/whatever")); // unreadable pid → false
     }
 
     #[test]

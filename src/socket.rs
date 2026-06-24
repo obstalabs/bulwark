@@ -130,6 +130,13 @@ pub struct SocketProvider {
     path: PathBuf,
     supervised_root: i32,
     timeout: Duration,
+    /// The supervised tree's cgroup scope (relative path), set by `bind_scope`
+    /// once the gate creates the scope. When present (Linux with cgroup-v2), a
+    /// peer in this scope is refused as an answerer — reparent-proof, so a
+    /// double-fork()'d orphan that sheds its ancestry still cannot self-answer.
+    /// `None` falls back to the ancestry check alone (macOS, or a v1 host).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    scope_rel: Option<String>,
 }
 
 impl SocketProvider {
@@ -169,7 +176,26 @@ impl SocketProvider {
             path: path.to_path_buf(),
             supervised_root,
             timeout,
+            scope_rel: None,
         })
+    }
+
+    /// True if `pid` belongs to the supervised tree and so must be refused as a
+    /// consent answerer — "consent the subject can forge is not consent". Tree
+    /// membership is the cgroup scope when known (reparent-proof) OR the ancestry
+    /// walk. The two are OR'd so cgroup can only *add* members ancestry misses:
+    /// the double-fork()'d orphan that reparented to init still carries the
+    /// scope. Where no scope is bound (macOS, v1 host) ancestry is the only
+    /// check — a documented residual for those hosts.
+    fn peer_in_tree(&self, pid: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(rel) = &self.scope_rel {
+            if crate::cgroup::pid_in_scope(pid, rel) {
+                return true;
+            }
+        }
+        pid == self.supervised_root
+            || proctree::is_descendant_of(pid, self.supervised_root, ANCESTRY_MAX_DEPTH)
     }
 
     /// Wait up to the deadline for an operator client to connect, refusing any
@@ -207,23 +233,27 @@ impl SocketProvider {
             }
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    // OFF-BAND ENFORCEMENT: refuse any answerer in the agent tree.
-                    if let Some(pid) = peer_pid(&stream) {
-                        let refused = pid == self.supervised_root
-                            || proctree::is_descendant_of(
-                                pid,
-                                self.supervised_root,
-                                ANCESTRY_MAX_DEPTH,
-                            );
-                        if refused {
+                    // OFF-BAND ENFORCEMENT: refuse any answerer in the agent tree,
+                    // judged by cgroup membership (reparent-proof) where available,
+                    // else ancestry. A peer we cannot identify (no SO_PEERCRED) is
+                    // refused — fail closed on the channel that makes loosening safe.
+                    match peer_pid(&stream) {
+                        Some(pid) if self.peer_in_tree(pid) => {
                             eprintln!(
                                 "[bulwark] refused consent connection from supervised pid {pid} \
                                  (agent may not answer its own consent)"
                             );
                             continue;
                         }
+                        None => {
+                            eprintln!(
+                                "[bulwark] refused consent connection with unidentifiable peer \
+                                 (no SO_PEERCRED); cannot prove it is off-band"
+                            );
+                            continue;
+                        }
+                        Some(_) => return Ok(Some(stream)),
                     }
-                    return Ok(Some(stream));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(anyhow!(e)).context("accept consent connection"),
@@ -239,6 +269,10 @@ impl Drop for SocketProvider {
 }
 
 impl ConsentProvider for SocketProvider {
+    fn bind_scope(&mut self, scope_rel: Option<&str>) {
+        self.scope_rel = scope_rel.map(|s| s.to_string());
+    }
+
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         let stream = match self.accept_operator() {
             Ok(Some(s)) => s,

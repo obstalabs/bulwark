@@ -36,6 +36,10 @@ pub enum GateMode<'a> {
 /// implements this trait, so it must exist on every platform.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Mirror of the enforcing gates' trait so the shared `CachingProvider` impl
+    /// type-checks on unsupported platforms. No-op (no enforcement here).
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 /// Whether a graceful-termination signal has been received. On platforms

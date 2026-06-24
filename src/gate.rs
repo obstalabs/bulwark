@@ -84,6 +84,13 @@ fn install_shutdown_handlers() {
 /// (wrapped in `main`) so the gate stays agnostic to the transport.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Inform the decider of the supervised tree's cgroup scope (relative path),
+    /// so an off-band consent channel can reject answerers that are members of
+    /// the tree by the same reparent-proof primitive the gate uses — not just by
+    /// ancestry, which a double-fork()'d orphan sheds. Default: no-op (modes with
+    /// no off-band channel, or where no cgroup scope exists).
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 /// Run `command` under the gate.
@@ -94,7 +101,7 @@ pub trait ConsentDecider {
 /// policy profile — keeping the gate agnostic to policy. Returns the child's
 /// exit code.
 pub fn run(
-    mode: GateMode,
+    mut mode: GateMode,
     mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
@@ -170,6 +177,15 @@ pub fn run(
             "[bulwark] note: cgroup-v2 scope unavailable; tree attribution falls back to \
              process-ancestry (a deliberately-orphaned descendant may escape — use --hardened)"
         ),
+    }
+
+    // Hand the consent decider the tree's cgroup scope so the off-band channel
+    // rejects in-tree answerers by membership, not ancestry: a double-fork()'d
+    // orphan that sheds its parent chain still carries the scope and so cannot
+    // self-answer its own consent prompt. No-op for modes without an off-band
+    // channel, and when no cgroup scope exists (ancestry remains the only check).
+    if let GateMode::DenyList { consent, .. } = &mut mode {
+        consent.bind_scope(scope.as_ref().map(|s| s.rel()));
     }
 
     // Fork + exec the supervised command. The supervisor (this process) stays

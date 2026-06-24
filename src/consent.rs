@@ -97,6 +97,11 @@ pub trait ConsentProvider {
     /// indefinitely — the kernel is holding the open. Returns the verdict and
     /// how it was reached.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Receive the supervised tree's cgroup scope (relative path) so an off-band
+    /// provider can reject in-tree answerers by membership. Default: no-op (the
+    /// static-deny floor and providers without a peer channel ignore it).
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 /// The default open-core provider: deny everything, immediately. This is the
@@ -182,6 +187,11 @@ impl<P: ConsentProvider> CachingProvider<P> {
 impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         CachingProvider::decide(self, req)
+    }
+
+    fn bind_scope(&mut self, scope_rel: Option<&str>) {
+        // The cache holds no peer channel; forward to the wrapped provider.
+        self.inner.bind_scope(scope_rel);
     }
 }
 
