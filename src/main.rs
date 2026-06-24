@@ -678,6 +678,25 @@ fn home_dir() -> String {
 /// behavior is regression-locked by a unit test: the hivebus handoff is placed by
 /// a SEPARATE ssh session (see `place_hivebus_material`), never woven into this
 /// script — so this output does not depend on the hivebus flags at all.
+/// An unguessable hex token for the remote run-directory name, so an attacker on
+/// the remote host cannot predict the path (in world-writable /tmp) and
+/// pre-squat the consent lanes. Reads the OS CSPRNG; on the (very unlikely)
+/// failure to read it, falls back to time+pid — degraded entropy, but the gate
+/// script's fail-closed `mkdir`/`mkfifo` remain the structural backstop.
+fn rand_token() -> String {
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if std::io::Read::read_exact(&mut f, &mut buf).is_ok() {
+            return buf.iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}{:x}", std::process::id())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_gate_script(
     remote_dir: &str,
@@ -705,10 +724,17 @@ fn build_gate_script(
         Some(_) => format!("env HOME={remote_dir} USER=bulwark-worker LOGNAME=bulwark-worker "),
         None => String::new(),
     };
+    // `mkdir {dir}` (NOT `-p`) so a pre-existing directory at the run path is a
+    // hard error under `set -e` — combined with the unguessable random suffix in
+    // `{dir}`, an attacker cannot pre-create the run directory to squat the
+    // lanes. `mkfifo` without `2>/dev/null || true` then fails closed if the
+    // verdict/prompt FIFO already exists, so the gate never adopts a FIFO it did
+    // not create (which an attacker could otherwise read prompts from or write
+    // forged verdicts into to self-answer the off-band consent).
     format!(
         r#"set -e
-mkdir -p {dir}
-mkfifo -m 600 {pl} {vl} 2>/dev/null || true
+mkdir {dir}
+mkfifo -m 600 {pl} {vl}
 sudo {env}{bw} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
   {worker}{protect} -- {agent}
@@ -835,9 +861,15 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the local binary when arch-compatible, or fetch the matching release).
     let remote_bin = deploy::ensure_remote_bulwark(target, deploy_mode)?;
 
-    // A unique run dir on the remote host holds the two lane FIFOs.
+    // A unique run dir on the remote host holds the two lane FIFOs. The name
+    // carries an UNGUESSABLE random token (not just the local pid): the dir lives
+    // in world-writable /tmp on the remote, so a predictable name would let a
+    // local attacker pre-create the verdict FIFO and self-answer the off-band
+    // consent. With a random suffix the attacker cannot pre-create the path, and
+    // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
+    // the path is somehow occupied.
     let run_id = std::process::id();
-    let remote_dir = format!("/tmp/bulwark-remote-{run_id}");
+    let remote_dir = format!("/tmp/bulwark-remote-{run_id}-{}", rand_token());
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
@@ -2490,8 +2522,8 @@ mod tests {
             "'claude' '-p' 'fix it'",
         );
         let expected = "set -e\n\
-mkdir -p /tmp/bulwark-remote-42\n\
-mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts 2>/dev/null || true\n\
+mkdir /tmp/bulwark-remote-42\n\
+mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts\n\
 sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\n  \
 --prompt-out /tmp/bulwark-remote-42/prompts --verdict-in /tmp/bulwark-remote-42/verdicts \\\n  \
 --protect '/etc/shadow' -- 'claude' '-p' 'fix it'\n\
