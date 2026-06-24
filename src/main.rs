@@ -1673,6 +1673,11 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         if args.no_base_set {
             al = al.without_base();
         }
+        // Snapshot the inodes reachable under each grant NOW, before the agent
+        // runs, so grant decisions can be gated on inode identity rather than the
+        // mutable path — defeating a later hardlink/rename of a foreign file into
+        // a granted path.
+        al.snapshot_grants();
         // Default-deny only holds if EVERY filesystem the agent could read from
         // is marked. A single mark on `/` misses other mounts (tmpfs `/tmp`, a
         // separate `/var` or data volume, network mounts) — opens there would be

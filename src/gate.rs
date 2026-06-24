@@ -579,9 +579,11 @@ fn decide(
             );
         }
         GateMode::AllowList { allow } => {
-            // Default-deny: allow iff the observed path matches an allow rule
-            // (runtime base set + operator grants), else deny. No prompt.
-            let allowed = allow.allows(&path);
+            // Default-deny: allow iff the base set matches the path, OR a grant
+            // glob matches the path AND the opened inode is in the grant launch
+            // snapshot. The inode gate defeats hardlink/rename of a foreign file
+            // into a granted path (B2 / A-2). No prompt.
+            let allowed = allow.allows_open(&path, &key);
             log.record(&Receipt {
                 pid,
                 dev: key.dev,

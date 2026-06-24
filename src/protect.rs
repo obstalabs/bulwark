@@ -29,7 +29,7 @@ pub struct InodeKey {
 }
 
 impl InodeKey {
-    fn of(meta: &fs::Metadata) -> Self {
+    pub(crate) fn of(meta: &fs::Metadata) -> Self {
         InodeKey {
             dev: meta.dev(),
             ino: meta.ino(),
