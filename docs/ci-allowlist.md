@@ -99,11 +99,15 @@ so it shares the same boundary (see the project's security boundary notes):
   renamed into a grant to read it. If a dispatched agent needs to read back its
   own output, write it to stdout or to a path you grant and pre-create, rather
   than relying on re-reading a file it made mid-run.
-- Inode identity is currently `(device, inode)`. On filesystems that recycle
-  inode numbers (ext4, xfs), a **granted file deleted mid-run** whose inode is
-  then reused by another file on the same filesystem can be read through the
-  stale snapshot entry. Don't delete granted files during a run; a generation-
-  aware key that closes this is planned.
+- Grant identity is the inode **plus its generation** (`FS_IOC_GETVERSION`), so a
+  granted file deleted mid-run whose inode number is then reused by another file
+  on the same filesystem is **denied** — the kernel bumps the generation on reuse,
+  so the foreign file does not match the snapshot. This is verified on ext4. On a
+  filesystem that reports no generation, the gate falls back to `(device, inode)`
+  and fails closed if it cannot confirm freshness; in practice the filesystems that
+  report no generation (tmpfs, overlayfs) also do not recycle inode numbers, so
+  there is nothing to confuse. A networked grant filesystem such as NFS is
+  untested — keep granted material on a local filesystem.
 
 Bulwark is a tool with limits, stated up front — not a magic wand. Used with
 its grain (one granted path, sensitive material kept off the host, paired with

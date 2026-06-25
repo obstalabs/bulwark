@@ -198,6 +198,27 @@ impl SocketProvider {
             || proctree::is_descendant_of(pid, self.supervised_root, ANCESTRY_MAX_DEPTH)
     }
 
+    /// True only if `pid` is a process we can still observe (its `/proc/<pid>`
+    /// exists). `SO_PEERCRED` reports the pid captured at `connect()`, which
+    /// survives the peer's death — so a supervised child can connect, send a
+    /// verdict, and `exit()` before we check membership; its `/proc` entry then
+    /// vanishes, the in-tree test silently fails to prove membership, and a
+    /// "reject only if provably in-tree" rule would accept the dead in-tree peer.
+    /// We therefore require the peer to be LIVE: a peer we cannot observe cannot
+    /// be proven off-band, so it is refused (fail closed). The connection's own
+    /// open fd keeps the socket alive for the verdict exchange even if the writer
+    /// process has exited — but we will not *trust* a verdict from a process we
+    /// can no longer attribute.
+    #[cfg(target_os = "linux")]
+    fn peer_is_live(pid: i32) -> bool {
+        pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(target_os = "macos")]
+    fn peer_is_live(pid: i32) -> bool {
+        // kill(pid, 0) succeeds iff the process exists and we may signal it.
+        pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    }
+
     /// Wait up to the deadline for an operator client to connect, refusing any
     /// peer inside the supervised tree.
     fn accept_operator(&self) -> Result<Option<UnixStream>> {
@@ -233,22 +254,35 @@ impl SocketProvider {
             }
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    // OFF-BAND ENFORCEMENT: refuse any answerer in the agent tree,
-                    // judged by cgroup membership (reparent-proof) where available,
-                    // else ancestry. A peer we cannot identify (no SO_PEERCRED) is
-                    // refused — fail closed on the channel that makes loosening safe.
+                    // OFF-BAND ENFORCEMENT (fail closed): accept ONLY a peer we can
+                    // positively prove is a live process outside the agent tree.
+                    // A peer that is in the tree (cgroup membership / ancestry), one
+                    // we cannot identify (no SO_PEERCRED), or one that has already
+                    // EXITED (so we can no longer attribute it — the dead-peer race,
+                    // where a supervised child connects, sends a verdict, and dies
+                    // before this check) is refused. "Reject only if provably
+                    // in-tree" would accept the dead in-tree peer; "accept only if
+                    // provably live and out-of-tree" does not.
                     match peer_pid(&stream) {
-                        Some(pid) if self.peer_in_tree(pid) => {
-                            eprintln!(
-                                "[bulwark] refused consent connection from supervised pid {pid} \
-                                 (agent may not answer its own consent)"
-                            );
-                            continue;
-                        }
                         None => {
                             eprintln!(
                                 "[bulwark] refused consent connection with unidentifiable peer \
                                  (no SO_PEERCRED); cannot prove it is off-band"
+                            );
+                            continue;
+                        }
+                        Some(pid) if !Self::peer_is_live(pid) => {
+                            eprintln!(
+                                "[bulwark] refused consent connection from pid {pid} that is no \
+                                 longer observable (cannot attribute; a supervised child may not \
+                                 answer its own consent by exiting before the check)"
+                            );
+                            continue;
+                        }
+                        Some(pid) if self.peer_in_tree(pid) => {
+                            eprintln!(
+                                "[bulwark] refused consent connection from supervised pid {pid} \
+                                 (agent may not answer its own consent)"
                             );
                             continue;
                         }
