@@ -1670,6 +1670,27 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
                  file/dir)."
             );
         }
+        // The faithfulness check above is purely lexical on the glob string.
+        // hardened mode then applies the Landlock rule via `open(O_PATH)`, which
+        // FOLLOWS symlinks — so an operator grant whose concrete prefix is a
+        // symlink to a broader directory (e.g. `/home/agent/logs` -> `/`) would
+        // silently floor the symlink TARGET, wider than named and invisible in the
+        // grant string. Reject any operator grant whose concrete prefix resolves
+        // through a symlink to a different path; the operator must name the real
+        // target. Base-set system aliases like `/lib -> /usr/lib` are not operator
+        // input and never reach this check.
+        let prefix = glob::landlock_prefix(g);
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            let real_s = real.to_string_lossy();
+            if real_s != prefix {
+                anyhow::bail!(
+                    "--hardened --allow {g:?} resolves through a symlink \
+                     ({prefix} -> {real_s}): Landlock would floor the wider symlink \
+                     target, not the path you named. Re-grant the real path explicitly \
+                     (e.g. {real_s:?} or a trailing '/**' under it)."
+                );
+            }
+        }
     }
     Ok(())
 }

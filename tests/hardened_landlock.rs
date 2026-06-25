@@ -87,3 +87,47 @@ fn hardened_floor_denies_etc_shadow() {
         "/etc/shadow must be denied under the hardened floor; got: {out:?}"
     );
 }
+
+/// Regression: a `--hardened --allow` operator grant whose concrete prefix is
+/// a SYMLINK to a broader directory must be REJECTED before any Landlock rule is
+/// applied. Otherwise `open(O_PATH)` follows the symlink and floors the wider
+/// target — a silent widening invisible in the grant string. The rejection is a
+/// CLI-level bail (no Landlock/root needed), so this test checks stderr+status.
+#[test]
+#[ignore = "requires Linux (filesystem symlink + canonicalize)"]
+fn hardened_rejects_symlink_widening_grant() {
+    let dir = scratch("f4");
+    let broad = dir.join("broad");
+    fs::create_dir_all(broad.join("sub")).unwrap();
+    fs::write(broad.join("sub/secret.env"), "BROADSECRET=widened\n").unwrap();
+    // A concrete-looking grant that is actually a symlink to the broad dir.
+    let glink = dir.join("glink");
+    std::os::unix::fs::symlink(&broad, &glink).unwrap();
+
+    let out = Command::new(bin())
+        .args(["run", "--hardened", "--allow"])
+        .arg(&glink)
+        .args(["--", "cat"])
+        .arg(broad.join("sub/secret.env"))
+        .output()
+        .expect("spawn bulwark");
+
+    // Must fail (non-zero) and never print the secret.
+    assert!(
+        !out.status.success(),
+        "a symlink-widening hardened grant must be rejected; status was success"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("BROADSECRET"),
+        "the symlink target must not be readable; got: {combined:?}"
+    );
+    assert!(
+        combined.contains("resolves through a symlink"),
+        "rejection should name the symlink widening; got: {combined:?}"
+    );
+}
