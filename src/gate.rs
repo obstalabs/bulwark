@@ -188,25 +188,6 @@ pub fn run(
         consent.bind_scope(scope.as_ref().map(|s| s.rel()));
     }
 
-    // Allow-list mode: set up the grant create/move witness so a file genuinely
-    // CREATED under a grant (or a log rotated in) becomes readable, while a
-    // foreign inode hardlinked/renamed in stays denied by the inode snapshot.
-    // `None` (kernel without FID, or mark failure) leaves the strict snapshot in
-    // force — post-launch files denied, never leaked.
-    let mut grant_watch = match &mode {
-        GateMode::AllowList { allow } => {
-            let w = crate::grantwatch::GrantWatch::new(
-                &allow.grant_concrete_dirs(),
-                allow.grants_list(),
-            );
-            if w.is_some() {
-                eprintln!("[bulwark] allow-list: grant create-witness active (rotated/created files allowed)");
-            }
-            w
-        }
-        _ => None,
-    };
-
     // Fork + exec the supervised command. The supervisor (this process) stays
     // root and holds the fanotify fd; `worker` drops only the agent child. The
     // child joins the cgroup scope (if any) before exec, while still root.
@@ -225,14 +206,7 @@ pub fn run(
     }
 
     // Event loop: answer permission events until the child exits.
-    let exit_code = event_loop(
-        &fan,
-        child,
-        &mut log,
-        mode,
-        scope.as_ref(),
-        grant_watch.as_mut(),
-    )?;
+    let exit_code = event_loop(&fan, child, &mut log, mode, scope.as_ref())?;
     Ok(exit_code)
 }
 
@@ -356,7 +330,6 @@ fn event_loop(
     log: &mut ReceiptLog,
     mut mode: GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
-    mut grant_watch: Option<&mut crate::grantwatch::GrantWatch>,
 ) -> Result<i32> {
     const BUF_LEN: usize = 8192;
     let mut buf = [0u8; BUF_LEN];
@@ -376,23 +349,14 @@ fn event_loop(
             return Ok(130); // 128 + SIGINT, conventional for signal termination
         }
 
-        // Poll the permission fd, plus the grant create-witness notif fd when
-        // present, with a timeout so we can reap the child even when idle.
-        let gw_fd = grant_watch.as_ref().map(|w| w.fd());
-        let mut pfds = [
-            libc::pollfd {
-                fd: fan.fd,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: gw_fd.unwrap_or(-1),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        let nfds = if gw_fd.is_some() { 2 } else { 1 };
-        let pr = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, 200) };
+        // Poll the fanotify fd with a timeout so we can reap the child even
+        // when no events are flowing.
+        let mut pfd = libc::pollfd {
+            fd: fan.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pr = unsafe { libc::poll(&mut pfd, 1, 200) };
         if pr < 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
@@ -401,13 +365,7 @@ fn event_loop(
             return Err(anyhow!(err)).context("poll");
         }
 
-        // Drain create/move notifications BEFORE judging opens, so a file just
-        // created under a grant is witnessed before its open is decided.
-        if let Some(w) = grant_watch.as_deref_mut() {
-            w.drain();
-        }
-
-        if pr > 0 && (pfds[0].revents & libc::POLLIN) != 0 {
+        if pr > 0 && (pfd.revents & libc::POLLIN) != 0 {
             let n = unsafe { libc::read(fan.fd, buf.as_mut_ptr() as *mut libc::c_void, BUF_LEN) };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -416,15 +374,7 @@ fn event_loop(
                 }
                 return Err(anyhow!(err)).context("read fanotify");
             }
-            handle_events(
-                fan,
-                &buf[..n as usize],
-                child,
-                log,
-                &mut mode,
-                scope,
-                grant_watch.as_deref_mut(),
-            );
+            handle_events(fan, &buf[..n as usize], child, log, &mut mode, scope);
         }
 
         // Reap the foreground child once (a second waitpid would return ECHILD).
@@ -521,7 +471,6 @@ fn handle_events(
     log: &mut ReceiptLog,
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
-    mut grant_watch: Option<&mut crate::grantwatch::GrantWatch>,
 ) {
     let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut offset = 0usize;
@@ -538,15 +487,7 @@ fn handle_events(
         }
 
         if meta.mask & libc::FAN_OPEN_PERM != 0 && meta.fd >= 0 {
-            decide(
-                fan,
-                &meta,
-                child,
-                log,
-                mode,
-                scope,
-                grant_watch.as_deref_mut(),
-            );
+            decide(fan, &meta, child, log, mode, scope);
         }
         if meta.fd >= 0 {
             unsafe {
@@ -592,7 +533,6 @@ fn decide(
     log: &mut ReceiptLog,
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
-    mut grant_watch: Option<&mut crate::grantwatch::GrantWatch>,
 ) {
     let pid = meta.pid;
 
@@ -655,34 +595,11 @@ fn decide(
             );
         }
         GateMode::AllowList { allow } => {
-            // Default-deny. Allow iff:
-            //   (a) the base set matches the path (documented read floor), OR a
-            //       grant glob matches the path AND the inode is in the launch
-            //       snapshot — the inode gate that defeats hardlink/rename of a
-            //       foreign file into a granted path (B2 / A-2); OR
-            //   (b) the inode was WITNESSED as created (not moved) under a grant
-            //       AND has link count 1 AND is opened on a grant path — so a file
-            //       the agent genuinely creates, or a log rotated into the grant,
-            //       is readable, while a hardlinked foreign inode (nlink>1) and a
-            //       renamed-in inode (no create witness / evicted) stay denied.
-            let (allowed, reason) = if allow.allows_open(&path, &key) {
-                (true, "allowlist match")
-            } else if allow.grant_path_matches(&path) {
-                // Tighten the create/open race: drain any just-arrived create
-                // notifications before consulting the witness, then fail closed.
-                if let Some(w) = grant_watch.as_deref_mut() {
-                    w.drain();
-                }
-                let witnessed = grant_watch.as_deref().is_some_and(|w| w.witnessed(&key))
-                    && crate::grantwatch::nlink_of_fd(meta.fd) == 1;
-                if witnessed {
-                    (true, "allowlist grant (created in grant, single link)")
-                } else {
-                    (false, "not in allowlist (default deny)")
-                }
-            } else {
-                (false, "not in allowlist (default deny)")
-            };
+            // Default-deny: allow iff the base set matches the path, OR a grant
+            // glob matches the path AND the opened inode is in the grant launch
+            // snapshot. The inode gate defeats hardlink/rename of a foreign file
+            // into a granted path (B2 / A-2). No prompt.
+            let allowed = allow.allows_open(&path, &key);
             log.record(&Receipt {
                 pid,
                 dev: key.dev,
@@ -694,7 +611,11 @@ fn decide(
                 },
                 path: &path,
                 ancestry: &ancestry,
-                reason,
+                reason: if allowed {
+                    "allowlist match"
+                } else {
+                    "not in allowlist (default deny)"
+                },
                 source: "allowlist",
             });
             respond(fan.fd, meta.fd, allowed);
