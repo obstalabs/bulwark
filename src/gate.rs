@@ -596,10 +596,12 @@ fn decide(
         }
         GateMode::AllowList { allow } => {
             // Default-deny: allow iff the base set matches the path, OR a grant
-            // glob matches the path AND the opened inode is in the grant launch
-            // snapshot. The inode gate defeats hardlink/rename of a foreign file
-            // into a granted path (B2 / A-2). No prompt.
-            let allowed = allow.allows_open(&path, &key);
+            // glob matches the path AND the opened (inode, generation) is in the
+            // grant launch snapshot. The inode gate defeats hardlink/rename of a
+            // foreign file into a granted path; the generation defeats
+            // inode-number REUSE of a deleted granted file. No prompt.
+            let opened_gen = crate::allowlist::fs_generation_fd(meta.fd);
+            let allowed = allow.allows_open(&path, &key, opened_gen);
             log.record(&Receipt {
                 pid,
                 dev: key.dev,
