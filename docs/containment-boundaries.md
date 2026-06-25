@@ -56,9 +56,11 @@ hardware (Linux kernel 6.12; macOS 26 on Apple Silicon) — not asserted.
 **‡** A read on a descriptor opened *outside* the supervised tree and passed in has no
 `open()` for the gate to see. It requires a cooperating outside process that already has the
 secret — the agent cannot reach it alone (if it spawns the sender, the sender's open is
-gated). `--hardened` (Landlock) denies it. See *Reads that never call `open()`* below. On
-macOS the same boundary applies; closing the inherited-fd `mmap` variant is tracked
-separately.
+gated). `--hardened` does **not** close it: Landlock mediates `open()`, not a `read()` on a
+descriptor that is already open, so a passed-in fd is readable under `--hardened` too. The
+only thing that closes the practical route is that the sender must be outside the confined
+tree to obtain the fd. See *Reads that never call `open()`* below. On macOS the same boundary
+applies.
 
 **†** Denied by default because a would-be-root agent is dropped to an unprivileged uid (see
 *Root agents and cgroup migration* below), and an unprivileged process cannot migrate
@@ -170,12 +172,14 @@ This is the same boundary as the container/unwrapped-process case, seen from the
 it requires a **cooperating process outside the tree that already has the secret**. The
 agent cannot reach it alone — if the agent spawns the sender, the sender is *in* the tree
 and its `open()` is gated, so it never obtains a descriptor to pass (verified: the in-tree
-sender's open is denied). And `--hardened` closes it outright: the Landlock floor binds the
-agent's own credential, so a read on any descriptor — however obtained — is denied unless it
-is in the allowlist (verified). Tested matrix: deny-list **leaks** to a passed-in fd from a
-cooperating outside process; `--hardened` **denies** it; agent-spawns-the-sender **denies**
-it. Treat fd-passing across the tree boundary the same way you treat the Docker socket:
-don't hand a confined agent a live descriptor to something it shouldn't read.
+sender's open is denied). `--hardened` does **not** change this: Landlock mediates the
+`open()`, not a `read()`/`mmap()` on a descriptor that is already open, so a fd opened
+outside the tree and passed in is readable under `--hardened` too (verified). Tested matrix:
+both deny-list and `--hardened` **leak** to a passed-in fd from a cooperating outside
+process; agent-spawns-the-sender is **denied** (the in-tree open is gated). The thing that
+closes the practical route is structural, not a flag: the sender must be outside the confined
+tree to hold the fd. Treat fd-passing across the tree boundary the same way you treat the
+Docker socket: don't hand a confined agent a live descriptor to something it shouldn't read.
 
 (For completeness: an inode opened with `open_by_handle_at`, io_uring's `openat2` direct
 descriptors, and a renamed/hardlinked/bind-mounted path are all **gated** — they still issue
