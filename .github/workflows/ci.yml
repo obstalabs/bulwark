@@ -88,6 +88,20 @@ jobs:
       - name: Remote consent integration tests (decision/prompt split, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test remote_consent -- --ignored --test-threads=1
 
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    # Audits the dependency tree on every PR: RustSec security advisories, yanked
+    # crates, license compatibility (the allow-list in deny.toml), and crate
+    # sources. Policy lives in deny.toml. Runs on the free hosted runner — no
+    # privileged steps, so it does not need the self-hosted box.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
   macos-swift-edge:
     name: macOS Swift ES edge compile
     # enable after registering a self-hosted macOS runner. The current
