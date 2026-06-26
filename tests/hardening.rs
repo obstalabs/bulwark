@@ -282,11 +282,19 @@ fn queue_overflow_fails_closed() {
         pool = pool.display(),
         secret = secret.display()
     );
+    // Route receipts to a FILE, not stderr: under this flood the gate emits ~100k
+    // allow-receipt lines, and on a slow/loaded CI runner that stderr volume can
+    // delay the `LEAKS=` marker past a tight timeout — making the test flaky on
+    // capture, not on the actual security property. A receipts file keeps stdout
+    // clean so the marker is deterministic.
+    let receipts = dir.join("receipts.jsonl");
     let out = Command::new("timeout")
-        .arg("30")
+        .arg("90")
         .arg(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
+        .arg("--receipts")
+        .arg(&receipts)
         .arg("--")
         .arg("bash")
         .arg("-c")
@@ -302,9 +310,21 @@ fn queue_overflow_fails_closed() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        combined.contains("LEAKS=0"),
-        "queue overflow must fail closed (zero protected reads); got:\n{combined}"
+    // The probe counts how many of its reads actually returned the secret content
+    // and prints `LEAKS=<n>` (its own grep — note the supervisor also echoes the
+    // command line, which literally contains the word SECRETVALUE, so asserting on
+    // that substring would false-positive; the count is the real signal). The fix
+    // requires zero. A MISSING marker means the run was cut short (e.g. the outer
+    // timeout under load) — inconclusive, not a pass — so require it explicitly.
+    let marker = combined
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("LEAKS="))
+        .map(str::trim);
+    assert_eq!(
+        marker,
+        Some("0"),
+        "queue overflow must fail closed with zero protected reads; LEAKS marker was {marker:?} \
+         (None = probe did not finish in time, not a pass); output:\n{combined}"
     );
 }
 
