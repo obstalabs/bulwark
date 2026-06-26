@@ -117,9 +117,24 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let parent_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        // O_NOFOLLOW at the APPLY site, where the rule is actually added: the
+        // launch-time widening check (`reject_widening_hardened_grants`) validates
+        // the grant string, but the floor's breadth is decided HERE by what this
+        // open() resolves to. If the concrete prefix is a symlink, refuse it rather
+        // than floor its (possibly wider) target — this closes the whole
+        // check-vs-apply class structurally, including the case where the prefix did
+        // not exist at check time (canonicalize returned Err and the string check
+        // was skipped) but is a symlink by the time we open it.
+        let parent_fd = unsafe {
+            libc::open(
+                cpath.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
         if parent_fd < 0 {
-            eprintln!("[bulwark] hardened: skip allow {concrete} (not present)");
+            // ELOOP here means the prefix is a symlink — denied on purpose, not
+            // merely absent. Either way the grant adds no rule (fail closed).
+            eprintln!("[bulwark] hardened: skip allow {concrete} (not present or symlink)");
             continue;
         }
         let rule = PathBeneathAttr {
