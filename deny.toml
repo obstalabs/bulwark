@@ -1,0 +1,49 @@
+# cargo-deny supply-chain policy.
+#
+# Bulwark is a security tool; its dependency tree should be auditable and free of
+# known-vulnerable, unmaintained, or license-incompatible crates. This file makes
+# that a CI gate. Run locally with `cargo deny check`.
+
+[advisories]
+# Fail the build on any crate with a RustSec security advisory. `deny` is the
+# default for vulnerabilities; an unmaintained crate is also worth flagging.
+version = 2
+yanked = "deny"
+# If a specific advisory ever needs a documented, reviewed exception, add its
+# RUSTSEC id here with a comment explaining why — never blanket-ignore.
+ignore = []
+
+[licenses]
+# Bulwark is AGPL-3.0-or-later. Every dependency below is a permissive license
+# compatible with redistribution under AGPL. The list is exhaustive for the
+# current tree (`cargo deny list`); adding a dependency with a license not on
+# this list fails CI, which is the point — a copyleft or unknown-licensed dep
+# should be a conscious decision, not a silent addition.
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "AGPL-3.0-or-later", # Bulwark itself
+]
+# A crate with no SPDX expression at all must be reviewed by hand, not assumed.
+unused-allowed-license = "allow"
+
+[bans]
+# Flag multiple versions of the same crate (bloat / confusion surface) as a warn,
+# not a hard fail — a transitive duplicate is common and not a security issue.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only crates.io. A git or unknown-registry dependency in a security tool should
+# be an explicit, reviewed choice.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
