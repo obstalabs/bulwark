@@ -157,3 +157,35 @@ fn hardened_rejects_relative_grant() {
         "rejection should name the absolute-path requirement; got: {combined:?}"
     );
 }
+
+/// Regression: a `--hardened --allow` grant with a symlink in an INTERMEDIATE
+/// path component (e.g. `/base/slink/sub/**` where `slink` is a symlink to a
+/// broader directory) must not widen the floor. The apply site resolves the
+/// prefix with `openat2(RESOLVE_NO_SYMLINKS)`, which refuses a symlink in any
+/// component — not just the final one — so the grant adds no rule and the
+/// symlink target is not floored.
+#[test]
+#[ignore = "requires Linux + Landlock + root + openat2"]
+fn hardened_denies_intermediate_symlink_grant() {
+    let dir = scratch("intermsym");
+    let broad = dir.join("broad");
+    fs::create_dir_all(broad.join("sub")).unwrap();
+    fs::write(broad.join("sub/secret.env"), "INTERMSECRET=widened\n").unwrap();
+    // slink is an intermediate component of the grant, pointing at the broad dir.
+    let slink = dir.join("slink");
+    std::os::unix::fs::symlink(&broad, &slink).unwrap();
+    let grant = format!("{}/sub/**", slink.display());
+
+    let out = run_hardened(
+        &grant,
+        &[
+            "bash",
+            "-c",
+            &format!("cat {} 2>&1", broad.join("sub/secret.env").display()),
+        ],
+    );
+    assert!(
+        !out.contains("INTERMSECRET"),
+        "a symlink in an intermediate grant component must not widen the floor; got: {out:?}"
+    );
+}
