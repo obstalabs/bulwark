@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-XX
+
+Security-hardening release. The read gate was put through repeated adversarial review —
+attacking the gate, fixing what was found, then attacking the fixes — until two
+consecutive rounds found nothing a supervised agent could reach. Around a dozen-and-a-half
+issues were closed, each with a regression test that fails on the pre-fix code and passes
+on the fixed code, verified on real hardware (Linux kernel 6.12, macOS 26). No CLI behavior
+changes for existing users; all changes tighten enforcement or correct fail-open paths.
+
+### Fixed
+- **Grants are gated by inode identity, not path.** Allow-list (`--deny-all`) grants are
+  snapshotted by `(inode, generation)` at launch, so a foreign file hardlinked, renamed, or
+  (via inode-number reuse) swapped into a granted location is denied. macOS grants are
+  gated by inode as well, not by path-beneath the grant root.
+- **`--protect <dir>` covers nested and post-launch files** under the directory, not only
+  the entries present at launch.
+- **`--hardened` grants can no longer silently widen.** A grant that would floor a broader
+  subtree than its pattern names is rejected; grants must be absolute and may not resolve
+  through a symlink in any path component (the prefix is opened with
+  `openat2(RESOLVE_NO_SYMLINKS)`).
+- **Off-band consent is reparent-proof and live-checked.** The consent channel refuses an
+  answerer that is part of the supervised tree (by cgroup membership, not ancestry alone)
+  and refuses a peer that has exited before its identity can be verified — so a supervised
+  process cannot answer its own consent.
+- **Fail-closed corrections.** The fanotify permission queue is unbounded
+  (`FAN_UNLIMITED_QUEUE`) so a flood applies backpressure instead of overflowing and failing
+  open; an in-tree open whose event-fd `fstat` fails is denied; the worker drop sets
+  `PR_SET_NO_NEW_PRIVS` so a dropped process cannot regain root via a setuid binary; the
+  remote consent run directory uses an unguessable name and fails closed on a pre-existing
+  path or control FIFO.
+
 ## [0.7.1] - 2026-06-XX
 
 macOS install becomes zero-setup: the gate ships with the CLI and the CLI finds it

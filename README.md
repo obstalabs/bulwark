@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.png">
+    <img alt="Bulwark" src="assets/logo-dark.png" width="200">
+  </picture>
+</p>
+
 # Bulwark
 
 > The kernel asks before the bytes leave the disk.
@@ -174,6 +182,18 @@ This bounds the blast radius *after* an unclean recovery. It does not change the
 held-read fail-open behaviour at the instant of a hard kill — that is what
 `--hardened` is for.
 
+## Security review
+
+Before the enforcement was opened publicly it went through repeated adversarial
+review — attacking the gate, fixing what was found, then attacking the fixes —
+until two consecutive rounds found nothing a supervised agent could reach. That
+pass surfaced around a dozen-and-a-half issues, including a few that the first
+round of fixes introduced; each is closed with a regression test that fails on
+the pre-fix code and passes on the fixed code, verified on real hardware (Linux
+kernel 6.12, macOS 26). The boundaries Bulwark does **not** cross are documented
+as plainly as the ones it does — see **Known limitations** below and
+[docs/containment-boundaries.md](docs/containment-boundaries.md).
+
 ## Known limitations
 
 - **Reads, not consequences.** Bulwark gates file opens; it does not stop use of
@@ -182,8 +202,8 @@ held-read fail-open behaviour at the instant of a hard kill — that is what
 - **fanotify modes fail open on hard supervisor death.** A `SIGKILL`/crash while
   a read is held releases that read as allowed (documented kernel behaviour); a
   graceful `SIGTERM` fails closed. The `--hardened` (Landlock) mode is crash-safe
-  and has no this limitation. The integrity circuit-breaker (below) bounds the
-  blast radius *after* such an event but does not change the held read at the
+  and does not have this limitation. The integrity circuit-breaker (below) bounds
+  the blast radius *after* such an event but does not change the held read at the
   moment of the kill.
 - Allow-list/hardened modes allow a runtime base set (`bulwark base-set`) so the
   agent can execute — a deliberate, inspectable trade-off.
