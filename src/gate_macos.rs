@@ -44,6 +44,15 @@ pub enum GateMode<'a> {
 /// startup consent decisions from its config, then answers AUTH_OPEN from memory.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Receive the supervised tree's membership scope identifier, mirroring the
+    /// Linux gate so the shared `CachingProvider` impl type-checks on every
+    /// platform. macOS attributes the tree by the Endpoint Security PID set held
+    /// in the supervisor (not a cgroup path), so the consent socket has no scope
+    /// string to bind here yet and this is a no-op: socket membership stays the
+    /// ancestry check. Wiring the ES PID set into the consent socket (the macOS
+    /// analog of the cgroup fix) is tracked as a documented residual.
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 pub(crate) fn shutdown_requested() -> bool {
@@ -61,11 +70,22 @@ pub struct WorkerCreds {
     pub gid: u32,
 }
 
-/// Drop the calling process to `creds`, permanently, in the security-critical
-/// order: supplementary groups, then gid, then uid. Returns `Err` on any failure
-/// — the caller MUST NOT exec if this fails. Runs in the forked child before
-/// exec, so it uses only raw libc calls (no allocation, no panics). Mirrors the
-/// Linux gate's `drop_to`.
+/// Drop the calling process to `creds`, in the security-critical order:
+/// supplementary groups, then gid, then uid. Returns `Err` on any failure — the
+/// caller MUST NOT exec if this fails. Runs in the forked child before exec, so it
+/// uses only raw libc calls (no allocation, no panics). Mirrors the Linux gate's
+/// `drop_to`.
+///
+/// LIMITATION (honest): unlike Linux, macOS has no `PR_SET_NO_NEW_PRIVS`, so this
+/// drop is NOT irreversible — a dropped agent that execs a setuid-root binary can
+/// regain root, and a re-rooted agent could then `SIGKILL` the ES edge (re-opening
+/// the edge-death fail-open window). The `setuid(0)`-must-fail check below proves
+/// only that the *current* credentials cannot regain root. There is no macOS
+/// primitive to ignore setuid bits on future execs; this residual is documented in
+/// `docs/macos.md`. The mitigations that do hold: the agent runs unprivileged for
+/// its own opens, and the ES membership set lives in the gate's memory (not an
+/// agent-writable filesystem), so a re-rooted agent cannot rewrite tree membership
+/// the way a Linux root agent can rewrite cgroup membership.
 ///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
@@ -80,7 +100,8 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     if libc::setuid(creds.uid as libc::uid_t) != 0 {
         return Err(libc::EPERM);
     }
-    // The drop must be permanent: regaining root must now fail.
+    // The drop must be permanent for the *current* credentials: regaining root must
+    // now fail. (macOS cannot also block setuid-bit exec — see the doc comment.)
     if libc::setuid(0) == 0 {
         return Err(libc::EPERM);
     }
@@ -309,17 +330,18 @@ fn write_config(
             for glob in allow.base_globs() {
                 push_config_line(&mut body, "allow_glob", glob)?;
             }
-            for root in resolve_allow_grant_roots(allow.grant_globs())? {
+            // Grants are gated on inode identity, NOT a path-beneath grant root.
+            // The prior `allow_root` rule allowed any object whose canonical path
+            // sat under the grant directory, so a foreign secret hardlinked or
+            // renamed into a granted path was allowed (B2 ported to macOS). The ES
+            // edge already enforces an `allow_inode` membership set; we feed it the
+            // launch snapshot of grant-glob-matching inodes so an inode that was
+            // never genuinely under the grant is denied.
+            for key in allow.grant_inode_keys() {
                 push_config_line(
                     &mut body,
-                    "allow_root",
-                    &format!(
-                        "{}:{}:{}:{}",
-                        root.dev,
-                        root.ino,
-                        if root.recursive { "recursive" } else { "exact" },
-                        root.path.display()
-                    ),
+                    "allow_inode",
+                    &format!("{}:{}", key.dev, key.ino),
                 )?;
             }
         }
@@ -338,6 +360,9 @@ fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+// Superseded by inode-membership grants (`allow_inode`); retained for a possible
+// recursive grant-root layer (the macOS analog of Linux move-in tracking).
+#[allow(dead_code)]
 struct AllowGrantRoot {
     dev: u64,        // root device identity
     ino: u64,        // root inode identity
@@ -345,6 +370,7 @@ struct AllowGrantRoot {
     path: PathBuf,   // canonical root path for the ES edge
 }
 
+#[allow(dead_code)]
 fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
     let mut out = Vec::new();
     for grant in grants {
@@ -364,6 +390,7 @@ fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn concrete_grant_root(grant: &str) -> Result<(PathBuf, bool)> {
     let recursive = grant.ends_with("/**");
     let root = grant.strip_suffix("/**").unwrap_or(grant);
@@ -561,4 +588,58 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) -> Result<()> {
         return Ok(());
     }
     Err(anyhow!(err))
+}
+
+#[cfg(test)]
+mod allowlist_edge_tests {
+    use super::*;
+    use crate::allowlist::AllowList;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("bulwark-es-{tag}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// B-B1 regression: macOS allow-list grants are emitted to the ES edge as
+    /// inode-membership (`allow_inode`) entries, NOT as a path-beneath
+    /// `allow_root`. The prior `allow_root` rule allowed any object whose
+    /// canonical path was under the grant, so a hardlink/rename of a foreign
+    /// secret into a granted path leaked. Reverting to `allow_root` makes this
+    /// red on the `allow_inode`/no-`allow_root` assertions.
+    #[test]
+    fn allowlist_grants_emit_inode_not_root() {
+        let dir = scratch("grants");
+        let f = dir.join("app.log");
+        fs::write(&f, b"x").unwrap();
+
+        let mut al = AllowList::new(vec![format!("{}/**", dir.display())]).without_base();
+        al.snapshot_grants();
+
+        let cfg = scratch("cfg").join("edge.conf");
+        let ready = scratch("ready").join("edge.ready");
+        write_config(
+            &cfg,
+            &EdgePolicy::AllowList { allow: &al },
+            1234,
+            None,
+            &ready,
+        )
+        .unwrap();
+        let body = fs::read_to_string(&cfg).unwrap();
+
+        let key = InodeKey::of(&fs::metadata(&f).unwrap());
+        assert!(
+            body.contains(&format!("allow_inode={}:{}", key.dev, key.ino)),
+            "grant inode must be emitted as allow_inode; got:\n{body}"
+        );
+        assert!(
+            !body.contains("allow_root="),
+            "grants must not be emitted as path-beneath allow_root; got:\n{body}"
+        );
+    }
 }

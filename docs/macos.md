@@ -40,6 +40,24 @@ prefer an unattended/CI agent that does not need root at all.
 This gap is inherent to the ES interface — there is no kernel-enforced macOS floor
 today — and is documented rather than hidden.
 
+**Two further macOS residuals, stated plainly:**
+
+- **The privilege drop is not irreversible on macOS.** On Linux the drop sets
+  `no_new_privs`, so a dropped agent cannot regain root by `exec`ing a setuid-root
+  binary. macOS has no equivalent primitive, so a dropped agent that execs a
+  setuid-root binary *can* regain root — and a re-rooted agent could then `SIGKILL`
+  the edge (re-opening the window above). The mitigations that still hold: the agent
+  runs unprivileged for its own opens, and the ES membership set lives in the gate's
+  memory (not an agent-writable filesystem), so a re-rooted agent cannot rewrite tree
+  membership the way a Linux root agent can rewrite its cgroup. For an untrusted macOS
+  agent, do not place setuid-root binaries on its path.
+- **Off-band consent membership is by ancestry on macOS.** The consent socket refuses
+  an answerer that is part of the supervised tree; on Linux that test uses cgroup
+  membership (a double-forked orphan is still caught), but on macOS it currently uses
+  the process-ancestry walk, which a double-fork sheds. The Endpoint-Security
+  process-set analog of the Linux cgroup check is planned. Until it lands, prefer the
+  static deny-list path on macOS for adversarial agents rather than live consent.
+
 ## Build the CLI and ES edge
 
 ```sh

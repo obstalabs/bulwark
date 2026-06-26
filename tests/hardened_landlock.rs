@@ -87,3 +87,105 @@ fn hardened_floor_denies_etc_shadow() {
         "/etc/shadow must be denied under the hardened floor; got: {out:?}"
     );
 }
+
+/// Regression: a `--hardened --allow` operator grant whose concrete prefix is
+/// a SYMLINK to a broader directory must be REJECTED before any Landlock rule is
+/// applied. Otherwise `open(O_PATH)` follows the symlink and floors the wider
+/// target — a silent widening invisible in the grant string. The rejection is a
+/// CLI-level bail (no Landlock/root needed), so this test checks stderr+status.
+#[test]
+#[ignore = "requires Linux (filesystem symlink + canonicalize)"]
+fn hardened_rejects_symlink_widening_grant() {
+    let dir = scratch("f4");
+    let broad = dir.join("broad");
+    fs::create_dir_all(broad.join("sub")).unwrap();
+    fs::write(broad.join("sub/secret.env"), "BROADSECRET=widened\n").unwrap();
+    // A concrete-looking grant that is actually a symlink to the broad dir.
+    let glink = dir.join("glink");
+    std::os::unix::fs::symlink(&broad, &glink).unwrap();
+
+    let out = Command::new(bin())
+        .args(["run", "--hardened", "--allow"])
+        .arg(&glink)
+        .args(["--", "cat"])
+        .arg(broad.join("sub/secret.env"))
+        .output()
+        .expect("spawn bulwark");
+
+    // Must fail (non-zero) and never print the secret.
+    assert!(
+        !out.status.success(),
+        "a symlink-widening hardened grant must be rejected; status was success"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("BROADSECRET"),
+        "the symlink target must not be readable; got: {combined:?}"
+    );
+    assert!(
+        combined.contains("resolves through a symlink"),
+        "rejection should name the symlink widening; got: {combined:?}"
+    );
+}
+
+/// Regression: a RELATIVE `--hardened --allow` grant must be rejected. A relative
+/// path is resolved against the working directory when the Landlock floor is
+/// applied, so `tmp/**` launched from `/` would silently floor all of `/tmp` —
+/// wider than the grant string names. The check is a CLI-level bail.
+#[test]
+#[ignore = "requires Linux"]
+fn hardened_rejects_relative_grant() {
+    let out = Command::new(bin())
+        .args(["run", "--hardened", "--allow", "tmp/**", "--", "true"])
+        .output()
+        .expect("spawn bulwark");
+    assert!(
+        !out.status.success(),
+        "a relative hardened grant must be rejected; status was success"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("must be an absolute path"),
+        "rejection should name the absolute-path requirement; got: {combined:?}"
+    );
+}
+
+/// Regression: a `--hardened --allow` grant with a symlink in an INTERMEDIATE
+/// path component (e.g. `/base/slink/sub/**` where `slink` is a symlink to a
+/// broader directory) must not widen the floor. The apply site resolves the
+/// prefix with `openat2(RESOLVE_NO_SYMLINKS)`, which refuses a symlink in any
+/// component — not just the final one — so the grant adds no rule and the
+/// symlink target is not floored.
+#[test]
+#[ignore = "requires Linux + Landlock + root + openat2"]
+fn hardened_denies_intermediate_symlink_grant() {
+    let dir = scratch("intermsym");
+    let broad = dir.join("broad");
+    fs::create_dir_all(broad.join("sub")).unwrap();
+    fs::write(broad.join("sub/secret.env"), "INTERMSECRET=widened\n").unwrap();
+    // slink is an intermediate component of the grant, pointing at the broad dir.
+    let slink = dir.join("slink");
+    std::os::unix::fs::symlink(&broad, &slink).unwrap();
+    let grant = format!("{}/sub/**", slink.display());
+
+    let out = run_hardened(
+        &grant,
+        &[
+            "bash",
+            "-c",
+            &format!("cat {} 2>&1", broad.join("sub/secret.env").display()),
+        ],
+    );
+    assert!(
+        !out.contains("INTERMSECRET"),
+        "a symlink in an intermediate grant component must not widen the floor; got: {out:?}"
+    );
+}

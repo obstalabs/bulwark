@@ -240,3 +240,157 @@ fn worker_uid_agent_cannot_kill_the_root_supervisor() {
         "gate must stay up (read denied) after the failed kill attempt; got:\n{combined}"
     );
 }
+
+/// Regression: a fanotify permission-event-queue OVERFLOW must FAIL CLOSED.
+///
+/// The default permission queue is bounded; when it overflows the kernel drops
+/// the undeliverable event and lets the access proceed *as allowed* — a fail-open
+/// an unprivileged supervised process can reach by flooding opens. `FAN_UNLIMITED_QUEUE`
+/// removes the bound so the gate applies backpressure instead of leaking.
+///
+/// This test forces the failure mode by shrinking `fs.fanotify.max_queued_events`
+/// to a tiny value, then floods opens while hammering the protected secret. With the
+/// fix the secret is never read; without it, it leaks thousands of times.
+#[test]
+#[ignore = "requires Linux + root for fanotify + sysctl write"]
+fn queue_overflow_fails_closed() {
+    let dir = scratch("overflow");
+    let secret = dir.join("secret.env");
+    let pool = dir.join("pool");
+    fs::write(&secret, "SECRETVALUE=overflow\n").unwrap();
+    fs::create_dir_all(&pool).unwrap();
+    for i in 0..3000 {
+        fs::write(pool.join(format!("f{i}")), b"x").unwrap();
+    }
+
+    // Shrink the queue to force overflow under the flood; restore on the way out.
+    let knob = "/proc/sys/fs/fanotify/max_queued_events";
+    let original = fs::read_to_string(knob).unwrap_or_else(|_| "16384".into());
+    fs::write(knob, "1").expect("write max_queued_events (need root)");
+
+    // The supervised command: flood opens on the pool in the background while a tight
+    // loop tries the protected secret. Echo a marker only if the secret content appears.
+    // Flood opens on the pool (16 background loops) to overflow the tiny queue, while a
+    // bounded attack loop tries the protected secret. The whole probe is wrapped in
+    // `timeout` so it cannot hang the suite. The leak, when present, is massive
+    // (~160k reads), so a few hundred attack iterations are more than enough to catch it.
+    let probe = format!(
+        "for i in $(seq 1 16); do ( while :; do cat {pool}/* >/dev/null 2>&1; done ) & done; \
+         leaks=0; for i in $(seq 1 400); do \
+           if cat {secret} 2>/dev/null | grep -q SECRETVALUE; then leaks=$((leaks+1)); fi; done; \
+         echo LEAKS=$leaks",
+        pool = pool.display(),
+        secret = secret.display()
+    );
+    // Route receipts to a FILE, not stderr: under this flood the gate emits ~100k
+    // allow-receipt lines, and on a slow/loaded CI runner that stderr volume can
+    // delay the `LEAKS=` marker past a tight timeout — making the test flaky on
+    // capture, not on the actual security property. A receipts file keeps stdout
+    // clean so the marker is deterministic.
+    let receipts = dir.join("receipts.jsonl");
+    let out = Command::new("timeout")
+        .arg("90")
+        .arg(bin())
+        .args(["run", "--allow-root", "--protect"])
+        .arg(&secret)
+        .arg("--receipts")
+        .arg(&receipts)
+        .arg("--")
+        .arg("bash")
+        .arg("-c")
+        .arg(&probe)
+        .output()
+        .expect("spawn");
+
+    // Restore the sysctl before asserting so a failure doesn't leave the host shrunk.
+    fs::write(knob, original.trim()).expect("restore max_queued_events");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The probe counts how many of its reads actually returned the secret content
+    // and prints `LEAKS=<n>` (its own grep — note the supervisor also echoes the
+    // command line, which literally contains the word SECRETVALUE, so asserting on
+    // that substring would false-positive; the count is the real signal). The fix
+    // requires zero. A MISSING marker means the run was cut short (e.g. the outer
+    // timeout under load) — inconclusive, not a pass — so require it explicitly.
+    let marker = combined
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("LEAKS="))
+        .map(str::trim);
+    assert_eq!(
+        marker,
+        Some("0"),
+        "queue overflow must fail closed with zero protected reads; LEAKS marker was {marker:?} \
+         (None = probe did not finish in time, not a pass); output:\n{combined}"
+    );
+}
+
+/// Regression: the privilege drop must be IRREVERSIBLE — a dropped agent cannot
+/// regain root by exec'ing a setuid-root binary. Without `PR_SET_NO_NEW_PRIVS` in
+/// `drop_to`, the kernel still honors the setuid bit on a later `execve`, so the
+/// dropped agent re-roots and can then migrate out of the cgroup scope (A-1).
+///
+/// Plants a setuid-root helper on a suid-honoring filesystem (NOT /tmp, which is
+/// usually `nosuid`), runs the agent under the default drop, and asserts the helper
+/// runs as the dropped uid — i.e. the setuid bit was ignored.
+#[test]
+#[ignore = "requires Linux + root + a suid-honoring fs (/usr/local)"]
+fn privilege_drop_is_irreversible_to_setuid_exec() {
+    let dir = scratch("nnp");
+    let control = dir.join("control.txt");
+    fs::write(&control, "CTRL=ok\n").unwrap();
+    let secret = dir.join("secret.env");
+    fs::write(&secret, "SECRETVALUE=nnp\n").unwrap();
+
+    // A setuid-root helper that prints its effective uid at entry. /tmp is commonly
+    // mounted nosuid (which would mask the bug), so place it under /usr/local.
+    let helper_src = dir.join("suid.c");
+    fs::write(
+        &helper_src,
+        "#include <stdio.h>\n#include <unistd.h>\nint main(){printf(\"ENTER_EUID=%d\\n\",geteuid());return 0;}\n",
+    )
+    .unwrap();
+    let helper = std::path::Path::new("/usr/local/bin/bulwark-nnp-test-helper");
+    let cc = Command::new("cc")
+        .arg(&helper_src)
+        .arg("-o")
+        .arg(helper)
+        .status()
+        .expect("cc");
+    assert!(cc.success(), "compile setuid helper");
+    // setuid-root bit
+    let _ = Command::new("chown").arg("root:root").arg(helper).status();
+    let _ = Command::new("chmod").arg("4755").arg(helper).status();
+
+    let probe = format!(
+        "id -u; cat {} >/dev/null 2>&1; {}",
+        control.display(),
+        helper.display()
+    );
+    let out = Command::new(bin())
+        .args(["run", "--protect"])
+        .arg(&secret)
+        .arg("--")
+        .arg("bash")
+        .arg("-c")
+        .arg(&probe)
+        .output()
+        .expect("spawn");
+
+    // Clean up the host-level helper regardless of assertion outcome.
+    let _ = fs::remove_file(helper);
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The helper must NOT have regained root: its entry euid is the dropped uid, not 0.
+    assert!(
+        combined.contains("ENTER_EUID=") && !combined.contains("ENTER_EUID=0"),
+        "setuid-exec must NOT regain root after the drop (no_new_privs); got:\n{combined}"
+    );
+}

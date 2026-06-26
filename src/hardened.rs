@@ -32,6 +32,43 @@ const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 
+// openat2(2) ABI for resolving a grant prefix with no symlink in ANY component.
+const SYS_OPENAT2: libc::c_long = 437;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// Open `path` as an `O_PATH` fd, refusing a symlink in any path component via
+/// `openat2(RESOLVE_NO_SYMLINKS)`. Returns a negative fd on any failure (absent
+/// path, a symlink anywhere in the prefix, or a kernel without `openat2` — all
+/// of which must fail closed: the grant then adds no Landlock rule). Resolving
+/// every component (not just the final one, as `O_NOFOLLOW` would) is what makes
+/// the floor exactly as wide as the real path the operator named.
+fn open_no_symlinks(cpath: &CString) -> RawFd {
+    let how = OpenHow {
+        flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: RESOLVE_NO_SYMLINKS,
+    };
+    // SAFETY: cpath is a valid NUL-terminated path; how is a valid open_how of the
+    // size we pass; AT_FDCWD resolves the absolute path from the filesystem root.
+    let rc = unsafe {
+        libc::syscall(
+            SYS_OPENAT2,
+            libc::AT_FDCWD,
+            cpath.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    rc as RawFd
+}
+
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
@@ -112,14 +149,25 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
         // Landlock rules are added by an O_PATH fd to the directory/file. A
         // glob like `/lib/**` is reduced to its concrete prefix `/lib` — a
         // path_beneath rule already means "this path and everything below it".
-        let concrete = glob_prefix(p);
+        let concrete = crate::glob::landlock_prefix(p);
         let cpath = match CString::new(concrete.as_bytes()) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let parent_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        // Resolve the prefix at the APPLY site — where the rule is actually added
+        // and the floor's breadth is truly decided — refusing a symlink in ANY
+        // path component. The launch-time check (`reject_widening_hardened_grants`)
+        // validates the grant string, but a symlink anywhere in the resolved prefix
+        // would let `open()` floor a wider target than named. `openat2` with
+        // `RESOLVE_NO_SYMLINKS` rejects intermediate AND final symlinks in one
+        // syscall (the complete form of what a final-component `O_NOFOLLOW` only
+        // started), closing the whole check-vs-apply class — including the case
+        // where the prefix did not exist at check time (so the string check was
+        // skipped) but is a symlink by the time we open it. A symlinked prefix
+        // yields no rule (fail closed); the operator must name the real path.
+        let parent_fd = open_no_symlinks(&cpath);
         if parent_fd < 0 {
-            eprintln!("[bulwark] hardened: skip allow {concrete} (not present)");
+            eprintln!("[bulwark] hardened: skip allow {concrete} (not present or symlink in path)");
             continue;
         }
         let rule = PathBeneathAttr {
@@ -153,41 +201,4 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
     }
     eprintln!("[bulwark] hardened: kernel-enforced read floor applied ({allowed} allow path(s))");
     Ok(())
-}
-
-/// Reduce a glob to the concrete directory prefix Landlock should allow.
-/// `/lib/**` -> `/lib`; `/var/log/app/**` -> `/var/log/app`. A path_beneath
-/// rule already covers everything below the prefix, so trailing wildcards are
-/// dropped. A bare path with no wildcard is returned unchanged.
-fn glob_prefix(glob: &str) -> String {
-    let mut prefix = String::new();
-    for seg in glob.split('/') {
-        if seg.contains('*') || seg.contains('?') {
-            break;
-        }
-        if !seg.is_empty() {
-            prefix.push('/');
-            prefix.push_str(seg);
-        }
-    }
-    if prefix.is_empty() {
-        "/".to_string()
-    } else {
-        prefix
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glob_prefix_strips_wildcards() {
-        assert_eq!(glob_prefix("/lib/**"), "/lib");
-        assert_eq!(glob_prefix("/var/log/app/**"), "/var/log/app");
-        assert_eq!(glob_prefix("/usr/bin/**"), "/usr/bin");
-        assert_eq!(glob_prefix("/etc/ld.so.cache"), "/etc/ld.so.cache");
-        assert_eq!(glob_prefix("/proc/*/stat"), "/proc");
-        assert_eq!(glob_prefix("**/*secret*"), "/");
-    }
 }

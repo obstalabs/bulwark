@@ -7,8 +7,15 @@ bulwark run --hardened --allow '<glob>' [--allow '<glob>'...] -- <command>
 Hardened mode enforces a default-deny read policy as a **Landlock floor in the
 kernel** instead of via the fanotify supervisor. The agent may read only the
 allowed paths (your grants + the runtime base set); every other read is denied
-by the kernel. It is non-interactive and uses the same `--allow` grants as
-`--deny-all`.
+by the kernel. It is non-interactive and uses `--allow` grants like `--deny-all`,
+with one difference: because Landlock is path-based and cannot enforce an
+arbitrary glob, a grant that would **silently widen** to a broader subtree is
+**rejected**, not quietly accepted. A grant must be a concrete path or a trailing
+`/**` subtree — `'/var/log/app/**/*.log'` (which Landlock could only enforce as
+all of `/var/log/app`) is refused with a message telling you to re-grant it
+explicitly. A concrete grant that resolves **through a symlink** to a wider
+directory is rejected for the same reason. This keeps the kernel floor exactly as
+wide as the path you named, never wider.
 
 ## Why it exists: closing the fanotify fail-open
 

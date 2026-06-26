@@ -674,6 +674,25 @@ fn home_dir() -> String {
 /// behavior is regression-locked by a unit test: the hivebus handoff is placed by
 /// a SEPARATE ssh session (see `place_hivebus_material`), never woven into this
 /// script — so this output does not depend on the hivebus flags at all.
+/// An unguessable hex token for the remote run-directory name, so an attacker on
+/// the remote host cannot predict the path (in world-writable /tmp) and
+/// pre-squat the consent lanes. Reads the OS CSPRNG; on the (very unlikely)
+/// failure to read it, falls back to time+pid — degraded entropy, but the gate
+/// script's fail-closed `mkdir`/`mkfifo` remain the structural backstop.
+fn rand_token() -> String {
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if std::io::Read::read_exact(&mut f, &mut buf).is_ok() {
+            return buf.iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}{:x}", std::process::id())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_gate_script(
     remote_dir: &str,
@@ -701,10 +720,17 @@ fn build_gate_script(
         Some(_) => format!("env HOME={remote_dir} USER=bulwark-worker LOGNAME=bulwark-worker "),
         None => String::new(),
     };
+    // `mkdir {dir}` (NOT `-p`) so a pre-existing directory at the run path is a
+    // hard error under `set -e` — combined with the unguessable random suffix in
+    // `{dir}`, an attacker cannot pre-create the run directory to squat the
+    // lanes. `mkfifo` without `2>/dev/null || true` then fails closed if the
+    // verdict/prompt FIFO already exists, so the gate never adopts a FIFO it did
+    // not create (which an attacker could otherwise read prompts from or write
+    // forged verdicts into to self-answer the off-band consent).
     format!(
         r#"set -e
-mkdir -p {dir}
-mkfifo -m 600 {pl} {vl} 2>/dev/null || true
+mkdir {dir}
+mkfifo -m 600 {pl} {vl}
 sudo {env}{bw} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
   {worker}{protect} -- {agent}
@@ -820,6 +846,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         if allow.is_empty() {
             anyhow::bail!("--hardened requires at least one --allow <glob>");
         }
+        reject_widening_hardened_grants(allow)?;
         return cmd_ssh_hardened(target, allow, no_base_set, deploy_mode, command);
     }
     if protect.is_empty() {
@@ -830,9 +857,15 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the local binary when arch-compatible, or fetch the matching release).
     let remote_bin = deploy::ensure_remote_bulwark(target, deploy_mode)?;
 
-    // A unique run dir on the remote host holds the two lane FIFOs.
+    // A unique run dir on the remote host holds the two lane FIFOs. The name
+    // carries an UNGUESSABLE random token (not just the local pid): the dir lives
+    // in world-writable /tmp on the remote, so a predictable name would let a
+    // local attacker pre-create the verdict FIFO and self-answer the off-band
+    // consent. With a random suffix the attacker cannot pre-create the path, and
+    // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
+    // the path is somehow occupied.
     let run_id = std::process::id();
-    let remote_dir = format!("/tmp/bulwark-remote-{run_id}");
+    let remote_dir = format!("/tmp/bulwark-remote-{run_id}-{}", rand_token());
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
@@ -1617,6 +1650,65 @@ fn resolve_worker_creds(
 }
 
 /// Build the gate mode + mark paths for a `run` and dispatch.
+/// Refuse operator `--hardened --allow` grants that Landlock cannot enforce
+/// faithfully. Hardened mode maps each grant to a `path_beneath` rule keyed on
+/// the glob's concrete directory prefix; a glob with a non-trailing or
+/// single-segment wildcard silently widens to that whole subtree (a `*.log`
+/// grant becomes the whole directory; `**/*.log` becomes `/`). Rather than grant
+/// a broad read floor by surprise, require the operator to state it explicitly
+/// as a concrete path or a trailing `/**` subtree. The runtime base set is
+/// exempt — it is a documented, printable floor and is not operator input.
+fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
+    for g in grants {
+        // A hardened grant must be ABSOLUTE. A relative grant (e.g. `tmp/**`) is
+        // resolved against the process's working directory when the Landlock rule
+        // is applied — so `tmp/**` launched from `/` floors all of `/tmp`, wider
+        // than the operator could see from the grant string. The lexical
+        // faithfulness check below cannot catch this (the string looks scoped), so
+        // require an absolute path up front.
+        if !std::path::Path::new(g).is_absolute() {
+            anyhow::bail!(
+                "--hardened --allow {g:?} must be an absolute path: a relative grant is \
+                 resolved against the working directory when the Landlock floor is applied, \
+                 so it can silently widen to a different directory than it names. Re-grant \
+                 with a leading '/'."
+            );
+        }
+        if !glob::is_landlock_faithful(g) {
+            let prefix = glob::landlock_prefix(g);
+            anyhow::bail!(
+                "--hardened --allow {g:?} cannot be enforced faithfully: Landlock is \
+                 path-based and would grant the entire subtree {prefix:?} — broader than \
+                 the pattern. Re-grant explicitly as a concrete path or a trailing '/**' \
+                 subtree (e.g. '{prefix}/**' to accept the whole subtree, or name the exact \
+                 file/dir)."
+            );
+        }
+        // The faithfulness check above is purely lexical on the glob string.
+        // hardened mode then applies the Landlock rule via `open(O_PATH)`, which
+        // FOLLOWS symlinks — so an operator grant whose concrete prefix is a
+        // symlink to a broader directory (e.g. `/home/agent/logs` -> `/`) would
+        // silently floor the symlink TARGET, wider than named and invisible in the
+        // grant string. Reject any operator grant whose concrete prefix resolves
+        // through a symlink to a different path; the operator must name the real
+        // target. Base-set system aliases like `/lib -> /usr/lib` are not operator
+        // input and never reach this check.
+        let prefix = glob::landlock_prefix(g);
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            let real_s = real.to_string_lossy();
+            if real_s != prefix {
+                anyhow::bail!(
+                    "--hardened --allow {g:?} resolves through a symlink \
+                     ({prefix} -> {real_s}): Landlock would floor the wider symlink \
+                     target, not the path you named. Re-grant the real path explicitly \
+                     (e.g. {real_s:?} or a trailing '/**' under it)."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_run(args: RunArgs) -> Result<i32> {
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
@@ -1626,6 +1718,7 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         if !args.protect.is_empty() {
             anyhow::bail!("--hardened uses --allow grants, not --protect");
         }
+        reject_widening_hardened_grants(args.allow)?;
         let mut al = AllowList::new(args.allow.to_vec());
         if args.no_base_set {
             al = al.without_base();
@@ -1673,6 +1766,11 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         if args.no_base_set {
             al = al.without_base();
         }
+        // Snapshot the inodes reachable under each grant NOW, before the agent
+        // runs, so grant decisions can be gated on inode identity rather than the
+        // mutable path — defeating a later hardlink/rename of a foreign file into
+        // a granted path.
+        al.snapshot_grants();
         // Default-deny only holds if EVERY filesystem the agent could read from
         // is marked. A single mark on `/` misses other mounts (tmpfs `/tmp`, a
         // separate `/var` or data volume, network mounts) — opens there would be
@@ -2455,8 +2553,8 @@ mod tests {
             "'claude' '-p' 'fix it'",
         );
         let expected = "set -e\n\
-mkdir -p /tmp/bulwark-remote-42\n\
-mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts 2>/dev/null || true\n\
+mkdir /tmp/bulwark-remote-42\n\
+mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts\n\
 sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\n  \
 --prompt-out /tmp/bulwark-remote-42/prompts --verdict-in /tmp/bulwark-remote-42/verdicts \\\n  \
 --protect '/etc/shadow' -- 'claude' '-p' 'fix it'\n\

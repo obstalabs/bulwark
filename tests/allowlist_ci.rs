@@ -90,3 +90,69 @@ fn triage_agent_denied_etc_shadow() {
         "/etc/shadow must be denied in allow-list mode; got: {out:?}"
     );
 }
+
+/// A granted file deleted mid-run, whose inode NUMBER is then reused by a foreign
+/// file on the same filesystem, must be DENIED — the launch snapshot keys on
+/// (inode, generation), and the kernel bumps the generation on reuse, so the
+/// foreign file does not match. Requires a filesystem that recycles inode numbers
+/// and reports FS_IOC_GETVERSION (ext4); tmpfs does neither, so the harness
+/// mounts a small ext4 image.
+#[test]
+#[ignore = "requires Linux + root + an ext4 loopback mount"]
+fn reused_inode_in_grant_is_denied() {
+    // Mount a tiny ext4 image (few inodes -> reuse happens immediately).
+    let img = std::env::temp_dir().join(format!("bw-reuse-{}.img", std::process::id()));
+    let mnt = std::env::temp_dir().join(format!("bw-reuse-{}", std::process::id()));
+    fs::create_dir_all(&mnt).unwrap();
+    let dd = Command::new("dd")
+        .args(["if=/dev/zero"])
+        .arg(format!("of={}", img.display()))
+        .args(["bs=1M", "count=20"])
+        .status()
+        .expect("dd");
+    assert!(dd.success());
+    let mkfs = Command::new("mkfs.ext4")
+        .args(["-q", "-N", "64"])
+        .arg(&img)
+        .status()
+        .or_else(|_| {
+            Command::new("/sbin/mkfs.ext4")
+                .args(["-q", "-N", "64"])
+                .arg(&img)
+                .status()
+        })
+        .expect("mkfs.ext4");
+    assert!(mkfs.success(), "mkfs.ext4 (need e2fsprogs)");
+    let mount = Command::new("mount")
+        .args(["-o", "loop"])
+        .arg(&img)
+        .arg(&mnt)
+        .status()
+        .expect("mount");
+    assert!(mount.success());
+
+    let grant_dir = mnt.join("grant");
+    fs::create_dir_all(&grant_dir).unwrap();
+    // A granted file present at launch (its inode + generation are snapshotted).
+    fs::write(grant_dir.join("gf.txt"), "GRANTED\n").unwrap();
+    let grant = format!("{}/**", grant_dir.display());
+
+    // Delete the granted file, then churn until a foreign secret reuses its inode
+    // NUMBER, and read it through the (now stale by generation) grant.
+    let script = format!(
+        "ino=$(stat -c %i {g}/gf.txt); rm {g}/gf.txt; \
+         for i in $(seq 1 300); do f={g}/z$i; printf 'TOPSECRET-REUSE\\n' > $f; \
+           if [ \"$(stat -c %i $f)\" = \"$ino\" ]; then cat $f 2>&1; break; fi; rm -f $f; done",
+        g = grant_dir.display()
+    );
+    let out = run_allowlist(&grant, &["bash", "-c", &script]);
+
+    // Tear the mount down before asserting.
+    let _ = Command::new("umount").arg(&mnt).status();
+    let _ = fs::remove_file(&img);
+
+    assert!(
+        !out.contains("TOPSECRET-REUSE"),
+        "a foreign file reusing a granted inode number must be denied (generation gate); got: {out:?}"
+    );
+}

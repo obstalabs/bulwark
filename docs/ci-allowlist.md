@@ -92,6 +92,22 @@ so it shares the same boundary (see the project's security boundary notes):
   this window is small, but it is real; a crash-safe kernel floor is planned.
 - All filesystems present at launch are marked. A filesystem **mounted after**
   the agent starts is not covered.
+- A grant is a **launch-time snapshot of inodes**, not a live path rule. Files
+  that exist and match a grant at launch are readable; a file **created, moved,
+  or hardlinked into a granted directory after launch is denied** (fail closed).
+  This is deliberate — it is what stops a foreign secret being hardlinked or
+  renamed into a grant to read it. If a dispatched agent needs to read back its
+  own output, write it to stdout or to a path you grant and pre-create, rather
+  than relying on re-reading a file it made mid-run.
+- Grant identity is the inode **plus its generation** (`FS_IOC_GETVERSION`), so a
+  granted file deleted mid-run whose inode number is then reused by another file
+  on the same filesystem is **denied** — the kernel bumps the generation on reuse,
+  so the foreign file does not match the snapshot. This is verified on ext4. On a
+  filesystem that reports no generation, the gate falls back to `(device, inode)`
+  and fails closed if it cannot confirm freshness; in practice the filesystems that
+  report no generation (tmpfs, overlayfs) also do not recycle inode numbers, so
+  there is nothing to confuse. A networked grant filesystem such as NFS is
+  untested — keep granted material on a local filesystem.
 
 Bulwark is a tool with limits, stated up front — not a magic wand. Used with
 its grain (one granted path, sensitive material kept off the host, paired with

@@ -84,6 +84,13 @@ fn install_shutdown_handlers() {
 /// (wrapped in `main`) so the gate stays agnostic to the transport.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
+
+    /// Inform the decider of the supervised tree's cgroup scope (relative path),
+    /// so an off-band consent channel can reject answerers that are members of
+    /// the tree by the same reparent-proof primitive the gate uses — not just by
+    /// ancestry, which a double-fork()'d orphan sheds. Default: no-op (modes with
+    /// no off-band channel, or where no cgroup scope exists).
+    fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 }
 
 /// Run `command` under the gate.
@@ -94,7 +101,7 @@ pub trait ConsentDecider {
 /// policy profile — keeping the gate agnostic to policy. Returns the child's
 /// exit code.
 pub fn run(
-    mode: GateMode,
+    mut mode: GateMode,
     mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
@@ -172,6 +179,15 @@ pub fn run(
         ),
     }
 
+    // Hand the consent decider the tree's cgroup scope so the off-band channel
+    // rejects in-tree answerers by membership, not ancestry: a double-fork()'d
+    // orphan that sheds its parent chain still carries the scope and so cannot
+    // self-answer its own consent prompt. No-op for modes without an off-band
+    // channel, and when no cgroup scope exists (ancestry remains the only check).
+    if let GateMode::DenyList { consent, .. } = &mut mode {
+        consent.bind_scope(scope.as_ref().map(|s| s.rel()));
+    }
+
     // Fork + exec the supervised command. The supervisor (this process) stays
     // root and holds the fanotify fd; `worker` drops only the agent child. The
     // child joins the cgroup scope (if any) before exec, while still root.
@@ -205,9 +221,19 @@ impl FanFd {
     fn init() -> Result<Self> {
         // FAN_CLASS_CONTENT: permission events on content access.
         // O_RDONLY|O_LARGEFILE: how the event fds are opened.
+        //
+        // FAN_UNLIMITED_QUEUE is load-bearing for security, not a tuning knob. The
+        // default permission-event queue is bounded (fs.fanotify.max_queued_events,
+        // 16384). When a bounded queue overflows, the kernel drops the undeliverable
+        // permission event and lets the access proceed *as allowed* — a fail-OPEN: an
+        // unprivileged supervised process can flood opens to overflow the queue and
+        // read protected files in the window. FAN_UNLIMITED_QUEUE removes the bound, so
+        // the gate applies backpressure (slows the agent) instead of leaking. Verified:
+        // with a forced-tiny queue the bounded build leaks ~160k protected reads under
+        // flood; with this flag, zero. Needs CAP_SYS_ADMIN, which the gate already has.
         let fd = unsafe {
             libc::fanotify_init(
-                libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC,
+                libc::FAN_CLASS_CONTENT | libc::FAN_CLOEXEC | libc::FAN_UNLIMITED_QUEUE,
                 (libc::O_RDONLY | libc::O_LARGEFILE) as u32,
             )
         };
@@ -472,6 +498,27 @@ fn handle_events(
     }
 }
 
+/// Disposition of an open already known to belong to the supervised tree, once
+/// we know whether its inode could be resolved. Kept pure (no FFI) so the
+/// fail-closed contract is unit-testable: an in-tree open whose inode cannot be
+/// identified is DENIED, never allowed. Membership and inode-resolution ordering
+/// live in `decide`; this captures only the in-tree fstat-fail ruling.
+#[derive(Debug, PartialEq, Eq)]
+enum InTreeOpen {
+    /// Inode resolved — hand to the gate mode for the real allow/deny ruling.
+    Judge,
+    /// Inode unknown (fstat on the event fd failed) — fail closed.
+    DenyUnknownInode,
+}
+
+fn in_tree_open(inode_resolved: bool) -> InTreeOpen {
+    if inode_resolved {
+        InTreeOpen::Judge
+    } else {
+        InTreeOpen::DenyUnknownInode
+    }
+}
+
 /// Decide allow/deny for a single permission event and respond.
 ///
 /// An open by the supervised tree of a protected inode is referred to the
@@ -488,29 +535,23 @@ fn decide(
     scope: Option<&crate::cgroup::CgroupScope>,
 ) {
     let pid = meta.pid;
-    let (key, path) = match inode_of_fd(meta.fd) {
-        Some(v) => v,
-        None => {
-            // Cannot stat the fd — fail safe by allowing (the file is already
-            // open in our hands; denying here risks breaking unrelated opens).
-            respond(fan.fd, meta.fd, true);
-            return;
-        }
-    };
 
-    // Tree membership decides whether this open is ours to judge. Prefer cgroup
-    // membership: it is reparent-proof, so a process that double-fork()s to
-    // orphan itself past the ancestry walk is still attributed to the tree.
-    // Where no cgroup scope exists, fall back to the ancestry walk. The two are
-    // OR'd so the cgroup result can only *add* members the walk would miss — a
-    // reparented orphan whose ppid chain no longer reaches the root.
+    // Tree membership decides whether this open is ours to judge — and it depends
+    // only on the pid, not on the file's inode, so it is evaluated FIRST. Prefer
+    // cgroup membership: it is reparent-proof, so a process that double-fork()s to
+    // orphan itself past the ancestry walk is still attributed to the tree. Where
+    // no cgroup scope exists, fall back to the ancestry walk. The two are OR'd so
+    // the cgroup result can only *add* members the walk would miss — a reparented
+    // orphan whose ppid chain no longer reaches the root.
     let in_tree = match scope {
         Some(s) => s.contains(pid) || proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
         None => proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
     };
 
     // Opens from outside the supervised tree are never judged — Bulwark only
-    // governs the tree it launched.
+    // governs the tree it launched. Crucially this is decided BEFORE inode_of_fd,
+    // so an out-of-tree open whose fstat would fail is still allowed: it is not
+    // ours to deny, and the inode is never consulted.
     if !in_tree {
         respond(fan.fd, meta.fd, true);
         return;
@@ -519,6 +560,34 @@ fn decide(
     let chain = proctree::ancestry(pid, ANCESTRY_MAX_DEPTH);
     let ancestry = proctree::render(&chain);
 
+    // The open is in-tree, so we MUST be able to name the inode we are judging.
+    // If fstat on the event fd fails we cannot identify it — and a read-gate fails
+    // CLOSED when it cannot identify the inode it is about to rule on. Deny the
+    // in-tree open rather than release it as allowed (the prior code allowed here,
+    // a fail-OPEN: an in-tree open whose stat was made to fail — e.g. by severing
+    // a stale network mount between open and stat — escaped the gate). Out-of-tree
+    // opens never reach this point, so a stat failure on an unrelated open is not
+    // turned into a spurious deny. The disposition is computed by the pure
+    // `in_tree_open` so the fail-closed contract is unit-testable.
+    let resolved = inode_of_fd(meta.fd);
+    let (key, path) = match in_tree_open(resolved.is_some()) {
+        InTreeOpen::Judge => resolved.expect("Judge disposition implies the inode resolved"),
+        InTreeOpen::DenyUnknownInode => {
+            log.record(&Receipt {
+                pid,
+                dev: 0,
+                ino: 0,
+                decision: Decision::Deny,
+                path: "?",
+                ancestry: &ancestry,
+                reason: "in-tree open denied: cannot stat event fd (inode unknown)",
+                source: "fstat-fail",
+            });
+            respond(fan.fd, meta.fd, false);
+            return;
+        }
+    };
+
     match mode {
         GateMode::DenyList { protected, consent } => {
             decide_denylist(
@@ -526,9 +595,13 @@ fn decide(
             );
         }
         GateMode::AllowList { allow } => {
-            // Default-deny: allow iff the observed path matches an allow rule
-            // (runtime base set + operator grants), else deny. No prompt.
-            let allowed = allow.allows(&path);
+            // Default-deny: allow iff the base set matches the path, OR a grant
+            // glob matches the path AND the opened (inode, generation) is in the
+            // grant launch snapshot. The inode gate defeats hardlink/rename of a
+            // foreign file into a granted path; the generation defeats
+            // inode-number REUSE of a deleted granted file. No prompt.
+            let opened_gen = crate::allowlist::fs_generation_fd(meta.fd);
+            let allowed = allow.allows_open(&path, &key, opened_gen);
             log.record(&Receipt {
                 pid,
                 dev: key.dev,
@@ -566,7 +639,10 @@ fn decide_denylist(
     log: &mut ReceiptLog,
     consent: &mut dyn ConsentDecider,
 ) {
-    if !protected.contains(&key) {
+    // `protects` matches the inode against the launch snapshot AND, for files
+    // not in it, against the inodes of protected ancestor directories — so a
+    // nested or post-launch file under a protected directory is still denied.
+    if !protected.protects(&key, path) {
         log.record(&Receipt {
             pid,
             dev: key.dev,
@@ -643,9 +719,24 @@ pub struct WorkerCreds {
 /// fail — we assert that, so a saved-set-uid that could be restored is caught
 /// rather than silently leaving the agent able to regain root.
 ///
+/// `PR_SET_NO_NEW_PRIVS` is set FIRST and is load-bearing: without it the uid drop
+/// is reversible — a dropped agent can `execve` a setuid-root binary (stock hosts
+/// ship `mount`, `su`, `sudo`, `pkexec`) to regain euid 0 and then do exactly what
+/// the drop was meant to prevent (remount cgroupfs, migrate out of the supervised
+/// scope, kill the supervisor). The `setuid(0)`-must-fail check below only proves
+/// the *current* credentials cannot regain root, not that a later setuid-exec
+/// cannot. `no_new_privs` makes the kernel ignore the setuid bit on every
+/// subsequent exec, closing that path. (`hardened.rs` sets the same flag for the
+/// Landlock floor, for the same reason.)
+///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
 unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
+    // No-new-privs first, while still privileged: makes the uid drop irreversible
+    // by ignoring setuid/setgid bits on all future execs in this process tree.
+    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+        return Err(libc::EPERM);
+    }
     // Supplementary groups: clear to exactly the target gid. We do not call
     // initgroups() (it reads NSS, not async-signal-safe in the forked child);
     // setgroups([gid]) is the minimal, predictable set for an unprivileged worker.
@@ -737,4 +828,25 @@ fn try_wait(child: libc::pid_t) -> Result<Option<i32>> {
         return Ok(Some(128 + libc::WTERMSIG(status)));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B6 negative control: an in-tree open whose inode cannot be resolved must
+    /// fail CLOSED. The pre-fix code allowed on stat failure (fail-OPEN); this
+    /// asserts the disposition is now DenyUnknownInode, so reverting the fix
+    /// turns this red.
+    #[test]
+    fn in_tree_open_with_unresolved_inode_fails_closed() {
+        assert_eq!(in_tree_open(false), InTreeOpen::DenyUnknownInode);
+    }
+
+    /// Control: an in-tree open with a resolved inode is still judged by the
+    /// gate mode (the fail-closed branch does not swallow normal opens).
+    #[test]
+    fn in_tree_open_with_resolved_inode_is_judged() {
+        assert_eq!(in_tree_open(true), InTreeOpen::Judge);
+    }
 }
