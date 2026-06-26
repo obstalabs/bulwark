@@ -1660,6 +1660,20 @@ fn resolve_worker_creds(
 /// exempt — it is a documented, printable floor and is not operator input.
 fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
     for g in grants {
+        // A hardened grant must be ABSOLUTE. A relative grant (e.g. `tmp/**`) is
+        // resolved against the process's working directory when the Landlock rule
+        // is applied — so `tmp/**` launched from `/` floors all of `/tmp`, wider
+        // than the operator could see from the grant string. The lexical
+        // faithfulness check below cannot catch this (the string looks scoped), so
+        // require an absolute path up front.
+        if !std::path::Path::new(g).is_absolute() {
+            anyhow::bail!(
+                "--hardened --allow {g:?} must be an absolute path: a relative grant is \
+                 resolved against the working directory when the Landlock floor is applied, \
+                 so it can silently widen to a different directory than it names. Re-grant \
+                 with a leading '/'."
+            );
+        }
         if !glob::is_landlock_faithful(g) {
             let prefix = glob::landlock_prefix(g);
             anyhow::bail!(

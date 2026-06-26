@@ -131,3 +131,29 @@ fn hardened_rejects_symlink_widening_grant() {
         "rejection should name the symlink widening; got: {combined:?}"
     );
 }
+
+/// Regression: a RELATIVE `--hardened --allow` grant must be rejected. A relative
+/// path is resolved against the working directory when the Landlock floor is
+/// applied, so `tmp/**` launched from `/` would silently floor all of `/tmp` —
+/// wider than the grant string names. The check is a CLI-level bail.
+#[test]
+#[ignore = "requires Linux"]
+fn hardened_rejects_relative_grant() {
+    let out = Command::new(bin())
+        .args(["run", "--hardened", "--allow", "tmp/**", "--", "true"])
+        .output()
+        .expect("spawn bulwark");
+    assert!(
+        !out.status.success(),
+        "a relative hardened grant must be rejected; status was success"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("must be an absolute path"),
+        "rejection should name the absolute-path requirement; got: {combined:?}"
+    );
+}
