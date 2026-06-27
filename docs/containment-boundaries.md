@@ -115,6 +115,15 @@ root-owned (the Homebrew formula and `.pkg` do this); for the strongest guarante
 `--hardened`, where the floor is crash-safe and irrevocable; and, belt-and-suspenders, you can
 `--protect` the binary's own path so even a write *attempt* is gated and recorded.
 
+The matrix above is **Linux-only**, reproduced on kernel 6.12. macOS differs structurally — the
+gate is a root-launched Endpoint Security client rather than a fanotify supervisor, there is no
+Landlock floor (so no `--hardened` crash-safe mode), and macOS has no `no_new_privs` analog (so
+the unprivileged drop is **not** irreversible against a setuid-root binary; see the macOS drop
+residual in [docs/macos.md](macos.md)). The equivalent attack-the-gate matrix for the macOS
+Endpoint Security gate is **not yet hardware-verified** and is therefore not claimed here. The
+load-bearing fact that *is* verified on macOS is that an unprivileged supervised agent cannot
+`SIGKILL` the root Endpoint Security client; the rest of the macOS matrix is pending.
+
 ## Orphaned descendants: gated by membership, not by ancestry
 
 A process can try to escape the gate by **double-`fork()`ing** — forking a child that
