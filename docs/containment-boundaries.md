@@ -70,6 +70,51 @@ cgroups. It *does* leak only if you deliberately keep the agent at uid 0 with `-
 The mechanism behind these denials — recording membership at process creation rather than
 reconstructing it by ancestry at read time — is described next.
 
+## Attacking the gate itself
+
+A supervised agent runs as a child of Bulwark, so the obvious move is not to evade the gate
+but to *disable* it — kill the supervisor, overwrite the binary, or strip its own restriction.
+Each was reproduced as a working attack from inside the supervised tree and verified on Linux
+kernel 6.12.
+
+| Attack on the gate | Default (deny-list) | `--hardened` |
+|---|---|---|
+| `SIGKILL` / `SIGSTOP` the supervisor | **deny** — agent is dropped to an unprivileged uid and cannot signal the root gate (`EPERM`) | n/a — there is no supervisor process |
+| `ptrace` / `strace` the supervisor | **deny** — non-root + `no_new_privs`, attach is `EPERM` | n/a |
+| `execve` a setuid-root binary to regain root, then kill | **deny** — `PR_SET_NO_NEW_PRIVS` makes the kernel ignore the setuid bit | **deny** — same |
+| Overwrite the `bulwark` binary on disk | **deny** for a root-owned install (the agent's uid cannot write it); and the *running* gate is in memory — clobbering the file does not disarm the live process | same |
+| Flood opens to overflow / exhaust the gate | **deny** — the permission queue is unbounded (`FAN_UNLIMITED_QUEUE`), so a flood applies backpressure instead of failing open | n/a — no userspace queue |
+| `umount` to drop the fanotify mark | **deny** — non-root cannot unmount | n/a |
+| Migrate out of the cgroup scope (`cgroup.procs`) | **deny** — the dropped agent cannot write `cgroup.procs` | n/a |
+| Strip its own restriction | n/a | **deny** — a Landlock ruleset is irrevocable for the life of the process |
+
+Three facts make this hold, and they are worth stating plainly:
+
+1. **The default unprivileged drop is load-bearing.** A would-be-root agent is dropped to an
+   unprivileged uid before it runs (`--allow-root` opts out, with a warning). That single fact
+   denies the whole top of the table: an unprivileged process cannot signal, `ptrace`, unmount,
+   migrate cgroups, or overwrite a root-owned file. The one path that could undo the drop —
+   `exec`ing a setuid-root binary to climb back to root — is closed by `PR_SET_NO_NEW_PRIVS`.
+
+2. **The fanotify gate fails *open* on supervisor death — but the agent cannot cause that death.**
+   If the supervisor is hard-killed, the kernel releases a held permission event as allowed
+   (documented fanotify behaviour). The residual is therefore an *external* root process killing
+   the supervisor — which is outside the agent's reach, and a host with a hostile root process is
+   already compromised by any measure. The agent itself, unprivileged, cannot open that window.
+
+3. **`--hardened` removes the entire class.** There is no supervisor to kill, `ptrace`, or
+   starve: Bulwark applies a Landlock floor to the agent process and `execve`s into the agent in
+   the same PID. The restriction lives in the kernel, on the agent itself, and cannot be removed
+   for the life of the process — so killing, freezing, tracing, or re-rooting buys nothing. This
+   is the crash-safe answer to "what if the agent takes out the gate": there is nothing to take
+   out.
+
+**Operator remedies** (defence in depth, in order of leverage): keep the agent unprivileged
+(the default — do not pass `--allow-root` to an untrusted agent); install the `bulwark` binary
+root-owned (the Homebrew formula and `.pkg` do this); for the strongest guarantee use
+`--hardened`, where the floor is crash-safe and irrevocable; and, belt-and-suspenders, you can
+`--protect` the binary's own path so even a write *attempt* is gated and recorded.
+
 ## Orphaned descendants: gated by membership, not by ancestry
 
 A process can try to escape the gate by **double-`fork()`ing** — forking a child that
