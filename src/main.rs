@@ -482,6 +482,20 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    let mut raw_args = std::env::args();
+    let _program = raw_args.next();
+    if let Some(internal) = raw_args.next() {
+        // WO-92: dependency-free remote memfd loader entrypoints. These stay out
+        // of clap's public command surface and are used only by deploy.rs.
+        if internal == "__memfd-probe" {
+            return Ok(());
+        }
+        if internal == "__memfd-exec" {
+            let command = raw_args.collect::<Vec<_>>();
+            return cmd_internal_memfd_exec(&command);
+        }
+    }
+
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Run {
@@ -798,6 +812,34 @@ mkdir -p {dir}
         allow = allow_args,
         agent = agent,
     )
+}
+
+fn build_hardened_preflight_script(
+    remote_invocation: &str,
+    deploy_prelude: Option<&str>,
+    deploy_cleanup_dir: Option<&str>,
+) -> String {
+    let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
+    match deploy_cleanup_dir {
+        Some(cleanup_dir) => format!(
+            r#"set -e
+cleanup_on_failure() {{
+  rc=$?
+  trap - EXIT INT TERM HUP
+  if [ "$rc" -ne 0 ]; then
+    sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
+  fi
+  exit "$rc"
+}}
+trap cleanup_on_failure EXIT INT TERM HUP
+{deploy}{invoke} landlock-check
+"#,
+            cleanup = cleanup_dir,
+            deploy = deploy_prelude,
+            invoke = remote_invocation,
+        ),
+        None => format!("set -e\n{deploy_prelude}{remote_invocation} landlock-check\n"),
+    }
 }
 
 fn cleanup_targets(remote_dir: &str, deploy_cleanup_dir: Option<&str>) -> String {
@@ -1150,13 +1192,10 @@ fn cmd_ssh_hardened(
     let run_id = std::process::id();
     let deploy_id = format!("{run_id}-{}", rand_token());
     let remote_bulwark = deploy::resolve_remote_bulwark(target, deploy_mode, &deploy_id)?;
-    let check_script = format!(
-        "set -e\n{}{} landlock-check\n",
-        remote_bulwark
-            .prelude()
-            .map(|s| format!("{s}\n"))
-            .unwrap_or_default(),
-        remote_bulwark.plain_invocation()
+    let check_script = build_hardened_preflight_script(
+        remote_bulwark.plain_invocation(),
+        remote_bulwark.prelude(),
+        remote_bulwark.cleanup_dir(),
     );
     let check =
         run_remote_script_status(target, &check_script, remote_bulwark.payload_path(), false)
@@ -1406,6 +1445,59 @@ fn prompt_local_operator() -> Verdict {
 /// Single-quote a string for safe embedding in a remote shell command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_internal_memfd_exec(command: &[String]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    if command.is_empty() {
+        anyhow::bail!("internal memfd loader requires argv");
+    }
+
+    let name = std::ffi::CString::new("bulwark-gate")?;
+    let fd = unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        anyhow::bail!("memfd_create failed: {}", std::io::Error::last_os_error());
+    }
+
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd as libc::c_int) };
+    std::io::copy(&mut std::io::stdin().lock(), &mut file).context("stream payload to memfd")?;
+    file.flush().context("flush memfd payload")?;
+    let raw_fd = file.as_raw_fd();
+
+    if unsafe { libc::fchmod(raw_fd, 0o500) } != 0 {
+        anyhow::bail!("fchmod memfd failed: {}", std::io::Error::last_os_error());
+    }
+    if unsafe { libc::lseek(raw_fd, 0, libc::SEEK_SET) } < 0 {
+        anyhow::bail!("rewind memfd failed: {}", std::io::Error::last_os_error());
+    }
+
+    let argv: Vec<std::ffi::CString> = command
+        .iter()
+        .map(|a| std::ffi::CString::new(a.as_bytes()))
+        .collect::<std::result::Result<_, _>>()?;
+    let mut argv_ptr: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    argv_ptr.push(std::ptr::null());
+
+    extern "C" {
+        static mut environ: *mut *mut libc::c_char;
+    }
+
+    unsafe {
+        libc::fexecve(
+            raw_fd,
+            argv_ptr.as_ptr(),
+            environ as *const *const libc::c_char,
+        );
+    }
+    Err(anyhow::anyhow!(std::io::Error::last_os_error())).context("fexecve memfd payload")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cmd_internal_memfd_exec(_command: &[String]) -> Result<()> {
+    anyhow::bail!("internal memfd loader is only supported on Linux")
 }
 
 /// Hardened launch: apply the Landlock read floor for `allow_globs`, then exec
@@ -2786,6 +2878,26 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(!script.contains("mkfifo"), "hardened: no FIFOs");
         assert!(!script.contains("--consent"), "hardened: no consent mode");
         assert!(!script.contains("--prompt-out"), "hardened: no prompt lane");
+    }
+
+    #[test]
+    fn hardened_preflight_cleans_deploy_dir_only_on_failure() {
+        let script = build_hardened_preflight_script(
+            "/dev/shm/bulwark-deploy-x/bulwark-loader __memfd-exec bulwark",
+            Some("mkdir -p /dev/shm/bulwark-deploy-x\ncat > /dev/shm/bulwark-deploy-x/bulwark-loader\nchmod 700 /dev/shm/bulwark-deploy-x/bulwark-loader"),
+            Some("/dev/shm/bulwark-deploy-x"),
+        );
+        assert!(script.contains("cleanup_on_failure()"));
+        assert!(script.contains("if [ \"$rc\" -ne 0 ]; then"));
+        assert!(script.contains("rm -rf /dev/shm/bulwark-deploy-x"));
+        assert!(script.contains("landlock-check"));
+        assert!(
+            script
+                .find("trap cleanup_on_failure EXIT INT TERM HUP")
+                .unwrap()
+                < script.find("landlock-check").unwrap(),
+            "preflight cleanup trap must exist before landlock-check:\n{script}"
+        );
     }
 
     #[test]

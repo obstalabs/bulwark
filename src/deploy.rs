@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -122,7 +123,7 @@ impl RemoteBulwark {
     }
 
     pub fn needs_binary_stdin(&self) -> bool {
-        self.payload_path.is_some()
+        matches!(self.source(), DeploySource::Memfd | DeploySource::Shm)
     }
 }
 
@@ -196,6 +197,22 @@ fn ssh_capture(target: &str, remote_cmd: &str) -> Result<std::process::Output> {
         .with_context(|| format!("cannot ssh to {target}"))
 }
 
+fn ssh_capture_with_payload(
+    target: &str,
+    remote_cmd: &str,
+    payload_path: &Path,
+) -> Result<std::process::Output> {
+    let payload = File::open(payload_path)
+        .with_context(|| format!("open streamable gate payload {}", payload_path.display()))?;
+    Command::new("ssh")
+        .args(SSH_OPTS)
+        .arg(target)
+        .arg(remote_cmd)
+        .stdin(payload)
+        .output()
+        .with_context(|| format!("cannot ssh to {target}"))
+}
+
 /// Detect the remote OS + arch via `uname -s -m`.
 pub fn detect_platform(target: &str) -> Result<RemotePlatform> {
     let out = ssh_capture(target, "uname -s -m")?;
@@ -233,34 +250,87 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-const MEMFD_PROBE_PY: &str = r#"import os
-fd = os.memfd_create("bulwark-probe", 0)
-os.close(fd)
-assert hasattr(os, "fexecve")
-"#;
-
-const MEMFD_LOADER_PY: &str = r#"import os
-import sys
-
-payload = sys.stdin.buffer.read()
-fd = os.memfd_create("bulwark-gate", 0)
-view = memoryview(payload)
-while view:
-    n = os.write(fd, view)
-    view = view[n:]
-os.lseek(fd, 0, 0)
-os.fchmod(fd, 0o500)
-os.fexecve(fd, sys.argv[1:], os.environ)
-"#;
-
-fn memfd_supported(target: &str) -> bool {
-    let cmd = format!("sudo -n python3 -c {}", shell_quote(MEMFD_PROBE_PY));
-    matches!(ssh_capture(target, &cmd), Ok(o) if o.status.success())
+fn output_reason(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("remote exit {:?}", out.status.code())
 }
 
-fn shm_supported(target: &str) -> bool {
-    let cmd = format!("test -d {REMOTE_SHM} && test -w {REMOTE_SHM} && sudo -n true");
-    matches!(ssh_capture(target, &cmd), Ok(o) if o.status.success())
+fn cleanup_trap(cleanup_dir: &str) -> String {
+    format!(
+        r#"cleanup() {{
+  rc=$?
+  trap - EXIT INT TERM HUP
+  sudo -n rm -rf {cleanup_dir} 2>/dev/null || rm -rf {cleanup_dir} 2>/dev/null || true
+  exit "$rc"
+}}
+trap cleanup EXIT INT TERM HUP"#
+    )
+}
+
+fn memfd_exec_invocation(remote_loader: &str) -> String {
+    let script = r#"loader=$1; shift; exec "$loader" __memfd-exec bulwark "$@" < "$loader""#;
+    format!("sh -c {} sh {remote_loader}", shell_quote(script))
+}
+
+fn memfd_probe_script(remote: &RemoteBulwark) -> String {
+    let cleanup_dir = remote
+        .cleanup_dir()
+        .expect("memfd probe must have a loader cleanup dir");
+    let prelude = remote
+        .prelude()
+        .expect("memfd probe must stage a dependency-free loader");
+    format!(
+        "set -e\n{}\n{}\n{} __memfd-probe\n",
+        cleanup_trap(cleanup_dir),
+        prelude,
+        remote.plain_invocation()
+    )
+}
+
+fn memfd_supported(target: &str, payload_path: &Path, deploy_id: &str) -> Result<(), String> {
+    let remote = memfd_remote(payload_path.to_path_buf(), deploy_id);
+    let script = memfd_probe_script(&remote);
+    match ssh_capture_with_payload(target, &script, payload_path) {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "memfd/fexecve probe failed; requires Linux memfd_create/fexecve and an executable {REMOTE_SHM} loader/control dir: {}",
+            output_reason(&o)
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn shm_probe_script() -> String {
+    let probe_dir = format!("{REMOTE_SHM}/{DEPLOY_DIR_PREFIX}-probe-$$");
+    format!(
+        r#"set -e
+d="{probe_dir}"
+{cleanup}
+mkdir "$d"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$d/probe"
+chmod 700 "$d/probe"
+sudo -n "$d/probe"
+"#,
+        cleanup = cleanup_trap("$d")
+    )
+}
+
+fn shm_supported(target: &str) -> Result<(), String> {
+    match ssh_capture(target, &shm_probe_script()) {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "{REMOTE_SHM} is not writable and executable for the shm deploy rung (possible noexec mount): {}",
+            output_reason(&o)
+        )),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// scp the local `bulwark` executable to a fresh remote temp dir and return the
@@ -475,16 +545,22 @@ fn streamable_gate_path(platform: &RemotePlatform) -> Result<PathBuf> {
         .with_context(|| format!("prepare local static gate payload for {target}"))
 }
 
-fn memfd_remote(payload_path: PathBuf) -> RemoteBulwark {
-    let plain_invocation = format!("python3 -c {} bulwark", shell_quote(MEMFD_LOADER_PY));
+fn memfd_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
+    let remote_dir = format!("{REMOTE_SHM}/{DEPLOY_DIR_PREFIX}-{VERSION}-{deploy_id}");
+    let remote_loader = format!("{remote_dir}/bulwark-loader");
+    let prelude =
+        format!("mkdir -p {remote_dir}\ncat > {remote_loader}\nchmod 700 {remote_loader}");
+    // WO-92: no remote Python/runtime dependency; the streamed static gate
+    // becomes the tiny loader that copies itself into memfd and fexecve's it.
+    let plain_invocation = memfd_exec_invocation(&remote_loader);
     let gate_invocation = format!("sudo -n {plain_invocation}");
     RemoteBulwark {
         source: DeploySource::Memfd,
         plain_invocation,
         gate_invocation,
         payload_path: Some(payload_path),
-        prelude: None,
-        cleanup_dir: None,
+        prelude: Some(prelude),
+        cleanup_dir: Some(remote_dir),
         run_dir_base: REMOTE_SHM,
     }
 }
@@ -541,19 +617,19 @@ pub fn resolve_remote_bulwark(
 
     match mode {
         DeployMode::Memfd => {
-            if !memfd_supported(target) {
+            let payload = streamable_gate_path(&platform)?;
+            if let Err(reason) = memfd_supported(target, &payload, deploy_id) {
                 return Err(anyhow!(
-                    "--deploy memfd requested but {target} cannot run the memfd/fexecve loader"
+                    "--deploy memfd requested but {target} cannot run the dependency-free memfd/fexecve loader: {reason}"
                 ));
             }
-            let payload = streamable_gate_path(&platform)?;
             eprintln!("[bulwark] deploy rung: memfd on {target}");
-            Ok(memfd_remote(payload))
+            Ok(memfd_remote(payload, deploy_id))
         }
         DeployMode::Shm => {
-            if !shm_supported(target) {
+            if let Err(reason) = shm_supported(target) {
                 return Err(anyhow!(
-                    "--deploy shm requested but {target} has no writable /dev/shm rung"
+                    "--deploy shm requested but {target} has no writable and executable {REMOTE_SHM} rung: {reason}"
                 ));
             }
             let payload = streamable_gate_path(&platform)?;
@@ -583,19 +659,22 @@ pub fn resolve_remote_bulwark(
             Ok(path_remote(DeploySource::Dist, path, Some(cleanup_dir)))
         }
         DeployMode::Auto => {
-            if memfd_supported(target) {
-                match streamable_gate_path(&platform) {
-                    Ok(payload) => {
+            match streamable_gate_path(&platform) {
+                Ok(payload) => match memfd_supported(target, &payload, deploy_id) {
+                    Ok(()) => {
                         eprintln!("[bulwark] deploy rung: memfd on {target}");
-                        return Ok(memfd_remote(payload));
+                        return Ok(memfd_remote(payload, deploy_id));
                     }
-                    Err(e) => {
-                        eprintln!("[bulwark] WARN memfd rung unavailable: {e}");
+                    Err(reason) => {
+                        eprintln!("[bulwark] WARN memfd rung unavailable: {reason}");
                     }
+                },
+                Err(e) => {
+                    eprintln!("[bulwark] WARN streamable gate unavailable for memfd/shm: {e}");
                 }
             }
-            if shm_supported(target) {
-                match streamable_gate_path(&platform) {
+            match shm_supported(target) {
+                Ok(()) => match streamable_gate_path(&platform) {
                     Ok(payload) => {
                         eprintln!("[bulwark] deploy rung: /dev/shm on {target}");
                         return Ok(shm_remote(payload, deploy_id));
@@ -603,6 +682,9 @@ pub fn resolve_remote_bulwark(
                     Err(e) => {
                         eprintln!("[bulwark] WARN /dev/shm rung unavailable: {e}");
                     }
+                },
+                Err(reason) => {
+                    eprintln!("[bulwark] WARN /dev/shm rung unavailable: {reason}");
                 }
             }
             if remote_has_bulwark(target) {
@@ -701,13 +783,40 @@ mod tests {
     }
 
     #[test]
-    fn memfd_invocation_uses_fexecve_loader() {
-        let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"));
+    fn memfd_invocation_uses_dependency_free_fexecve_loader() {
+        let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"), "run42");
         assert_eq!(r.source(), DeploySource::Memfd);
         assert!(r.needs_binary_stdin());
-        assert!(r.gate_invocation().contains("sudo -n python3 -c"));
-        assert!(r.gate_invocation().contains("fexecve"));
+        assert!(!r.gate_invocation().contains("python3"));
+        assert!(r.gate_invocation().contains("__memfd-exec"));
+        assert!(r.gate_invocation().contains("bulwark-loader"));
+        assert!(r
+            .prelude()
+            .unwrap()
+            .contains("cat > /dev/shm/bulwark-deploy-"));
+        let expected_cleanup = format!("/dev/shm/bulwark-deploy-{VERSION}-run42");
+        assert_eq!(r.cleanup_dir(), Some(expected_cleanup.as_str()));
         assert_eq!(r.run_dir_base(), "/dev/shm");
+    }
+
+    #[test]
+    fn memfd_probe_exercises_loader_and_removes_probe_dir() {
+        let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"), "probe42");
+        let s = memfd_probe_script(&r);
+        assert!(s.contains("trap cleanup EXIT INT TERM HUP"));
+        assert!(s.contains("__memfd-exec"));
+        assert!(s.contains("__memfd-probe"));
+        assert!(s.contains("rm -rf /dev/shm/bulwark-deploy-"));
+        assert!(!s.contains("python3"));
+    }
+
+    #[test]
+    fn shm_probe_executes_from_dev_shm_to_detect_noexec() {
+        let s = shm_probe_script();
+        assert!(s.contains("/dev/shm/bulwark-deploy-probe-$$"));
+        assert!(s.contains("chmod 700 \"$d/probe\""));
+        assert!(s.contains("sudo -n \"$d/probe\""));
+        assert!(s.contains("rm -rf $d"));
     }
 
     #[test]
