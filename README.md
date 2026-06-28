@@ -12,8 +12,9 @@
 
 A kernel-boundary file-read gate for AI agent process trees. Launch an agent
 under Bulwark; when any process in its tree tries to `open()` a protected file,
-the Linux kernel **pauses the read** and Bulwark decides — before a single byte
-reaches the agent.
+the OS gate **denies the read** — or routes it through Bulwark's policy/consent
+path — before a single byte reaches the agent. On Linux this is a fanotify
+permission event; on macOS it is an Apple Endpoint Security authorization.
 
 [![CI](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml/badge.svg)](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml)
 ![platform](https://img.shields.io/badge/platform-Linux%20%26%20macOS-blue)
