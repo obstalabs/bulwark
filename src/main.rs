@@ -358,10 +358,9 @@ enum Cmd {
         auto: Option<String>,
 
         /// How to obtain the `bulwark` binary on the remote host:
-        /// `auto` (default — use existing, else scp the local binary when
-        /// arch-compatible, else fetch the matching release), `never` (require
-        /// an existing remote binary), `scp` (force pushing the local binary),
-        /// or `dist` (force fetching the release tarball).
+        /// `auto` (default — memfd, then shm, then existing, then dist),
+        /// `never` (require an existing remote binary), `memfd`, `shm`,
+        /// `scp` (force pushing the local binary), or `dist` (last-resort fetch).
         #[arg(long = "deploy", value_name = "MODE", default_value = "auto")]
         deploy: String,
 
@@ -698,7 +697,9 @@ fn build_gate_script(
     remote_dir: &str,
     prompt_lane: &str,
     verdict_lane: &str,
-    remote_bin: &str,
+    remote_invocation: &str,
+    deploy_prelude: Option<&str>,
+    deploy_cleanup_dir: Option<&str>,
     target: &str,
     protect_args: &str,
     worker_uid: Option<u32>,
@@ -720,6 +721,10 @@ fn build_gate_script(
         Some(_) => format!("env HOME={remote_dir} USER=bulwark-worker LOGNAME=bulwark-worker "),
         None => String::new(),
     };
+    let remote_invocation = invocation_with_worker_env(remote_invocation, &env_prefix);
+    let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
+    let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
+
     // `mkdir {dir}` (NOT `-p`) so a pre-existing directory at the run path is a
     // hard error under `set -e` — combined with the unguessable random suffix in
     // `{dir}`, an attacker cannot pre-create the run directory to squat the
@@ -729,20 +734,25 @@ fn build_gate_script(
     // forged verdicts into to self-answer the off-band consent).
     format!(
         r#"set -e
+cleanup() {{
+  rc=$?
+  trap - EXIT INT TERM HUP
+  sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
+  exit "$rc"
+}}
+trap cleanup EXIT INT TERM HUP
 mkdir {dir}
 mkfifo -m 600 {pl} {vl}
-sudo {env}{bw} run --consent remote --host-label {hl} \
+{deploy}{invoke} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
   {worker}{protect} -- {agent}
-RC=$?
-rm -rf {dir}
-exit $RC
 "#,
         dir = remote_dir,
         pl = prompt_lane,
         vl = verdict_lane,
-        env = env_prefix,
-        bw = remote_bin,
+        cleanup = cleanup_targets,
+        deploy = deploy_prelude,
+        invoke = remote_invocation,
         hl = shell_quote(target),
         worker = worker,
         protect = protect_args,
@@ -758,26 +768,90 @@ exit $RC
 /// exact bytes are pinned by a unit test.
 fn build_hardened_gate_script(
     remote_dir: &str,
-    remote_bin: &str,
+    remote_invocation: &str,
+    deploy_prelude: Option<&str>,
+    deploy_cleanup_dir: Option<&str>,
     allow_args: &str,
     no_base_set: bool,
     agent: &str,
 ) -> String {
     let no_base = if no_base_set { "--no-base-set " } else { "" };
+    let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
+    let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
     format!(
         r#"set -e
+cleanup() {{
+  rc=$?
+  trap - EXIT INT TERM HUP
+  sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
+  exit "$rc"
+}}
+trap cleanup EXIT INT TERM HUP
 mkdir -p {dir}
-sudo {bw} run --hardened {no_base}{allow} -- {agent}
-RC=$?
-rm -rf {dir}
-exit $RC
+{deploy}{invoke} run --hardened {no_base}{allow} -- {agent}
 "#,
         dir = remote_dir,
-        bw = remote_bin,
+        cleanup = cleanup_targets,
+        deploy = deploy_prelude,
+        invoke = remote_invocation,
         no_base = no_base,
         allow = allow_args,
         agent = agent,
     )
+}
+
+fn cleanup_targets(remote_dir: &str, deploy_cleanup_dir: Option<&str>) -> String {
+    match deploy_cleanup_dir {
+        Some(dir) => format!("{remote_dir} {dir}"),
+        None => remote_dir.to_string(),
+    }
+}
+
+fn invocation_with_worker_env(remote_invocation: &str, env_prefix: &str) -> String {
+    if env_prefix.is_empty() {
+        return remote_invocation.to_string();
+    }
+    if let Some(rest) = remote_invocation.strip_prefix("sudo -n ") {
+        return format!("sudo -n {env_prefix}{rest}");
+    }
+    if let Some(rest) = remote_invocation.strip_prefix("sudo ") {
+        return format!("sudo {env_prefix}{rest}");
+    }
+    format!("{env_prefix}{remote_invocation}")
+}
+
+fn spawn_remote_script(
+    target: &str,
+    remote_script: &str,
+    payload_path: Option<&std::path::Path>,
+    allocate_tty: bool,
+) -> Result<std::process::Child> {
+    let mut cmd = std::process::Command::new("ssh");
+    if allocate_tty {
+        cmd.arg("-tt");
+    }
+    cmd.args(["-o", "StrictHostKeyChecking=accept-new"])
+        .arg(target)
+        .arg(remote_script);
+    if let Some(path) = payload_path {
+        let payload = std::fs::File::open(path)
+            .with_context(|| format!("open streamable gate payload {}", path.display()))?;
+        cmd.stdin(payload);
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
+    cmd.spawn()
+        .with_context(|| format!("cannot ssh to {target}"))
+}
+
+fn run_remote_script_status(
+    target: &str,
+    remote_script: &str,
+    payload_path: Option<&std::path::Path>,
+    allocate_tty: bool,
+) -> Result<std::process::ExitStatus> {
+    let mut child = spawn_remote_script(target, remote_script, payload_path, allocate_tty)?;
+    child.wait().context("remote session failed")
 }
 
 /// optional hivebus key material to carry to the remote at dispatch.
@@ -853,10 +927,6 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         anyhow::bail!("--protect is required (or use --hardened with --allow)");
     }
 
-    // Make sure a runnable bulwark exists on the remote host (use existing, scp
-    // the local binary when arch-compatible, or fetch the matching release).
-    let remote_bin = deploy::ensure_remote_bulwark(target, deploy_mode)?;
-
     // A unique run dir on the remote host holds the two lane FIFOs. The name
     // carries an UNGUESSABLE random token (not just the local pid): the dir lives
     // in world-writable /tmp on the remote, so a predictable name would let a
@@ -865,7 +935,15 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
     // the path is somehow occupied.
     let run_id = std::process::id();
-    let remote_dir = format!("/tmp/bulwark-remote-{run_id}-{}", rand_token());
+    let run_token = rand_token();
+    let deploy_id = format!("{run_id}-{run_token}");
+    // WO-85/WO-86: resolve delivery before choosing the lane base; streamed
+    // modes keep runtime control files in /dev/shm so /tmp can be absent.
+    let remote_bulwark = deploy::resolve_remote_bulwark(target, deploy_mode, &deploy_id)?;
+    let remote_dir = format!(
+        "{}/bulwark-remote-{deploy_id}",
+        remote_bulwark.run_dir_base()
+    );
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
@@ -873,7 +951,11 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // flows it into the SAME path `--worker-uid` uses. No account is created, so
     // there is nothing to tear down. The explicit `--worker-uid` is unchanged.
     let worker_uid = if auto_worker_uid {
-        Some(pick_remote_worker_uid(target, &remote_bin, run_id)?)
+        Some(pick_remote_worker_uid(
+            target,
+            remote_bulwark.plain_invocation(),
+            run_id,
+        )?)
     } else {
         worker_uid
     };
@@ -943,7 +1025,9 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         &remote_dir,
         &prompt_lane,
         &verdict_lane,
-        &remote_bin,
+        remote_bulwark.gate_invocation(),
+        remote_bulwark.prelude(),
+        remote_bulwark.cleanup_dir(),
         target,
         &protect_args,
         worker_uid,
@@ -957,14 +1041,12 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the local terminal's input to the remote, which would steal the operator's
     // keystrokes from the interactive consent prompt below. The remote PTY (`-tt`)
     // is kept so remote `sudo` still has a tty; the agent simply sees EOF on stdin.
-    let mut gate = std::process::Command::new("ssh")
-        .arg("-tt")
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
-        .arg(target)
-        .arg(&remote_script)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("cannot ssh to {target}"))?;
+    let mut gate = spawn_remote_script(
+        target,
+        &remote_script,
+        remote_bulwark.payload_path(),
+        !remote_bulwark.needs_binary_stdin(),
+    )?;
 
     // Control channels (separate ssh sessions, structured lanes — never the
     // agent's stdio):
@@ -1065,13 +1147,20 @@ fn cmd_ssh_hardened(
     // Make a runnable bulwark available on the remote first (so the preflight can
     // call it), then PREFLIGHT: the remote kernel must support Landlock, or
     // `--hardened` would silently degrade. Fail BEFORE launching the agent.
-    let remote_bin = deploy::ensure_remote_bulwark(target, deploy_mode)?;
-    let check = std::process::Command::new("ssh")
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
-        .arg(target)
-        .arg(format!("{} landlock-check", shell_quote(&remote_bin)))
-        .status()
-        .with_context(|| format!("cannot ssh to {target} for the Landlock preflight"))?;
+    let run_id = std::process::id();
+    let deploy_id = format!("{run_id}-{}", rand_token());
+    let remote_bulwark = deploy::resolve_remote_bulwark(target, deploy_mode, &deploy_id)?;
+    let check_script = format!(
+        "set -e\n{}{} landlock-check\n",
+        remote_bulwark
+            .prelude()
+            .map(|s| format!("{s}\n"))
+            .unwrap_or_default(),
+        remote_bulwark.plain_invocation()
+    );
+    let check =
+        run_remote_script_status(target, &check_script, remote_bulwark.payload_path(), false)
+            .with_context(|| format!("cannot ssh to {target} for the Landlock preflight"))?;
     if !check.success() {
         anyhow::bail!(
             "remote {target} does not support Landlock (needs Linux 5.13+); \
@@ -1079,8 +1168,10 @@ fn cmd_ssh_hardened(
         );
     }
 
-    let run_id = std::process::id();
-    let remote_dir = format!("/tmp/bulwark-remote-{run_id}");
+    let remote_dir = format!(
+        "{}/bulwark-remote-{deploy_id}",
+        remote_bulwark.run_dir_base()
+    );
     let allow_args = allow
         .iter()
         .map(|g| format!("--allow {}", shell_quote(g)))
@@ -1092,8 +1183,15 @@ fn cmd_ssh_hardened(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let remote_script =
-        build_hardened_gate_script(&remote_dir, &remote_bin, &allow_args, no_base_set, &agent);
+    let remote_script = build_hardened_gate_script(
+        &remote_dir,
+        remote_bulwark.gate_invocation(),
+        remote_bulwark.prelude(),
+        remote_bulwark.cleanup_dir(),
+        &allow_args,
+        no_base_set,
+        &agent,
+    );
 
     eprintln!(
         "[bulwark] ssh {target}: HARDENED — kernel Landlock floor on the remote agent (crash-safe)"
@@ -1101,14 +1199,12 @@ fn cmd_ssh_hardened(
 
     // No consent lanes, no operator relay: just run the floored agent and wait.
     // The agent's stdout/stderr flow on this channel; stdin is null (no operator).
-    let status = std::process::Command::new("ssh")
-        .arg("-tt")
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
-        .arg(target)
-        .arg(&remote_script)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .with_context(|| format!("cannot ssh to {target}"))?;
+    let status = run_remote_script_status(
+        target,
+        &remote_script,
+        remote_bulwark.payload_path(),
+        !remote_bulwark.needs_binary_stdin(),
+    )?;
 
     Ok(status.code().unwrap_or(1))
 }
@@ -2537,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_script_is_byte_identical_to_pre_wo29_baseline() {
+    fn gate_script_keeps_lanes_out_of_hivebus_and_cleans_up() {
         // acceptance: with no hivebus flags, `bulwark ssh` must behave
         // exactly as before. The hivebus handoff is a SEPARATE ssh session, so the
         // gate script is independent of it — this pins the exact bytes so any
@@ -2546,21 +2642,28 @@ mod tests {
             "/tmp/bulwark-remote-42",
             "/tmp/bulwark-remote-42/prompts",
             "/tmp/bulwark-remote-42/verdicts",
-            "/usr/local/bin/bulwark",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
             "nullbot@host",
             "--protect '/etc/shadow'",
             None,
             "'claude' '-p' 'fix it'",
         );
         let expected = "set -e\n\
+cleanup() {\n  \
+rc=$?\n  \
+trap - EXIT INT TERM HUP\n  \
+sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-42 2>/dev/null || true\n  \
+exit \"$rc\"\n\
+}\n\
+trap cleanup EXIT INT TERM HUP\n\
 mkdir /tmp/bulwark-remote-42\n\
 mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts\n\
 sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\n  \
 --prompt-out /tmp/bulwark-remote-42/prompts --verdict-in /tmp/bulwark-remote-42/verdicts \\\n  \
 --protect '/etc/shadow' -- 'claude' '-p' 'fix it'\n\
-RC=$?\n\
-rm -rf /tmp/bulwark-remote-42\n\
-exit $RC\n";
+";
         assert_eq!(
             script, expected,
             "gate script must not drift from the baseline"
@@ -2601,7 +2704,9 @@ exit $RC\n";
             "/tmp/d",
             "/tmp/d/p",
             "/tmp/d/v",
-            "/usr/local/bin/bulwark",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
             "nullbot@host",
             "--protect '/etc/shadow'",
             Some(1000),
@@ -2620,7 +2725,9 @@ exit $RC\n";
             "/tmp/d",
             "/tmp/d/p",
             "/tmp/d/v",
-            "/usr/local/bin/bulwark",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
             "nullbot@host",
             "--protect '/etc/shadow'",
             None,
@@ -2657,17 +2764,24 @@ exit $RC\n";
         // or prompt/verdict lanes — hardened is non-interactive + crash-safe.
         let script = build_hardened_gate_script(
             "/tmp/bulwark-remote-7",
-            "/usr/local/bin/bulwark",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
             "--allow '/var/log/**'",
             false,
             "'claude'",
         );
         let expected = "set -e\n\
+cleanup() {\n  \
+rc=$?\n  \
+trap - EXIT INT TERM HUP\n  \
+sudo -n rm -rf /tmp/bulwark-remote-7 2>/dev/null || rm -rf /tmp/bulwark-remote-7 2>/dev/null || true\n  \
+exit \"$rc\"\n\
+}\n\
+trap cleanup EXIT INT TERM HUP\n\
 mkdir -p /tmp/bulwark-remote-7\n\
 sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
-RC=$?\n\
-rm -rf /tmp/bulwark-remote-7\n\
-exit $RC\n";
+";
         assert_eq!(script, expected, "hardened script bytes must not drift");
         assert!(!script.contains("mkfifo"), "hardened: no FIFOs");
         assert!(!script.contains("--consent"), "hardened: no consent mode");
@@ -2676,12 +2790,28 @@ exit $RC\n";
 
     #[test]
     fn hardened_gate_script_no_base_set_toggles() {
-        let with = build_hardened_gate_script("/tmp/d", "/b", "--allow '/x'", true, "'a'");
+        let with = build_hardened_gate_script(
+            "/tmp/d",
+            "sudo /b",
+            None,
+            None,
+            "--allow '/x'",
+            true,
+            "'a'",
+        );
         assert!(
             with.contains("run --hardened --no-base-set --allow '/x'"),
             "no-base-set must precede --allow:\n{with}"
         );
-        let without = build_hardened_gate_script("/tmp/d", "/b", "--allow '/x'", false, "'a'");
+        let without = build_hardened_gate_script(
+            "/tmp/d",
+            "sudo /b",
+            None,
+            None,
+            "--allow '/x'",
+            false,
+            "'a'",
+        );
         assert!(!without.contains("--no-base-set"), "off => flag absent");
     }
 
