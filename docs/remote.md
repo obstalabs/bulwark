@@ -194,9 +194,9 @@ In short:
 - The agent runs as a normal remote command, inside the gated tree.
 
 This is a deliberate boundary: Bulwark is a read-gate for a process tree, not a
-payload-delivery mechanism. Because of it, an agent binary or installer you place on
-the host is a persistent footprint — the gate leaving no trace does not make the
-*whole operation* traceless.
+payload-delivery mechanism. An agent binary or installer you place on the host is a
+persistent footprint that Bulwark does not manage — bounding what the agent can read
+is a separate concern from how the agent itself got there.
 
 **Trace-free agent streaming** — delivering the agent into the already-gated remote
 session without leaving an executable on disk, gated from its first instruction — is
@@ -211,13 +211,10 @@ finished production trust channel:
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
-- **The gate binary delivery is best-effort over SSH.** Bulwark can bootstrap the
-  gate onto a bare host (`--deploy auto` uses an existing remote `bulwark`, else
-  `scp`s the local binary when arch-compatible, else fetches the matching release).
-  This depends on the remote having the tools that path needs (e.g. `curl`/`tar`
-  for the dist fetch); a fully self-contained, trace-free in-memory delivery is a
-  follow-up. The *agent* is a separate matter — see "Gate delivery vs agent
-  delivery" above.
+- **The gate is set up on the remote automatically.** If the host doesn't already
+  have Bulwark, `bulwark ssh` prepares it for you over the same SSH connection, so
+  you can run checks without installing anything there first. The *agent* is a
+  separate matter — see "Gate delivery vs agent delivery" above.
 - **The interactive local operator UI is minimal.** The prototype can auto-answer
   (`--auto allow-session`) for CI; a richer operator client is a follow-up.
 - **Remote gate death** on the *default* (`--protect`) path has the fanotify
