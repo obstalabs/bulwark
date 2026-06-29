@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-28
+
+### Added
+- `bulwark ssh --deploy memfd|shm` streams the static Linux gate over SSH instead of
+  requiring remote curl/tar or a writable `/tmp`; `auto` now prefers memfd, then
+  `/dev/shm`, then an existing remote binary, then dist as the last resort.
+- Release builds now include static musl Linux gates for x86_64 and aarch64, plus
+  macOS artifacts for x86_64 and aarch64.
+
+### Changed
+- The release workflow now fails if the public `bulwark-dist` release is missing
+  any expected target asset or checksum for the tagged CLI version.
+- Legacy scp/dist remote deploy paths now tear down their deploy and run
+  directories on normal exit and trapped termination.
+
 ## [0.7.2] - 2026-06-XX
 
 Security-hardening release. The read gate was put through repeated adversarial review —
