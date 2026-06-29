@@ -174,6 +174,35 @@ same floor as local `bulwark run --hardened`, applied by the remote kernel.
 Together: `--worker-uid` (the agent can't kill the gate) and `--hardened` (even if
 the gate dies, the kernel keeps denying) are the two halves of a crash-safe remote.
 
+## Gate delivery vs agent delivery
+
+These are two different things, and Bulwark OSS handles only the first.
+
+- **The gate** — Bulwark can bootstrap *itself* onto a remote host over SSH (the
+  `--deploy` path), so the kernel-level enforcement exists where the `open()`
+  happens.
+- **The agent** — the command after `--` (`claude`, `codex`, your own script) is the
+  workload Bulwark supervises. **Bulwark OSS does not deliver it.** It is executed as
+  a normal remote command inside the gated process tree, so the remote host must
+  already be able to run it (installed on `PATH`, or provided by your own
+  provisioning).
+
+In short:
+
+- Bulwark may deliver the gate.
+- Bulwark does **not** deliver the agent.
+- The agent runs as a normal remote command, inside the gated tree.
+
+This is a deliberate boundary: Bulwark is a read-gate for a process tree, not a
+payload-delivery mechanism. Because of it, an agent binary or installer you place on
+the host is a persistent footprint — the gate leaving no trace does not make the
+*whole operation* traceless.
+
+**Trace-free agent streaming** — delivering the agent into the already-gated remote
+session without leaving an executable on disk, gated from its first instruction — is
+planned for **Bulwark Pro** (the "Ephemeral Agent Runtime"). No public timeline is
+committed yet.
+
 ## Honest limits (prototype-grade)
 
 This is the first slice of the remote tier, proven end-to-end. It is not yet the
@@ -182,8 +211,13 @@ finished production trust channel:
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
-- **The remote host must already have the `bulwark` binary.** There is no
-  auto-deploy of the gate to a bare host yet.
+- **The gate binary delivery is best-effort over SSH.** Bulwark can bootstrap the
+  gate onto a bare host (`--deploy auto` uses an existing remote `bulwark`, else
+  `scp`s the local binary when arch-compatible, else fetches the matching release).
+  This depends on the remote having the tools that path needs (e.g. `curl`/`tar`
+  for the dist fetch); a fully self-contained, trace-free in-memory delivery is a
+  follow-up. The *agent* is a separate matter — see "Gate delivery vs agent
+  delivery" above.
 - **The interactive local operator UI is minimal.** The prototype can auto-answer
   (`--auto allow-session`) for CI; a richer operator client is a follow-up.
 - **Remote gate death** on the *default* (`--protect`) path has the fanotify
