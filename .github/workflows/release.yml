@@ -69,12 +69,16 @@ jobs:
             file "$bin"
             exit 1
           fi
-          if ldd "$bin" 2>&1 | tee ldd.out | grep -qi "not a dynamic executable"; then
-            exit 0
+          # Authoritative no-deps gate, phrasing-agnostic: a static binary has NO
+          # shared-library mappings. ldd prints those as "lib... => /path" lines
+          # (and may say "not a dynamic executable" or "statically linked" instead).
+          # So: pass iff ldd shows no "=>" dependency line.
+          ldd "$bin" > ldd.out 2>&1 || true
+          if grep -q "=>" ldd.out; then
+            echo "::error::${{ matrix.target }} is not a fully static binary (has dynamic deps)"
+            cat ldd.out
+            exit 1
           fi
-          echo "::error::${{ matrix.target }} is not a fully static binary"
-          cat ldd.out
-          exit 1
 
       - name: Package
         id: package
