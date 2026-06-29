@@ -485,7 +485,7 @@ fn main() -> Result<()> {
     let mut raw_args = std::env::args();
     let _program = raw_args.next();
     if let Some(internal) = raw_args.next() {
-        // WO-92: dependency-free remote memfd loader entrypoints. These stay out
+        // Dependency-free remote memfd loader entrypoints. These stay out
         // of clap's public command surface and are used only by deploy.rs.
         if internal == "__memfd-probe" {
             return Ok(());
@@ -979,7 +979,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     let run_id = std::process::id();
     let run_token = rand_token();
     let deploy_id = format!("{run_id}-{run_token}");
-    // WO-85/WO-86: resolve delivery before choosing the lane base; streamed
+    // Resolve delivery before choosing the lane base; streamed
     // modes keep runtime control files in /dev/shm so /tmp can be absent.
     let remote_bulwark = deploy::resolve_remote_bulwark(target, deploy_mode, &deploy_id)?;
     let remote_dir = format!(

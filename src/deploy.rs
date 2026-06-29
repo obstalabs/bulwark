@@ -27,13 +27,13 @@ const REMOTE_SHM: &str = "/dev/shm";
 /// How `bulwark ssh` is allowed to obtain the remote binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeployMode {
-    /// WO-86: choose the most ephemeral viable delivery rung.
+    /// Choose the most ephemeral viable delivery rung.
     Auto,
     /// Require an existing remote bulwark; never deploy.
     Never,
-    /// WO-85: stream a static Linux gate into an anonymous memfd and fexecve it.
+    /// Stream a static Linux gate into an anonymous memfd and fexecve it.
     Memfd,
-    /// WO-86: stream a static Linux gate into `/dev/shm` as the RAM-backed fallback.
+    /// Stream a static Linux gate into `/dev/shm` as the RAM-backed fallback.
     Shm,
     /// Force the scp-the-local-binary path; fail if it is not possible.
     Scp,
@@ -137,7 +137,7 @@ impl RemotePlatform {
     }
 }
 
-/// WO-84: map `uname -m` to the static musl target used for streamable gates.
+/// Map `uname -m` to the static musl target used for streamable gates.
 pub fn target_triple(arch: &str) -> Result<&'static str> {
     match arch {
         "x86_64" | "amd64" => Ok("x86_64-unknown-linux-musl"),
@@ -279,7 +279,7 @@ fn memfd_exec_invocation(remote_loader: &str) -> String {
     format!("sh -c {} sh {remote_loader}", shell_quote(script))
 }
 
-// WO-94: probe memfd through the same sudo gate path used at launch.
+// Probe memfd through the same sudo gate path used at launch.
 fn memfd_probe_script(remote: &RemoteBulwark) -> String {
     let cleanup_dir = remote
         .cleanup_dir()
@@ -551,7 +551,7 @@ fn memfd_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
     let remote_loader = format!("{remote_dir}/bulwark-loader");
     let prelude =
         format!("mkdir -p {remote_dir}\ncat > {remote_loader}\nchmod 700 {remote_loader}");
-    // WO-92: no remote Python/runtime dependency; the streamed static gate
+    // No remote Python/runtime dependency; the streamed static gate
     // becomes the tiny loader that copies itself into memfd and fexecve's it.
     let plain_invocation = memfd_exec_invocation(&remote_loader);
     let gate_invocation = format!("sudo -n {plain_invocation}");

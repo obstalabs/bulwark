@@ -168,7 +168,7 @@ pub(crate) fn fs_generation_fd(fd: std::os::unix::io::RawFd) -> Option<u64> {
     let mut gen_val: libc::c_long = 0;
     // SAFETY: fd is a valid open descriptor; gen_val is a valid c_long out-param.
     // `ioctl`'s request arg is `c_ulong` on glibc but `c_int` on musl; cast to the
-    // platform's expected type so the static musl gate (WO-84) compiles too.
+    // platform's expected type so the static musl gate compiles too.
     let rc = unsafe { libc::ioctl(fd, FS_IOC_GETVERSION as _, &mut gen_val) };
     if rc == 0 {
         Some(gen_val as u64)
