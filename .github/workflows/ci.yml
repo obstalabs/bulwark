@@ -24,7 +24,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-          targets: x86_64-apple-darwin
+          targets: x86_64-apple-darwin, x86_64-unknown-linux-musl
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -49,6 +49,32 @@ jobs:
       # type errors that Linux-only CI used to miss.
       - name: macOS Rust cfg check
         run: cargo check --target x86_64-apple-darwin --verbose
+
+      # Build the static musl gate on every PR. The musl target is what the
+      # streamable remote-deploy path ships, but it only built on release tags
+      # before — so musl-only defects (e.g. ioctl signature differences) and the
+      # static-linkage assertion went unexercised until a tag. Build + assert
+      # here so those are caught pre-merge. x86_64 native musl needs no cross.
+      - name: Build static musl gate
+        run: cargo build --release --target x86_64-unknown-linux-musl --verbose
+
+      - name: Assert static linkage (musl)
+        run: |
+          bin="target/x86_64-unknown-linux-musl/release/bulwark"
+          file "$bin"
+          # Accept both "statically linked" and the newer "static-pie linked".
+          if ! file "$bin" | grep -qiE "statically linked|static-pie linked"; then
+            echo "::error::musl gate is not reported static by file()"
+            file "$bin"
+            exit 1
+          fi
+          # Phrasing-agnostic no-deps gate: a static binary has no "=>" deps.
+          ldd "$bin" > ldd.out 2>&1 || true
+          if grep -q "=>" ldd.out; then
+            echo "::error::musl gate is not a fully static binary (has dynamic deps)"
+            cat ldd.out
+            exit 1
+          fi
 
       - name: Unit tests
         run: cargo test --verbose
