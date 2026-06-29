@@ -1,8 +1,8 @@
 name: Release
 
-# Build release binaries on a version tag and publish a GitHub Release to the
-# public distribution repo (obstalabs/bulwark-dist). The source stays private;
-# only the compiled artifacts and checksums are published.
+# Build release binaries on a version tag and publish a GitHub Release on this
+# repo. Source and artifacts now live together (the project is open source), so the
+# release is created in-repo with the built-in token — no cross-repo PAT.
 
 on:
   push:
@@ -10,11 +10,11 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  DIST_REPO: obstalabs/bulwark-dist
+  DIST_REPO: ${{ github.repository }}
 
 jobs:
   build-linux:
@@ -178,26 +178,21 @@ jobs:
           echo "" >> notes.md
           echo "See CHANGELOG inside each archive for the full list." >> notes.md
 
-      - name: Publish GitHub Release to dist repo
+      - name: Publish GitHub Release
         env:
-          # PAT with contents:write on obstalabs/bulwark-dist. Set as a secret on
-          # the private bulwark repo. Without it the release cannot be published.
-          GH_TOKEN: ${{ secrets.DIST_RELEASE_TOKEN }}
+          # In-repo release: the built-in token has contents:write here.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "DIST_RELEASE_TOKEN is not set — cannot publish to ${DIST_REPO}." >&2
-            exit 1
-          fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$DIST_REPO" \
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
             artifacts/*.tar.gz artifacts/*.sha256
 
-      - name: Verify dist release assets
-        # Make the release red if the public dist repo is not in lockstep.
+      - name: Verify release assets
+        # Make the release red if the published assets are not in lockstep.
         env:
-          GH_TOKEN: ${{ secrets.DIST_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           targets=(

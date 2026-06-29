@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Releases now publish to this repository's own GitHub Releases instead of a
+  separate distribution repo; the runtime gate-fetch path and install docs point
+  here. The ANCC contract `docs/SKILL.md` now lives in this repo.
+
 ## [0.8.0] - 2026-06-28
 
 ### Added
@@ -16,8 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   macOS artifacts for x86_64 and aarch64.
 
 ### Changed
-- The release workflow now fails if the public `bulwark-dist` release is missing
-  any expected target asset or checksum for the tagged CLI version.
+- The release workflow now fails if the published release is missing any expected
+  target asset or checksum for the tagged CLI version.
 - Legacy scp/dist remote deploy paths now tear down their deploy and run
   directories on normal exit and trapped termination.
 
