@@ -180,14 +180,52 @@ jobs:
           done
           exit "$missing"
 
-      - name: Generate release notes from CHANGELOG
-        # Pull the section for this tag out of the private CHANGELOG so the
-        # public release notes match exactly what shipped.
+      - name: Generate release notes
+        # Install-first notes so the release page is usable on its own. The
+        # version is templated from the tag, so every release gets current notes.
         run: |
           version="${GITHUB_REF_NAME#v}"
-          echo "Bulwark ${GITHUB_REF_NAME} — Linux read-gate." > notes.md
-          echo "" >> notes.md
-          echo "See CHANGELOG inside each archive for the full list." >> notes.md
+          # The heredoc body is indented to match this YAML block; strip that
+          # leading indent so the emitted markdown starts at column 0 (otherwise
+          # the code fences and tables would render as indented code blocks).
+          sed 's/^          //' > notes.md <<NOTES
+          **Bulwark ${GITHUB_REF_NAME}** — a kernel-boundary file-read gate for AI agent process trees. Linux (fanotify) & macOS (Endpoint Security).
+
+          ## Install
+
+          **Homebrew (recommended, Linux & macOS):**
+          \`\`\`sh
+          brew install obstalabs/tap/bulwark
+          \`\`\`
+
+          **macOS installer package (signed & notarized):**
+          \`\`\`sh
+          brew install --cask obstalabs/tap/bulwark
+          \`\`\`
+
+          **Manual download:** grab the archive for your platform below, then:
+          \`\`\`sh
+          tar xzf bulwark-${version}-<target>.tar.gz
+          sudo install -m 0755 bulwark-${version}-<target>/bulwark /usr/local/bin/bulwark
+          \`\`\`
+          On macOS the archive also bundles the signed \`bulwark_es_gate.app\` (the Endpoint Security gate); keep it alongside the binary.
+
+          ## Quick start
+          \`\`\`sh
+          # Run an agent, but deny it any read of your SSH keys — enforced by the kernel.
+          sudo bulwark run --protect ~/.ssh -- claude
+          \`\`\`
+
+          ## Which archive?
+          | Platform | Archive |
+          |----------|---------|
+          | Linux x86_64 | \`bulwark-${version}-x86_64-unknown-linux-gnu.tar.gz\` (or \`-musl\` for a static build) |
+          | Linux aarch64 | \`bulwark-${version}-aarch64-unknown-linux-gnu.tar.gz\` (or \`-musl\`) |
+          | macOS Apple Silicon | \`bulwark-${version}-aarch64-apple-darwin.tar.gz\` (or \`.pkg\`) |
+          | macOS Intel | \`bulwark-${version}-x86_64-apple-darwin.tar.gz\` (or \`.pkg\`) |
+
+          Every archive ships with a \`.sha256\` checksum. See the [README](https://github.com/obstalabs/bulwark#readme) for usage, the boundary model, and what Bulwark does **not** do.
+          NOTES
 
       - name: Publish GitHub Release
         env:
