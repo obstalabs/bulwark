@@ -71,7 +71,7 @@ identity is the inode, not a string a symlink can forge.
 > Linux (fanotify) and macOS (Endpoint Security). The gate needs root —
 > `CAP_SYS_ADMIN` for fanotify on Linux, root + Full Disk Access on macOS
 > ([why, and how to set it up](docs/macos-permissions.md)). Prebuilt binaries:
-> `brew install obstalabs/tap/bulwark` or **[obstalabs/bulwark-dist](https://github.com/obstalabs/bulwark-dist)**.
+> `brew install obstalabs/tap/bulwark` or the **[Releases page](https://github.com/obstalabs/bulwark/releases)**.
 
 ```sh
 cargo build --release
@@ -151,7 +151,7 @@ matrix is in [docs/containment-boundaries.md](docs/containment-boundaries.md).
 Bulwark is built to be operated by an agent, not only a human: in a fleet, an
 orchestrator dispatching a sub-agent onto a sensitive host clamps that sub-agent's
 reach at dispatch. The restrainer is itself an agent — which is why Bulwark ships
-an ANCC contract (`docs/SKILL.md` in bulwark-dist), so an orchestrator can read
+an ANCC contract ([`docs/SKILL.md`](docs/SKILL.md)), so an orchestrator can read
 its interface and apply the clamp programmatically.
 
 Handing an agent the lever is only safe because the lever turns one way.

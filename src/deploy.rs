@@ -14,8 +14,9 @@ use std::process::Command;
 /// matching release so local and remote never skew.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Public dist repo that holds the release tarballs.
-pub const DIST_REPO: &str = "obstalabs/bulwark-dist";
+/// Repo whose GitHub Releases hold the published gate tarballs. Releases ship from
+/// this same source repo, so the dist-fetch path pulls from its own Releases.
+pub const DIST_REPO: &str = "obstalabs/bulwark";
 
 /// Local override for the static Linux gate payload streamed to memfd or shm.
 pub const STREAMABLE_GATE_ENV: &str = "BULWARK_GATE_BINARY";
@@ -766,7 +767,7 @@ mod tests {
         let url = dist_url("0.5.0", "bulwark-0.5.0-x86_64-unknown-linux-musl.tar.gz");
         assert_eq!(
             url,
-            "https://github.com/obstalabs/bulwark-dist/releases/download/v0.5.0/bulwark-0.5.0-x86_64-unknown-linux-musl.tar.gz"
+            "https://github.com/obstalabs/bulwark/releases/download/v0.5.0/bulwark-0.5.0-x86_64-unknown-linux-musl.tar.gz"
         );
     }
 

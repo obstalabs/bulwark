@@ -65,4 +65,4 @@ done
 echo
 echo "==> signed + notarized + stapled pkgs in $OUT/:"
 ls -la "$OUT"/*.pkg
-echo "    upload these to the bulwark-dist v${VERSION} release and point the formula at them."
+echo "    upload these to the bulwark v${VERSION} release and point the formula at them."
