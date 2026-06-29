@@ -279,6 +279,7 @@ fn memfd_exec_invocation(remote_loader: &str) -> String {
     format!("sh -c {} sh {remote_loader}", shell_quote(script))
 }
 
+// WO-94: probe memfd through the same sudo gate path used at launch.
 fn memfd_probe_script(remote: &RemoteBulwark) -> String {
     let cleanup_dir = remote
         .cleanup_dir()
@@ -290,7 +291,7 @@ fn memfd_probe_script(remote: &RemoteBulwark) -> String {
         "set -e\n{}\n{}\n{} __memfd-probe\n",
         cleanup_trap(cleanup_dir),
         prelude,
-        remote.plain_invocation()
+        remote.gate_invocation()
     )
 }
 
@@ -300,7 +301,7 @@ fn memfd_supported(target: &str, payload_path: &Path, deploy_id: &str) -> Result
     match ssh_capture_with_payload(target, &script, payload_path) {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(format!(
-            "memfd/fexecve probe failed; requires Linux memfd_create/fexecve and an executable {REMOTE_SHM} loader/control dir: {}",
+            "memfd/fexecve sudo probe failed; requires noninteractive sudo, Linux memfd_create/fexecve, and an executable {REMOTE_SHM} loader/control dir: {}",
             output_reason(&o)
         )),
         Err(e) => Err(e.to_string()),
@@ -804,6 +805,8 @@ mod tests {
         let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"), "probe42");
         let s = memfd_probe_script(&r);
         assert!(s.contains("trap cleanup EXIT INT TERM HUP"));
+        assert!(s.contains(r.gate_invocation()));
+        assert!(s.contains("sudo -n"));
         assert!(s.contains("__memfd-exec"));
         assert!(s.contains("__memfd-probe"));
         assert!(s.contains("rm -rf /dev/shm/bulwark-deploy-"));
