@@ -61,7 +61,14 @@ jobs:
         run: |
           bin="target/${{ matrix.target }}/release/bulwark"
           file "$bin"
-          file "$bin" | grep -qi "statically linked"
+          # Modern Rust+musl emits "static-pie linked" (a static position-independent
+          # executable); older toolchains say "statically linked". Both are fully
+          # static. Accept either, and let `ldd` be the authoritative no-deps gate.
+          if ! file "$bin" | grep -qiE "statically linked|static-pie linked"; then
+            echo "::error::${{ matrix.target }}: file() does not report a static binary"
+            file "$bin"
+            exit 1
+          fi
           if ldd "$bin" 2>&1 | tee ldd.out | grep -qi "not a dynamic executable"; then
             exit 0
           fi
