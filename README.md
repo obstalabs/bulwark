@@ -8,13 +8,14 @@
 
 # Bulwark
 
-> The kernel asks before the bytes leave the disk.
+> Gate an agent's file reads at the OS, by inode, before the bytes reach it.
 
-A kernel-boundary file-read gate for AI agent process trees. Launch an agent
-under Bulwark; when any process in its tree tries to `open()` a protected file,
-the OS gate **denies the read** — or routes it through Bulwark's policy/consent
-path — before a single byte reaches the agent. On Linux this is a fanotify
-permission event; on macOS it is an Apple Endpoint Security authorization.
+Bulwark is an OS-level read gate for running AI coding agents on a developer
+machine. Launch an agent under it; when any process in its tree tries to `open()`
+a protected file, Bulwark applies a policy before the bytes reach the agent: deny,
+allow, or ask for consent. On Linux it uses fanotify permission events; on macOS,
+Endpoint Security. Hardened mode adds a Landlock floor so protected paths stay
+denied even if the userspace gate dies.
 
 [![CI](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml/badge.svg)](https://github.com/obstalabs/bulwark/actions/workflows/ci.yml)
 ![platform](https://img.shields.io/badge/platform-Linux%20%26%20macOS-blue)
@@ -29,14 +30,13 @@ sudo bulwark run --protect ~/.ssh -- claude
 
 ## What Bulwark is
 
-Bulwark is the missing lower layer of the agent-safety stack: an OS-level read
-gate. It supervises a process tree, installs a fanotify `FAN_OPEN_PERM` mark,
-and judges each open by the file's **inode** — not its path string. A protected
-inode opened by the supervised tree is denied at the kernel; the reader gets
-`EPERM`. Every decision is logged with the process ancestry that caused it.
+It supervises a process tree, installs a fanotify `FAN_OPEN_PERM` mark, and
+decides each open by the file's **inode**, not its path string. A protected inode
+opened by the supervised tree is denied; the reader gets `EPERM`. Every decision
+is logged with the process ancestry that caused it.
 
-The boundary stops being a rule in a prompt the agent can be talked past, and
-becomes an invariant the kernel enforces.
+The point is that the boundary is an OS-mediated checkpoint, not a rule in a
+prompt the agent can be talked past.
 
 ## What Bulwark is NOT
 
@@ -56,7 +56,8 @@ becomes an invariant the kernel enforces.
   socket. The full tested boundary is in
   [docs/containment-boundaries.md](docs/containment-boundaries.md).
 
-It does exactly one thing: gate the read at the kernel.
+One mechanism — gate the `open()` — with a few policies layered over it
+(deny-list, allow-list, consent, a crash-safe hardened floor).
 
 ## Philosophy
 
