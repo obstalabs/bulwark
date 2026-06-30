@@ -22,10 +22,14 @@ denied even if the userspace gate dies.
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
 ```sh
-# Run an agent, but deny it any read of your SSH keys — enforced by the kernel.
+# Run an agent, but deny it any read of your SSH keys.
 brew install obstalabs/tap/bulwark
 sudo bulwark run --protect ~/.ssh -- claude
-#   the agent works normally; cat ~/.ssh/id_ed25519  ->  Permission denied
+#   the agent works normally; a read of a protected file -> Operation not permitted
+
+# macOS note: sudo resets PATH, so on Homebrew/Apple Silicon use the full form,
+# which also keeps the agent's own runtime (e.g. node) on PATH:
+sudo env "PATH=$PATH" "$(which bulwark)" run --protect ~/.ssh -- claude
 ```
 
 ## What Bulwark is
