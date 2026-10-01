@@ -1,6 +1,6 @@
 //! Non-Linux stub of the fanotify gate.
 //!
-//! fail-closed platform stub for the cfg-split gate seam.
+//! WO-28: fail-closed platform stub for the cfg-split gate seam.
 //!
 //! Bulwark's enforcement gate is Linux-only (fanotify `FAN_OPEN_PERM`). This
 //! stub mirrors the public surface of `gate.rs` so the portable core (CLI,

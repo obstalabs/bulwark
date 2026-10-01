@@ -51,7 +51,7 @@ fn peer_pid(stream: &UnixStream) -> Option<i32> {
     Some(cred.pid)
 }
 
-/// macOS preserves off-band consent with `LOCAL_PEERPID`.
+/// WO-24: macOS preserves off-band consent with `LOCAL_PEERPID`.
 #[cfg(target_os = "macos")]
 fn peer_pid(stream: &UnixStream) -> Option<i32> {
     let mut pid: libc::pid_t = 0;

@@ -1,6 +1,6 @@
 import Foundation
 
-// deterministic source checks for AUTH callback deadline-safety invariants.
+// WO-39: deterministic source checks for AUTH callback deadline-safety invariants.
 let testPath = URL(fileURLWithPath: #filePath)
 let sourcePath = testPath.deletingLastPathComponent().appendingPathComponent("es_proof.swift")
 let source = try String(contentsOf: sourcePath, encoding: .utf8)

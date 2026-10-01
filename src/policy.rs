@@ -90,22 +90,22 @@ fn default_agent_audit() -> bool {
     true
 }
 
-/// named front-door configuration for `bulwark launch <agent>`.
+/// WO-27: named front-door configuration for `bulwark launch <agent>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfile {
-    /// command and arguments to execute for this agent.
+    /// WO-27: command and arguments to execute for this agent.
     #[serde(default)]
     pub command: Vec<String>,
-    /// protected path globs used by the existing deny-list gate.
+    /// WO-27: protected path globs used by the existing deny-list gate.
     #[serde(default)]
     pub protect: Vec<String>,
-    /// allow-list grants for default-deny launches.
+    /// WO-27: allow-list grants for default-deny launches.
     #[serde(default)]
     pub allow: Vec<String>,
-    /// default decision for protected opens in deny-list mode.
+    /// WO-27: default decision for protected opens in deny-list mode.
     #[serde(default = "default_agent_decision")]
     pub decision: AgentDecision,
-    /// whether launch should write the default audit receipts file.
+    /// WO-27: whether launch should write the default audit receipts file.
     #[serde(default = "default_agent_audit")]
     pub audit: bool,
 }
@@ -143,10 +143,10 @@ pub struct Policy {
     pub protected: Protected,
     #[serde(default)]
     pub default: Defaults,
-    /// default configured launch profile; `run` ignores this field.
+    /// WO-27: default configured launch profile; `run` ignores this field.
     #[serde(default)]
     pub default_agent: Option<String>,
-    /// additive launch profiles keyed by agent name; `run` ignores them.
+    /// WO-27: additive launch profiles keyed by agent name; `run` ignores them.
     #[serde(default)]
     pub agents: BTreeMap<String, AgentProfile>,
 }

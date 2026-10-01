@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build + sign the ES proof binary on the M2 (develop/build/sign host).
+# WO-26: build + sign the ES proof binary on the M2 (develop/build/sign host).
 #
 # Produces a Developer-ID-signed, hardened-runtime, ES-entitled Mach-O.
 # Notarization is a separate step (notarize.sh) because it needs network +

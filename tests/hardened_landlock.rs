@@ -1,4 +1,4 @@
-//! hardened-mode (Landlock floor) integration tests. Require Linux with
+//! WO-14 hardened-mode (Landlock floor) integration tests. Require Linux with
 //! Landlock and root, so `#[ignore]` + run under `sudo`.
 //!
 //! Hardened mode applies a kernel-enforced default-deny read floor and execs

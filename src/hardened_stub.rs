@@ -1,6 +1,6 @@
 //! Non-Linux stub of the Landlock hardened read-floor.
 //!
-//! fail-closed platform stub for the cfg-split hardened seam.
+//! WO-28: fail-closed platform stub for the cfg-split hardened seam.
 //!
 //! `hardened.rs` applies a Landlock LSM ruleset (Linux 5.13+) as a crash-safe
 //! kernel-enforced read floor. This stub mirrors its public surface so the

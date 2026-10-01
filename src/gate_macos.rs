@@ -1,6 +1,6 @@
 //! macOS Endpoint Security `AUTH_OPEN` read gate.
 //!
-//! this is the macOS counterpart to the Linux fanotify gate. Rust keeps
+//! WO-23: this is the macOS counterpart to the Linux fanotify gate. Rust keeps
 //! policy resolution, child launch, and fail-closed supervision; a signed,
 //! entitled Swift ES edge answers kernel `AUTH_OPEN` events by `(dev, ino)`.
 //!
@@ -28,8 +28,8 @@ const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Same public surface as the Linux gate.
 pub enum GateMode<'a> {
-    /// macOS currently supports the static deny-list path. Interactive
-    /// consent is startup-seeded into the ES edge so AUTH_OPEN callbacks
+    /// WO-23: macOS currently supports the static deny-list path. Interactive
+    /// consent is WO-24 startup-seeded into the ES edge so AUTH_OPEN callbacks
     /// still answer from in-memory policy only.
     DenyList {
         protected: &'a ProtectedSet,
@@ -138,7 +138,7 @@ pub fn run(
             }
         }
         GateMode::AllowList { allow } => {
-            // replaces the former
+            // WO-41: replaces the former
             // "macOS allow-list/default-deny mode is not implemented yet"
             // fail-closed path with a pushed allow-list policy.
             EdgePolicy::AllowList { allow }
@@ -263,7 +263,7 @@ enum EdgePolicy<'a> {
         protected: &'a ProtectedSet,
         decisions: EdgeDecisionSeeds,
     },
-    // default-deny macOS gate policy pushed to the ES edge.
+    // WO-41: default-deny macOS gate policy pushed to the ES edge.
     AllowList {
         allow: &'a AllowList,
     },
@@ -271,8 +271,8 @@ enum EdgePolicy<'a> {
 
 #[derive(Default)]
 struct EdgeDecisionSeeds {
-    allow_once: Vec<InodeKey>,    // one-open operator grants
-    allow_session: Vec<InodeKey>, // session-cache operator grants
+    allow_once: Vec<InodeKey>,    // WO-24: one-open operator grants
+    allow_session: Vec<InodeKey>, // WO-24: session-cache operator grants
 }
 
 impl GateTemp {
@@ -364,10 +364,10 @@ fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
 // recursive grant-root layer (the macOS analog of Linux move-in tracking).
 #[allow(dead_code)]
 struct AllowGrantRoot {
-    dev: u64,        // root device identity
-    ino: u64,        // root inode identity
-    recursive: bool, // directory grants cover descendants
-    path: PathBuf,   // canonical root path for the ES edge
+    dev: u64,        // WO-41: root device identity
+    ino: u64,        // WO-41: root inode identity
+    recursive: bool, // WO-41: directory grants cover descendants
+    path: PathBuf,   // WO-41: canonical root path for the ES edge
 }
 
 #[allow(dead_code)]

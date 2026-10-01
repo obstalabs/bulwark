@@ -81,7 +81,7 @@ pub const RUNTIME_BASE_SET: &[&str] = &[
     "/etc/group",
 ];
 
-/// macOS runtime base set for default-deny mode.
+/// WO-41: macOS runtime base set for default-deny mode.
 ///
 /// This is intentionally distinct from the Linux set: macOS program startup is
 /// driven by dyld, the dyld shared cache, framework bundles, cryptex paths on
@@ -316,7 +316,7 @@ impl AllowList {
         out
     }
 
-    /// operator grants only, excluding the platform runtime base set.
+    /// WO-41: operator grants only, excluding the platform runtime base set.
     #[cfg(target_os = "macos")]
     #[allow(dead_code)] // retained for diagnostics / a future recursive-witness layer
     pub fn grant_globs(&self) -> &[String] {
@@ -336,7 +336,7 @@ impl AllowList {
         self.grant_inodes.iter().map(|(k, _gen)| *k)
     }
 
-    /// runtime base globs included for this platform.
+    /// WO-41: runtime base globs included for this platform.
     #[cfg(target_os = "macos")]
     pub fn base_globs(&self) -> &'static [&'static str] {
         if self.include_base {

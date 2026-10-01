@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-# dispatch-time hivebus key handoff. ed25519 worker identity + fingerprint.
+# WO-29: hivebus key handoff. ed25519 worker identity + fingerprint.
 # Minimal surface for a security binary: dalek without the heavy `rand` feature
 # (seed comes from getrandom = the OS CSPRNG directly), sha2 for the fingerprint,
 # base64 to match hivebus `answer --signing-key` (StdEncoding). Hex is hand-rolled.

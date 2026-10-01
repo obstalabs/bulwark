@@ -81,11 +81,11 @@ const POLICY_EPOCH: u64 = 1;
 /// to the same file anyway.
 const POLICY_FILE_CANDIDATES: &[&str] = &["Bulwark.toml", "bulwark.toml"];
 
-/// environment variable that points at the signed macOS ES edge binary.
+/// WO-24: environment variable that points at the signed macOS ES edge binary.
 #[cfg(target_os = "macos")]
 const MACOS_ES_GATE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 
-/// the bundled ES gate is built for macOS 11.0 or newer.
+/// WO-24: the bundled ES gate is built for macOS 11.0 or newer.
 #[cfg(target_os = "macos")]
 const MACOS_MIN_MAJOR: u64 = 11;
 #[cfg(target_os = "macos")]
@@ -129,7 +129,7 @@ enum OutputFormat {
 /// Consent channel selection for `bulwark run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ConsentMode {
-    /// Deny protected opens by default, no prompt (MVP behavior).
+    /// Deny protected opens by default, no prompt (WO-3 MVP behavior).
     Static,
     /// Ask the operator off-band over a Unix socket.
     Socket,
@@ -233,7 +233,7 @@ enum Cmd {
         #[arg(long = "hardened")]
         hardened: bool,
 
-        /// drop the supervised agent to this unprivileged uid before it
+        /// WO-49: drop the supervised agent to this unprivileged uid before it
         /// runs. The supervisor (the gate) stays root and keeps the fanotify fd,
         /// so an unprivileged agent cannot `SIGKILL` it and force the kernel's
         /// fail-open-on-death residual. The account must already exist. Refused
@@ -241,7 +241,7 @@ enum Cmd {
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
-        /// primary gid for `--worker-uid` (defaults to the uid). Requires
+        /// WO-49: primary gid for `--worker-uid` (defaults to the uid). Requires
         /// `--worker-uid`.
         #[arg(long = "worker-gid", value_name = "GID")]
         worker_gid: Option<u32>,
@@ -256,7 +256,7 @@ enum Cmd {
         #[arg(long = "allow-root")]
         allow_root: bool,
 
-        /// Path to the integrity state file (circuit-breaker). Defaults to
+        /// Path to the integrity state file (WO-13 circuit-breaker). Defaults to
         /// `/var/lib/bulwark/state.toml`. Hidden — primarily for tests.
         #[arg(long = "state", value_name = "FILE", hide = true)]
         state: Option<PathBuf>,
@@ -335,19 +335,19 @@ enum Cmd {
         #[arg(long = "protect", value_name = "PATH")]
         protect: Vec<String>,
 
-        /// crash-safe hardened mode — apply a kernel-level Landlock read
+        /// WO-25: crash-safe hardened mode — apply a kernel-level Landlock read
         /// floor on the REMOTE agent (allow-list). Survives gate death (no
         /// supervisor). Non-interactive; uses `--allow` grants, not `--protect`.
         /// Requires Landlock (Linux 5.13+) on the remote — checked before launch.
         #[arg(long = "hardened")]
         hardened: bool,
 
-        /// in `--hardened` mode, a path glob the remote agent may read.
+        /// WO-25: in `--hardened` mode, a path glob the remote agent may read.
         /// Repeatable. e.g. `--allow '/var/log/**'`.
         #[arg(long = "allow", value_name = "GLOB")]
         allow: Vec<String>,
 
-        /// in `--hardened` mode, drop the runtime base set (rarely needed —
+        /// WO-25: in `--hardened` mode, drop the runtime base set (rarely needed —
         /// most programs need it to start). Mirrors `bulwark run --no-base-set`.
         #[arg(long = "no-base-set")]
         no_base_set: bool,
@@ -364,26 +364,26 @@ enum Cmd {
         #[arg(long = "deploy", value_name = "MODE", default_value = "auto")]
         deploy: String,
 
-        /// relay this hivebus architect PUBLIC key (base64 ed25519, the
+        /// WO-29: relay this hivebus architect PUBLIC key (base64 ed25519, the
         /// form hivebus `--print-public-key` emits) to the remote, so the worker
         /// there can verify architect-signed messages on first contact.
         #[arg(long = "hivebus-architect-pub", value_name = "FILE")]
         hivebus_architect_pub: Option<PathBuf>,
 
-        /// generate a fresh per-dispatch worker ed25519 seed, place it on
+        /// WO-29: generate a fresh per-dispatch worker ed25519 seed, place it on
         /// the remote (mode 0600), and print the worker's pinnable public-key
         /// fingerprint locally so you can pin it before first contact.
         #[arg(long = "hivebus-worker-seed-generate")]
         hivebus_worker_seed_generate: bool,
 
-        /// drop the remote agent to this unprivileged uid. The remote gate
+        /// WO-49: drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
         /// already exist on the remote host.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
-        /// drop the remote agent to a fresh ANONYMOUS unprivileged uid that
+        /// WO-50: drop the remote agent to a fresh ANONYMOUS unprivileged uid that
         /// bulwark picks on the remote (no account is created — zero setup, nothing
         /// to tear down). Same protection as `--worker-uid` without a pre-existing
         /// account. Mutually exclusive with `--worker-uid`.
@@ -719,14 +719,14 @@ fn build_gate_script(
     worker_uid: Option<u32>,
     agent: &str,
 ) -> String {
-    // emit `--worker-uid <uid> ` on the remote sudo line when requested.
-    // Empty otherwise, so the script is byte-identical to the pre-form when
+    // WO-49: emit `--worker-uid <uid> ` on the remote sudo line when requested.
+    // Empty otherwise, so the script is byte-identical to the pre-WO-49 form when
     // no worker uid is set (the inert regression test depends on this).
     let worker = match worker_uid {
         Some(uid) => format!("--worker-uid {uid} "),
         None => String::new(),
     };
-    // when the agent is dropped to a (possibly anonymous) uid, give it an
+    // WO-50: when the agent is dropped to a (possibly anonymous) uid, give it an
     // env identity so tools that call getpwuid()/expanduser prefer the env over a
     // passwd lookup that may have no entry. `sudo env VAR=...` survives sudo's env
     // reset; the vars survive the setuid drop into the agent. Empty when no worker
@@ -774,7 +774,7 @@ mkfifo -m 600 {pl} {vl}
     )
 }
 
-/// build the remote script for `bulwark ssh --hardened`. Unlike the
+/// WO-25: build the remote script for `bulwark ssh --hardened`. Unlike the
 /// consent script, hardened mode is non-interactive and crash-safe: the remote
 /// `bulwark run --hardened` applies a Landlock floor then *becomes* the agent (no
 /// supervisor, no consent lanes). So there are no FIFOs, no `--consent remote`, no
@@ -896,7 +896,7 @@ fn run_remote_script_status(
     child.wait().context("remote session failed")
 }
 
-/// optional hivebus key material to carry to the remote at dispatch.
+/// WO-29: optional hivebus key material to carry to the remote at dispatch.
 /// Both fields default-off; when neither is set, `bulwark ssh` behaves exactly as
 /// before (no key handoff, byte-identical remote script).
 #[derive(Clone, Copy, Default)]
@@ -916,7 +916,7 @@ impl HivebusDispatch<'_> {
 
 /// Arguments for `bulwark ssh`. A struct (not a long positional list) because the
 /// command grew several modes — deny-list consent, hivebus handoff, worker-uid
-/// drop, and the hardened floor.
+/// drop, and the WO-25 hardened floor.
 struct SshArgs<'a> {
     target: &'a str,
     protect: &'a [String],
@@ -952,7 +952,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         anyhow::bail!("no command given");
     }
 
-    // hardened is allow-list (Landlock floor); the default path is deny-list
+    // WO-25: hardened is allow-list (Landlock floor); the default path is deny-list
     // (fanotify + consent). The modes are opposite — reject mixing them, and route
     // hardened to its own (consent-free, crash-safe) dispatch.
     if hardened {
@@ -989,7 +989,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
-    // `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE and
+    // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE and
     // flows it into the SAME path `--worker-uid` uses. No account is created, so
     // there is nothing to tear down. The explicit `--worker-uid` is unchanged.
     let worker_uid = if auto_worker_uid {
@@ -1013,12 +1013,12 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // carry hivebus key material to the remote BEFORE the gate runs the
+    // WO-29: carry hivebus key material to the remote BEFORE the gate runs the
     // agent, so the worker there has a trustworthy first key introduction. The
     // material is placed by a separate, synchronous ssh session that pipes each
     // value over stdin to `cat >` — the secret seed never appears in argv on
     // either host (no remote `bash -c '<seed>'`, no local ssh arg), satisfying the
-    // contract. Returns the fingerprints for the operator print + receipt.
+    // WO-45 contract. Returns the fingerprints for the operator print + receipt.
     let hivebus_placed = if hivebus.is_inert() {
         None
     } else {
@@ -1030,11 +1030,11 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         )?)
     };
 
-    // surface the worker's pinnable fingerprint to the operator (stderr,
+    // WO-29: surface the worker's pinnable fingerprint to the operator (stderr,
     // off the agent's stdout) so it can be pinned on the hivebus side BEFORE the
     // worker's first contact, and record a dispatch receipt (fingerprints only,
     // never seed bytes).
-    // surface the resolved worker uid (auto-picked or explicit) so the
+    // WO-50: surface the resolved worker uid (auto-picked or explicit) so the
     // operator sees which anonymous uid the agent runs as — the auditable trace.
     if let Some(uid) = worker_uid {
         eprintln!("[bulwark] worker dropped to uid {uid} on {target}");
@@ -1175,7 +1175,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
-/// `bulwark ssh --hardened` — apply a crash-safe Landlock read floor on the
+/// WO-25: `bulwark ssh --hardened` — apply a crash-safe Landlock read floor on the
 /// remote agent. Non-interactive (no consent lanes, no operator relay): the remote
 /// `bulwark run --hardened` installs the floor then becomes the agent, so there is
 /// no supervisor to kill and gate death cannot widen access.
@@ -1255,8 +1255,8 @@ struct HivebusPlaced {
     architect_fingerprint: Option<String>,
 }
 
-/// place hivebus key material on the remote under `{remote_dir}/hivebus/`,
-/// per the ownership contract: `worker.seed` mode 0600 and `architect.pub`
+/// WO-29: place hivebus key material on the remote under `{remote_dir}/hivebus/`,
+/// per the WO-45 ownership contract: `worker.seed` mode 0600 and `architect.pub`
 /// mode 0644, both owned by the gate uid (root in the MVP — the placement runs
 /// under `sudo`, matching the gate that later reads them).
 ///
@@ -1321,7 +1321,7 @@ fn place_hivebus_material(
 
     // worker seed (0600) — the secret. Piped over stdin, never argv. When a worker
     // uid is set, chown the seed to it (same 0600) so the dropped agent reads its
-    // own key; otherwise root-owned as today (forward-compat: one chown).
+    // own key; otherwise root-owned as today (WO-45 forward-compat: one chown).
     if let Some(w) = &worker {
         let chown_seed = match worker_uid {
             Some(uid) => format!(" && sudo chown {uid} {seed_path}"),
@@ -1380,7 +1380,7 @@ fn run_remote_quiet(target: &str, remote_cmd: &str, stdin_data: Option<&str>) ->
 
 /// Run a one-shot remote command over ssh and return its trimmed stdout. Like
 /// `run_remote_quiet` but captures stdout (used to read a value back from the
-/// remote, e.g. the picked uid). Errors on a non-zero remote exit.
+/// remote, e.g. the WO-50 picked uid). Errors on a non-zero remote exit.
 fn run_remote_capture(target: &str, remote_cmd: &str) -> Result<String> {
     let out = std::process::Command::new("ssh")
         .args(["-o", "StrictHostKeyChecking=accept-new"])
@@ -1399,7 +1399,7 @@ fn run_remote_capture(target: &str, remote_cmd: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// shell snippet that picks a free unprivileged uid on the remote. Seeds the
+/// WO-50: shell snippet that picks a free unprivileged uid on the remote. Seeds the
 /// candidate from the dispatch's run id (so two concurrent dispatches start at
 /// different candidates), then probes upward while the uid or gid is taken, and
 /// fails (exit 73) if the 60000..64999 range is exhausted. Uses only `getent`
@@ -1416,7 +1416,7 @@ fn remote_uid_pick_snippet(run_id: u32) -> String {
     )
 }
 
-/// resolve a fresh anonymous worker uid on the remote host. Returns the
+/// WO-50: resolve a fresh anonymous worker uid on the remote host. Returns the
 /// picked numeric uid; creates no account (nothing to tear down).
 fn pick_remote_worker_uid(target: &str, _remote_bin: &str, run_id: u32) -> Result<u32> {
     let out = run_remote_capture(target, &remote_uid_pick_snippet(run_id))
@@ -1604,7 +1604,7 @@ struct RunArgs<'a> {
     allow: &'a [String],
     no_base_set: bool,
     hardened: bool,
-    /// drop the supervised worker to this uid before exec (the supervisor
+    /// WO-49: drop the supervised worker to this uid before exec (the supervisor
     /// stays root). `None` keeps the agent at the supervisor's uid (today's
     /// behavior). The paired gid, if not given explicitly, defaults to the uid.
     worker_uid: Option<u32>,
@@ -1616,16 +1616,16 @@ struct RunArgs<'a> {
     command: &'a [String],
 }
 
-/// owned launch plan derived from [agents.<name>] and then passed into
+/// WO-27: owned launch plan derived from [agents.<name>] and then passed into
 /// the existing run path.
 #[derive(Debug)]
 struct LaunchPlan {
-    protect: Vec<PathBuf>, // protected paths for deny-list launches
-    allow: Vec<String>,    // allow grants for default-deny launches
-    consent: ConsentMode,  // configured static/socket decision channel
-    deny_all: bool,        // route allow-only profiles into allow-list mode
-    audit: bool,           // profile-controlled default receipt logging
-    command: Vec<String>,  // resolved command vector
+    protect: Vec<PathBuf>, // WO-27: protected paths for deny-list launches
+    allow: Vec<String>,    // WO-27: allow grants for default-deny launches
+    consent: ConsentMode,  // WO-27: configured static/socket decision channel
+    deny_all: bool,        // WO-27: route allow-only profiles into allow-list mode
+    audit: bool,           // WO-27: profile-controlled default receipt logging
+    command: Vec<String>,  // WO-27: resolved command vector
 }
 
 fn launch_policy_path(agent: &str, policy_path: Option<&Path>) -> Result<PathBuf> {
@@ -1745,14 +1745,14 @@ fn consent_mode_for_agent_decision(decision: AgentDecision) -> ConsentMode {
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
-                // unsupported platforms keep fail-closed launch behavior.
+                // WO-27: unsupported platforms keep fail-closed launch behavior.
                 ConsentMode::Static
             }
         }
     }
 }
 
-/// validate + resolve the optional `--worker-uid`/`--worker-gid` into the
+/// WO-49: validate + resolve the optional `--worker-uid`/`--worker-gid` into the
 /// credentials the gate drops the supervised child to. Returns `None` when no
 /// worker uid was requested (the agent keeps the supervisor's uid, as before).
 ///
@@ -1919,7 +1919,7 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         return run_hardened(&al.allowed_globs(), args.command);
     }
 
-    // resolve the optional worker credentials once, up front, so every
+    // WO-49: resolve the optional worker credentials once, up front, so every
     // forking gate path drops the child the same way. Validation fails the run
     // before any integrity state is written.
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(unused_mut))]
@@ -1968,7 +1968,7 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         return gate::run(mode, &mark_paths, args.receipts, args.command, worker);
     }
 
-    // non-Linux socket consent is a platform-not-implemented path, not a
+    // WO-30: non-Linux socket consent is a platform-not-implemented path, not a
     // supervised run. Refuse before the integrity state marks an unclean launch.
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if matches!(args.consent, ConsentMode::Socket) {
@@ -2521,7 +2521,7 @@ fn landlock_available() -> bool {
     false
 }
 
-/// macOS preflight checks for the root-launched Endpoint Security edge.
+/// WO-24: macOS preflight checks for the root-launched Endpoint Security edge.
 #[cfg(target_os = "macos")]
 fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
     let version = macos_product_version();
@@ -2726,7 +2726,7 @@ mod tests {
 
     #[test]
     fn gate_script_keeps_lanes_out_of_hivebus_and_cleans_up() {
-        // acceptance: with no hivebus flags, `bulwark ssh` must behave
+        // WO-29 acceptance: with no hivebus flags, `bulwark ssh` must behave
         // exactly as before. The hivebus handoff is a SEPARATE ssh session, so the
         // gate script is independent of it — this pins the exact bytes so any
         // accidental weaving of key material into the gate script is caught.
@@ -2790,7 +2790,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 
     #[test]
     fn gate_script_emits_worker_uid_when_set() {
-        // with --worker-uid, the remote sudo line carries it; absent, the
+        // WO-49: with --worker-uid, the remote sudo line carries it; absent, the
         // script is byte-identical to today (covered by the baseline test above).
         let with = build_gate_script(
             "/tmp/d",
@@ -2808,7 +2808,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             with.contains("--worker-uid 1000 --protect '/etc/shadow'"),
             "worker uid must precede the protect args on the sudo line:\n{with}"
         );
-        // a worker uid also carries an env identity for getpwuid mitigation.
+        // WO-50: a worker uid also carries an env identity for getpwuid mitigation.
         assert!(
             with.contains("sudo env HOME=/tmp/d USER=bulwark-worker LOGNAME=bulwark-worker "),
             "worker uid must carry HOME/USER/LOGNAME env identity:\n{with}"
@@ -2829,7 +2829,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             !without.contains("--worker-uid"),
             "no worker uid => no flag in the script"
         );
-        // No worker uid => no env prefix (byte-identical to the pre-form).
+        // No worker uid => no env prefix (byte-identical to the pre-WO-50 form).
         assert!(
             !without.contains("env HOME="),
             "no worker uid => no env identity prefix"
@@ -2838,7 +2838,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 
     #[test]
     fn remote_uid_pick_snippet_uses_getent_and_bounded_probe() {
-        // the uid picker must seed from the run id, probe with getent only
+        // WO-50: the uid picker must seed from the run id, probe with getent only
         // (no useradd — nothing is created), and bound the range with a clear exit.
         let snip = remote_uid_pick_snippet(12345);
         assert!(
@@ -2852,7 +2852,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 
     #[test]
     fn hardened_gate_script_has_no_consent_machinery() {
-        // the hardened remote script must NOT carry FIFOs, --consent remote,
+        // WO-25: the hardened remote script must NOT carry FIFOs, --consent remote,
         // or prompt/verdict lanes — hardened is non-interactive + crash-safe.
         let script = build_hardened_gate_script(
             "/tmp/bulwark-remote-7",

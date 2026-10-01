@@ -1,4 +1,4 @@
-//! dispatch-time hivebus key material.
+//! WO-29: dispatch-time hivebus key material.
 //!
 //! `bulwark ssh` can carry hivebus key material to a freshly dispatched remote so
 //! the worker there has a trustworthy FIRST key introduction (feeds hivebus

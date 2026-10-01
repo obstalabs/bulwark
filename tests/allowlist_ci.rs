@@ -1,4 +1,4 @@
-//! allow-list (CI/CD default-deny) integration tests. Require Linux +
+//! WO-15 allow-list (CI/CD default-deny) integration tests. Require Linux +
 //! root (fanotify), so `#[ignore]` + run under `sudo` like the other suites.
 //!
 //! The scenario: a triage agent is dispatched with `--deny-all --allow <log>`.

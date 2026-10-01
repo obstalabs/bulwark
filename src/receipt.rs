@@ -85,7 +85,7 @@ impl Receipt<'_> {
     }
 }
 
-/// one record for a dispatch-time hivebus key handoff. A DIFFERENT shape
+/// WO-29: one record for a dispatch-time hivebus key handoff. A DIFFERENT shape
 /// and lifecycle from the per-open `Receipt` above — it records WHAT key material
 /// was placed on a remote at dispatch, by FINGERPRINT only. It MUST NEVER carry
 /// seed bytes (the worker's private key); a test asserts this.
@@ -95,7 +95,7 @@ pub struct DispatchReceipt<'a> {
     pub worker_pub_fingerprint: Option<&'a str>,
     /// sha256-hex fingerprint of the architect public key relayed to the remote.
     pub architect_pub_fingerprint: Option<&'a str>,
-    /// the uid the remote agent was dropped to (auto-picked or explicit).
+    /// WO-50: the uid the remote agent was dropped to (auto-picked or explicit).
     /// Recorded here so the chosen uid is auditable independent of the remote run
     /// dir (which is removed on exit). `None` when the agent was not dropped.
     pub worker_uid: Option<u32>,
@@ -221,7 +221,7 @@ mod tests {
         assert!(line.contains(r#""target":"nullbot@host""#));
         assert!(line.contains("139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070"));
         assert!(line.contains(r#""architect_pub_fingerprint":"abc123""#));
-        // the chosen worker uid is recorded (the auditable trace).
+        // WO-50: the chosen worker uid is recorded (the auditable trace).
         assert!(line.contains(r#""worker_uid":63000"#));
         // The seed must never appear anywhere in the serialized record.
         assert!(

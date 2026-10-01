@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-// deterministic source-contract tests for the macOS ES gate core.
+// WO-23: deterministic source-contract tests for the macOS ES gate core.
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))

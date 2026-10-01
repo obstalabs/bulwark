@@ -1,4 +1,4 @@
-//! remote-gate integration test. Exercises the remote consent mode's
+//! WO-9 remote-gate integration test. Exercises the remote consent mode's
 //! decision/prompt split through the real binary + FIFO lanes (no SSH needed —
 //! SSH is only transport; this tests the enforcement + lane logic that runs on
 //! the remote host). Requires Linux + root for fanotify, so `#[ignore]` + sudo.

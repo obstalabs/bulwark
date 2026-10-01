@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build + sign the production-shaped Bulwark ES gate bundle.
+# WO-23: build + sign the production-shaped Bulwark ES gate bundle.
 #
 # PREREQ (operator, Developer Portal):
 #   1. App ID: dev.obstalabs.bulwark.es-gate with Endpoint Security enabled.

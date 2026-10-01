@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# notarize the signed ES proof binary so AMFI authorizes its restricted
+# WO-26: notarize the signed ES proof binary so AMFI authorizes its restricted
 # Endpoint Security entitlement.
 #
 # WHY: the ES client entitlement is RESTRICTED. A valid Developer-ID signature
@@ -18,7 +18,7 @@
 # notarization registers the signature with Apple so AMFI honors it on run
 # (online assessment). If that proves insufficient for the ES entitlement, the
 # next step is to wrap es_proof in an .app bundle (staple-able + can carry a
-# provisioning profile) — a known fork.
+# provisioning profile) — a known WO-26 fork.
 set -euo pipefail
 cd "$(dirname "$0")"
 

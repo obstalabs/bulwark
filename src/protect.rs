@@ -37,7 +37,7 @@ impl InodeKey {
     }
 }
 
-/// path evidence for a protected inode, used by macOS consent seeding.
+/// WO-24: path evidence for a protected inode, used by macOS consent seeding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedOrigin {
     pub key: InodeKey,
@@ -60,7 +60,7 @@ pub struct ProtectedSet {
     inodes: HashSet<InodeKey>,
     dirs: HashSet<InodeKey>, // inodes of protected directories (for descendant matching)
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    origins: Vec<ProtectedOrigin>, // first resolved path for each inode
+    origins: Vec<ProtectedOrigin>, // WO-24: first resolved path for each inode
 }
 
 impl ProtectedSet {
@@ -166,14 +166,14 @@ impl ProtectedSet {
         self.inodes.is_empty()
     }
 
-    /// expose resolved inode identities to the macOS Endpoint Security
+    /// WO-23: expose resolved inode identities to the macOS Endpoint Security
     /// edge config without weakening the path-resolution invariant.
     #[cfg(target_os = "macos")]
     pub fn keys(&self) -> impl Iterator<Item = InodeKey> + '_ {
         self.inodes.iter().copied()
     }
 
-    /// expose path evidence without changing inode authority.
+    /// WO-24: expose path evidence without changing inode authority.
     #[cfg(target_os = "macos")]
     pub fn origins(&self) -> impl Iterator<Item = &ProtectedOrigin> {
         self.origins.iter()

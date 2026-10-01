@@ -1,4 +1,4 @@
-//! integration: local operator relay + auto-deploy, over `ssh localhost`.
+//! WO-18 integration: local operator relay + auto-deploy, over `ssh localhost`.
 //!
 //! These exercise `bulwark ssh` end-to-end on a single Linux host acting as both
 //! the local launcher and the remote gate (target `nullbot@localhost`). They
@@ -170,7 +170,7 @@ fn deploy_dist_fetches_and_runs() {
     );
 }
 
-/// `--hivebus-worker-seed-generate` places a fresh worker seed on the
+/// WO-29: `--hivebus-worker-seed-generate` places a fresh worker seed on the
 /// remote at the documented path with mode 0600 owned by the gate uid (root), and
 /// prints the worker's pinnable public-key fingerprint locally. Re-dispatch yields
 /// a DIFFERENT seed/fingerprint (freshness is the security property).
@@ -438,7 +438,7 @@ fn deploy_never_without_binary_errors_clearly() {
     );
 }
 
-/// `--auto-worker-uid` drops the remote agent to a fresh ANONYMOUS uid that
+/// WO-50: `--auto-worker-uid` drops the remote agent to a fresh ANONYMOUS uid that
 /// bulwark picks on the remote — no account is created (nothing to tear down, no
 /// orphan). The agent runs as a bare number that has NO `/etc/passwd` entry before
 /// or after the dispatch.

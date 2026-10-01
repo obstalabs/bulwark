@@ -27,7 +27,7 @@ ENT="es_proof.entitlements"
 PROFILE="es_proof.provisionprofile"
 APP="es_proof.app"
 NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
-# copied with the bundle so prove.sh can cite notarization evidence.
+# WO-38: copied with the bundle so prove.sh can cite notarization evidence.
 NOTARY_RECEIPT="notarization.receipt"
 
 [ -f "$BIN" ]     || { echo "!! $BIN missing — run ./build.sh first"; exit 1; }

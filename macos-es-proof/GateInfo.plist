@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Info.plist for the production-shaped ES gate app bundle. -->
+    <!-- WO-23: Info.plist for the production-shaped ES gate app bundle. -->
     <key>CFBundleIdentifier</key>
     <string>dev.obstalabs.bulwark.es-gate</string>
     <key>CFBundleName</key>

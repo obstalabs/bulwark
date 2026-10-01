@@ -106,7 +106,7 @@ pub trait ConsentProvider {
 
 /// The default open-core provider: deny everything, immediately. This is the
 /// graceful-degradation floor when no interactive channel is configured, and
-/// reproduces the MVP behavior exactly.
+/// reproduces the WO-3 MVP behavior exactly.
 pub struct StaticDeny;
 
 impl ConsentProvider for StaticDeny {
@@ -126,7 +126,7 @@ pub struct CachingProvider<P: ConsentProvider> {
     /// policy file by the caller. Path (not inode) is the durable form — inodes
     /// are reused across deletes.
     deny_forever_paths: Vec<String>,
-    /// When set (integrity-tainted run, ), the allow-session cache is
+    /// When set (integrity-tainted run, WO-13), the allow-session cache is
     /// bypassed: every protected open is referred to the operator for a fresh
     /// decision, so no convenience grant survives the taint. Deny-forever still
     /// short-circuits (a standing deny is never weakened by taint).
