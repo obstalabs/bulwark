@@ -39,9 +39,12 @@ binary on the agent's path can regain root. See [docs/macos.md](macos.md#crash-p
 for this residual.
 
 **Do not add a blanket `NOPASSWD` rule for `bulwark`.** Argument wildcards don't save
-you either — the command after `--` is attacker-controlled, and permitting
-`--allow-root` lets that command be a root shell. Omitting `--allow-root` still
-leaves the macOS setuid-root residual above.
+you either: sudoers matches the whole argument string, including spaces, so a broad
+`run * -- *` pattern can admit `--allow-root` before the command separator. The
+command after `--` is attacker-controlled. Such a rule also permits
+`--worker-uid <uid>`, letting the caller run commands as any other non-root uid.
+Omitting `--allow-root` from an example does not constrain what the rule accepts;
+the macOS setuid-root residual above also remains.
 
 ## What to do instead
 
