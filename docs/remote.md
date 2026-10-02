@@ -40,6 +40,17 @@ own stdio:
 
 The operator never types into a shared terminal stream with the agent.
 
+The prompt and verdict lanes are FIFOs created with mode `600`, owned by the
+SSH login user. Interactive remote consent (without `--auto`) is off-band only
+when the agent runs under a uid other than root and other than the SSH login user.
+Both root and the lane owner can open these FIFOs. Without a drop to a different
+unprivileged uid, the agent can answer its own consent by writing to the verdict
+lane.
+
+Use `--auto-worker-uid` for a fresh anonymous uid, or `--worker-uid <uid>` with a
+non-root uid different from the SSH login user. Separating stdio from the control
+lanes does not keep a root or lane-owning agent out of them.
+
 ## Grants are scoped, not bare inodes
 
 An `allow-session` does not authorize "this inode for anyone." Each grant is
@@ -208,6 +219,10 @@ committed yet.
 This is the first slice of the remote tier, proven end-to-end. It is not yet the
 finished production trust channel:
 
+- **Interactive consent requires a separate worker uid.** The agent must be
+  neither root nor the SSH login user that owns the mode-600 FIFOs. See
+  [Control lanes, not terminal chatter](#control-lanes-not-terminal-chatter)
+  for the required worker drop.
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
