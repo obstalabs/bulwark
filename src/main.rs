@@ -129,7 +129,8 @@ enum OutputFormat {
 /// Consent channel selection for `bulwark run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ConsentMode {
-    /// Deny protected opens by default, no prompt (WO-3 MVP behavior).
+    // WO-3: static consent mode (Linux MVP).
+    /// Deny protected opens by default, no prompt (MVP behavior).
     Static,
     /// Ask the operator off-band over a Unix socket.
     Socket,
@@ -233,7 +234,8 @@ enum Cmd {
         #[arg(long = "hardened")]
         hardened: bool,
 
-        /// WO-49: drop the supervised agent to this unprivileged uid before it
+        // WO-49: worker privilege drop.
+        /// drop the supervised agent to this unprivileged uid before it
         /// runs. The supervisor (the gate) stays root and keeps the fanotify fd,
         /// so an unprivileged agent cannot `SIGKILL` it and force the kernel's
         /// fail-open-on-death residual. The account must already exist. Refused
@@ -241,7 +243,8 @@ enum Cmd {
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
-        /// WO-49: primary gid for `--worker-uid` (defaults to the uid). Requires
+        // WO-49: worker privilege drop.
+        /// primary gid for `--worker-uid` (defaults to the uid). Requires
         /// `--worker-uid`.
         #[arg(long = "worker-gid", value_name = "GID")]
         worker_gid: Option<u32>,
@@ -256,7 +259,8 @@ enum Cmd {
         #[arg(long = "allow-root")]
         allow_root: bool,
 
-        /// Path to the integrity state file (WO-13 circuit-breaker). Defaults to
+        // WO-13: integrity circuit-breaker state file.
+        /// Path to the integrity state file (circuit-breaker). Defaults to
         /// `/var/lib/bulwark/state.toml`. Hidden — primarily for tests.
         #[arg(long = "state", value_name = "FILE", hide = true)]
         state: Option<PathBuf>,
@@ -335,19 +339,22 @@ enum Cmd {
         #[arg(long = "protect", value_name = "PATH")]
         protect: Vec<String>,
 
-        /// WO-25: crash-safe hardened mode — apply a kernel-level Landlock read
+        // WO-25: remote hardened Landlock floor.
+        /// crash-safe hardened mode — apply a kernel-level Landlock read
         /// floor on the REMOTE agent (allow-list). Survives gate death (no
         /// supervisor). Non-interactive; uses `--allow` grants, not `--protect`.
         /// Requires Landlock (Linux 5.13+) on the remote — checked before launch.
         #[arg(long = "hardened")]
         hardened: bool,
 
-        /// WO-25: in `--hardened` mode, a path glob the remote agent may read.
+        // WO-25: remote hardened Landlock floor.
+        /// in `--hardened` mode, a path glob the remote agent may read.
         /// Repeatable. e.g. `--allow '/var/log/**'`.
         #[arg(long = "allow", value_name = "GLOB")]
         allow: Vec<String>,
 
-        /// WO-25: in `--hardened` mode, drop the runtime base set (rarely needed —
+        // WO-25: remote hardened Landlock floor.
+        /// in `--hardened` mode, drop the runtime base set (rarely needed —
         /// most programs need it to start). Mirrors `bulwark run --no-base-set`.
         #[arg(long = "no-base-set")]
         no_base_set: bool,
@@ -364,26 +371,30 @@ enum Cmd {
         #[arg(long = "deploy", value_name = "MODE", default_value = "auto")]
         deploy: String,
 
-        /// WO-29: relay this hivebus architect PUBLIC key (base64 ed25519, the
+        // WO-29: dispatch-time hivebus key handoff.
+        /// relay this hivebus architect PUBLIC key (base64 ed25519, the
         /// form hivebus `--print-public-key` emits) to the remote, so the worker
         /// there can verify architect-signed messages on first contact.
         #[arg(long = "hivebus-architect-pub", value_name = "FILE")]
         hivebus_architect_pub: Option<PathBuf>,
 
-        /// WO-29: generate a fresh per-dispatch worker ed25519 seed, place it on
+        // WO-29: dispatch-time hivebus key handoff.
+        /// generate a fresh per-dispatch worker ed25519 seed, place it on
         /// the remote (mode 0600), and print the worker's pinnable public-key
         /// fingerprint locally so you can pin it before first contact.
         #[arg(long = "hivebus-worker-seed-generate")]
         hivebus_worker_seed_generate: bool,
 
-        /// WO-49: drop the remote agent to this unprivileged uid. The remote gate
+        // WO-49: worker privilege drop.
+        /// drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
         /// already exist on the remote host.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
-        /// WO-50: drop the remote agent to a fresh ANONYMOUS unprivileged uid that
+        // WO-50: anonymous auto-picked worker uid.
+        /// drop the remote agent to a fresh ANONYMOUS unprivileged uid that
         /// bulwark picks on the remote (no account is created — zero setup, nothing
         /// to tear down). Same protection as `--worker-uid` without a pre-existing
         /// account. Mutually exclusive with `--worker-uid`.
