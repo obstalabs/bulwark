@@ -10,7 +10,8 @@ system extension is installed; recovery is `sudo pkill bulwark_es_gate`.
   required, how the gate is wired, and the common setup errors (`es_new_client failed:
   4`, etc.). Read this first if anything doesn't work.
 - **[Running under sudo](macos-sudo.md)** — why root is needed and **why not to make it
-  passwordless** (on macOS the agent runs as root, so a `NOPASSWD` rule is a root hole).
+  passwordless**: the agent drops to the invoking user by default, but
+  `--allow-root` and setuid-root re-escalation still leave a root path.
 - **[Behavior matrix](macos-behavior-matrix.md)** — what is/isn't supported on macOS
   vs Linux at a glance.
 

@@ -15,23 +15,36 @@ terminal — see [docs/macos-permissions.md](macos-permissions.md).)
 
 ## Why **not** passwordless sudo (`NOPASSWD`) — the important part
 
-On macOS, the supervised command runs **as root**. Bulwark's privilege-drop (running
-the agent as an unprivileged uid) is currently implemented only on the Linux gate; the
-macOS gate execs the agent at the gate's own privilege. That means:
+On macOS, `sudo bulwark run` drops a would-be-root agent to the invoking user
+(`SUDO_UID`/`SUDO_GID`) by default, without a warning. `--worker-uid <uid>` selects an
+explicit unprivileged uid; `--allow-root` deliberately keeps the agent at uid 0.
+Genuine root with no sudo origin has no invoking user to drop to, so Bulwark prints
+a loud `WARNING` and runs the agent at uid 0.
+
+The default drop makes ordinary launches safer, but a blanket passwordless rule
+still exposes a root shell:
 
 ```sh
-sudo bulwark run --protect /anything -- bash      # this bash is a ROOT shell
+sudo bulwark run --allow-root --protect /anything -- bash  # this bash is a ROOT shell
 ```
 
 So a sudoers rule like `yourname ALL=(ALL) NOPASSWD: /usr/local/bin/bulwark` is
 **equivalent to `NOPASSWD: ALL`** — anyone who can run Bulwark passwordless can get a
-root shell by passing `-- bash` (or `-- /usr/bin/whatever`). For a security tool, that
-is the worst possible footgun: the thing meant to *bound* an agent becomes an
-unrestricted path to root.
+root shell by passing `--allow-root -- bash` (or `--allow-root -- /usr/bin/whatever`).
+For a security tool, that is the worst possible footgun: the thing meant to *bound*
+an agent becomes an unrestricted path to root.
+
+Even without `--allow-root`, the macOS drop is not irreversible: a setuid-root
+binary on the agent's path can regain root. See [docs/macos.md](macos.md#crash-posture-honest-limitation)
+for this residual.
 
 **Do not add a blanket `NOPASSWD` rule for `bulwark`.** Argument wildcards don't save
-you either — the command after `--` is attacker-controlled, so any rule that permits
-`bulwark run ... -- <cmd>` permits `-- bash`.
+you either: sudoers matches the whole argument string, including spaces, so a broad
+`run * -- *` pattern can admit `--allow-root` before the command separator. The
+command after `--` is attacker-controlled. Such a rule also permits
+`--worker-uid <uid>`, letting the caller run commands as any other non-root uid.
+Omitting `--allow-root` from an example does not constrain what the rule accepts;
+the macOS setuid-root residual above also remains.
 
 ## What to do instead
 
@@ -64,14 +77,15 @@ Full Disk Access is granted once to that daemon's binary rather than fighting
 
 ### Want `-- bash` to stop being a root shell?
 
-That's the real structural fix: an unprivileged-drop for the macOS agent (as the Linux
-gate already does with `--worker-uid`). It isn't implemented on macOS yet. Until it is,
-treat `sudo bulwark run` as "this runs the child as root" and scope access accordingly.
+That drop is now the default under sudo: the macOS gate runs the agent as the
+invoking user. An explicit `--worker-uid <uid>` chooses another unprivileged uid;
+`--allow-root` opts out of the default drop. The setuid-root residual above still
+applies, so the macOS drop is not an irreversible privilege boundary.
 
 ## Summary
 
 | You want | Do | Don't |
 |---|---|---|
-| Stop typing the password every command | Raise `timestamp_timeout` | `NOPASSWD: bulwark` (root hole via `-- bash`) |
+| Stop typing the password every command | Raise `timestamp_timeout` | `NOPASSWD: bulwark` (root hole via `--allow-root -- bash`) |
 | Unattended runs | Root launcher / `launchd` daemon, scoped | Passwordless `sudo` |
-| Safer `-- bash` | (pending) macOS unprivileged-drop | Assume the child isn't root — on macOS it is |
+| Safer `-- bash` | Keep the default sudo drop to `SUDO_UID`, or use `--worker-uid` | Treat the macOS drop as irreversible; setuid-root can regain root |

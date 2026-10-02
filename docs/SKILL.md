@@ -1,17 +1,20 @@
 ---
 name: bulwark
-description: "Kernel-boundary file-read gate for AI agent process trees — pause a protected file open at the Linux kernel and decide before any bytes reach the agent"
+description: "Kernel-boundary file-read gate for AI agent process trees — pause a protected file open at the kernel on Linux or macOS and decide before any bytes reach the agent"
 user-invocable: false
-metadata: {"requires":{"bins":["bulwark"]},"platform":["linux"]}
+metadata: {"requires":{"bins":["bulwark"]},"platform":["linux","macos"]}
 ---
 
 # bulwark
 
 A read gate for AI agent process trees. Launch an agent under Bulwark; when any
-process in its tree opens a protected file, the Linux kernel pauses the open and
-Bulwark decides — deny, or ask a human off-band — before a single byte reaches
-the agent. Decisions are by inode, so a rename or symlink to a protected file is
-still gated. Linux only (fanotify / Landlock); requires root.
+process in its tree opens a protected file, the kernel pauses the open and
+Bulwark decides — deny, or on Linux ask a human off-band — before a single byte
+reaches the agent. Decisions are by inode, so a rename or symlink to a protected
+file is still gated. Linux (fanotify / Landlock) and macOS (Endpoint Security);
+requires root. The macOS edge needs the Endpoint Security entitlement, signing,
+notarization, stapling, and Full Disk Access for the launching terminal. macOS
+denies protected opens by default and has no live, mid-run operator allow grants.
 
 **This tool is agent-operable on purpose.** An orchestrator agent dispatching a
 sub-agent onto a sensitive host uses Bulwark to clamp what that sub-agent can
@@ -19,19 +22,23 @@ read — see "What this does NOT do" for the one rule that makes that safe.
 
 ## Install
 
+On Linux:
+
 ```bash
 curl -fsSL https://github.com/obstalabs/bulwark/releases/latest/download/bulwark-<version>-<arch>-unknown-linux-gnu.tar.gz | tar xz
 sudo install -m 0755 bulwark /usr/local/bin/bulwark
 ```
 
 Browse releases at https://github.com/obstalabs/bulwark/releases/latest.
+For macOS, see [macOS Quickstart](macos.md) for ES setup and preflight.
 
 ## Commands
 
 ### bulwark doctor
 
-Preflight: report whether this host can actually enforce — OS, root/CAP_SYS_ADMIN
-for fanotify, kernel version, and Landlock for `--hardened`. Run it first.
+Preflight: report whether this host can actually enforce — OS, root/CAP_SYS_ADMIN,
+kernel version, and Landlock on Linux; root privilege, the ES edge executable,
+and its Endpoint Security entitlement on macOS. Run it first.
 
 **Flags:**
 - `--format json` — output as JSON
@@ -78,9 +85,9 @@ process tree are denied at the kernel (EPERM) before any bytes reach the reader.
 **Flags:**
 - `--protect <PATH>` — protect a path by inode (repeatable)
 - `--profile <NAME>` / `--policy <FILE>` — use a built-in profile or a `Bulwark.toml`
-- `--consent <static|socket|remote>` — deny by default, or ask an operator off-band
+- `--consent <static|socket|remote>` — deny by default; mid-run operator grants on Linux
 - `--deny-all` `--allow <GLOB>` — default-deny allowlist mode (CI/dispatch)
-- `--hardened` — enforce the allowlist as a kernel Landlock floor (crash-safe)
+- `--hardened` — enforce the allowlist as a Linux Landlock floor (crash-safe)
 - `--receipts <FILE>` — append one JSON-line receipt per decision
 
 **Exit codes:**
@@ -89,12 +96,12 @@ process tree are denied at the kernel (EPERM) before any bytes reach the reader.
 
 ### bulwark ssh
 
-Run an agent on a REMOTE host under enforcement, with consent routed to the local
-operator. Enforcement is on the remote kernel; SSH is only transport.
+Run an agent on a remote Linux host under enforcement, with consent routed to the
+local operator. Enforcement is on the remote kernel; SSH is only transport.
 
 **Flags:**
 - `--protect <PATH>` — protect a path on the remote host (repeatable)
-- `--deploy <auto|never|scp|dist>` — how to obtain the remote binary if absent
+- `--deploy <auto|never|memfd|shm|scp|dist>` — how to obtain the remote binary if absent
 - `--auto <VERDICT>` — answer every prompt non-interactively (CI)
 
 **Exit codes:**
@@ -183,7 +190,8 @@ consent socket of a running `bulwark run --consent socket`.
   scrub bytes already read.
 - **Does not monitor a process it did not launch**, or a file descriptor opened
   before the gate was installed.
-- **Does not execute on macOS or Windows.** Linux only (fanotify / Landlock).
+- **Does not execute on Windows.** Linux and macOS are supported, with the macOS
+  constraints above.
 - **Does not own the host's trust.** It reduces what an *agent* can access; the
   same root that runs it can stop it. A deliberate boundary, not a defense against
   a malicious administrator.
@@ -208,8 +216,9 @@ consent socket of a running `bulwark run --consent socket`.
   protected file changing identity, the next run denies protected reads until an
   operator runs `bulwark reset`. Distrust a run that printed `INTEGRITY TAINTED`
   until it is acknowledged.
-- **Not root → cannot enforce.** Without `CAP_SYS_ADMIN`, `run` errors at setup
-  rather than running ungated. Check with `bulwark doctor` first.
+- **Not root → cannot enforce.** On Linux, missing `CAP_SYS_ADMIN` makes `run`
+  error at setup rather than run ungated. macOS requires root and the ES setup
+  above. Check with `bulwark doctor` first.
 
 ## Parsing examples
 
