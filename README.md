@@ -223,7 +223,7 @@ as plainly as the ones it does — see **Known limitations** below and
   the launching terminal (without it the gate cannot start). Why that's needed, how
   the gate is wired, and the common setup errors are in
   [docs/macos-permissions.md](docs/macos-permissions.md); see also
-  [docs/macos.md](macos.md).
+  [docs/macos.md](docs/macos.md).
 - Requires root (`CAP_SYS_ADMIN` for fanotify; Endpoint Security privilege on
   macOS; Landlock for `--hardened`).
 
