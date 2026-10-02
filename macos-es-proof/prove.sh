@@ -71,7 +71,7 @@ echo "   stapler:     $([ "$STAPLER_OK" = 1 ] && echo OK || echo FAILED)"
 echo "   spctl:       $([ "$SPCTL_OK" = 1 ] && echo OK || echo FAILED)"
 echo "   notary:      status=${NOTARY_STATUS:-MISSING} submission_id=${NOTARY_SUBMISSION_ID:-MISSING}"
 if [ "$BUNDLE_VALID" != 1 ]; then
-    echo "!! App bundle is not sealable; refusing to run a WO-26 seal proof."
+    echo "!! App bundle is not sealable; refusing to run a seal proof."
     echo "   stapler output: ${STAPLER_OUTPUT:-not run}"
     echo "   spctl output: ${SPCTL_OUTPUT:-not run}"
     exit 2
