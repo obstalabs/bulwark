@@ -106,11 +106,18 @@ handoff, byte-identical remote script.
 
 ## Drop the remote worker to an unprivileged uid
 
-By default the remote gate runs `sudo bulwark run ... -- <agent>`, so the agent
-inherits **root**. That is convenient but it means a misbehaving agent can
-`SIGKILL` its own supervisor — and fanotify has a kernel-documented residual: when
-the supervisor dies, the kernel releases any held read as *allowed*. A root agent
-can reach that leak.
+By default the remote gate runs `sudo bulwark run ... -- <agent>`. For a non-root
+SSH login, `SUDO_UID` identifies that login user, and the gate drops the agent to
+that uid. The SSH login user owns the mode-600 consent FIFOs, so this default
+agent can still read prompts and write verdicts: interactive consent is not off-band.
+Use `--auto-worker-uid`, or `--worker-uid` with a non-root uid different from the
+SSH login user, to keep the agent out of the consent lanes.
+
+A root SSH login leaves the agent at uid 0 unless an explicit worker uid is
+selected. The underlying `bulwark run --allow-root` option also keeps it at uid 0.
+A root agent can `SIGKILL` its own supervisor — and fanotify has a
+kernel-documented residual: when the supervisor dies, the kernel releases any held
+read as *allowed*. A root agent can reach that leak.
 
 `--worker-uid` closes the agent's path to it:
 
