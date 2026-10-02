@@ -9,7 +9,7 @@
 //! Two pieces of material per dispatch:
 //!   - the architect PUBLIC key (loaded from a local file, relayed as-is), and
 //!   - a fresh worker ed25519 SEED generated here (the worker's own signing
-//!     identity; it is the worker's key, not an operator secret).
+//!     identity; per WO-45 it is the worker's key, not an operator secret).
 //!
 //! ## Cross-repo seam — MUST match hivebus byte-for-byte
 //!

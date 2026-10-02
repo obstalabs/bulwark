@@ -1,4 +1,4 @@
-//! Integrity circuit-breaker integration tests, over the real binary.
+//! Integrity circuit-breaker integration tests (WO-13), over the real binary.
 //!
 //! These run `bulwark run` (which needs root for the fanotify gate) with a
 //! per-test `--state` file, so they are `#[ignore]` and run under `sudo` on

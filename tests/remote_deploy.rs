@@ -252,7 +252,7 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
         first.contains("hivebus worker key fingerprint (pin this):"),
         "operator should see a pinnable worker fingerprint; got:\n{first}"
     );
-    // Contract: worker.seed mode 0600, owned by the gate uid (root).
+    // Contract (WO-45): worker.seed mode 0600, owned by the gate uid (root).
     assert_eq!(
         mode1, "600",
         "worker.seed must be mode 0600; listing:\n{listing1}"
@@ -294,12 +294,12 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
     );
 }
 
-/// The load-bearing CROSS-TOOL guard. The unit test pins bulwark's OWN
+/// WO-46: the load-bearing CROSS-TOOL guard. WO-29's unit test pins bulwark's OWN
 /// derivation against a known key; this proves the seam against the REAL hivebus
 /// binary — that hivebus accepts a bulwark-placed seed AND derives the identical
 /// public-key fingerprint bulwark printed. If hivebus ever changes its seed
 /// encoding or fingerprint derivation, the handoff would break silently in the
-/// field; this test fails instead. (Manual proof recorded in bulwark/notes,
+/// field; this test fails instead. (Manual proof recorded in bulwark/WO-29 notes,
 /// 2026-06-15; this is the automated regression guard.)
 ///
 /// PREREQ: a `hivebus` binary on the remote PATH (built for the remote's arch and

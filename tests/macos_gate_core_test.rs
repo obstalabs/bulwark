@@ -113,7 +113,7 @@ fn ci_compiles_macos_rust_and_documents_swift_link_check() {
 fn allowlist_gate_has_sealed_hardware_harness() {
     let source = repo_file("macos-es-proof/verify-allowlist-gate.sh");
     for needle in [
-        "",
+        "WO-41",
         "RUN ON THE INTEL MAC",
         "bulwark run",
         "--deny-all",

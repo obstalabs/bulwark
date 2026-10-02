@@ -39,7 +39,7 @@ fail() { echo "!! $*"; exit 2; }
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE - run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
 
-# Same bundle-sealability gate as only the signed/notarized/
+# Same bundle-sealability gate as WO-38/WO-23: only the signed/notarized/
 # stapled production bundle is closure proof.
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
@@ -64,7 +64,7 @@ fi
 echo "   allowlist_edge=$EDGE_ALLOWLIST_OK"
 if [ "$EDGE_ALLOWLIST_OK" != 1 ]; then
   {
-    echo "# bulwark macOS ES ALLOW-LIST GATE - verification receipt"
+    echo "# bulwark macOS ES ALLOW-LIST GATE - WO-41 verification receipt"
     echo "date_utc:              $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host:                  $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
     echo "gate_bundle_id:        ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"

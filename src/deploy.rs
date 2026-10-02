@@ -1,4 +1,4 @@
-//! Remote binary auto-deploy for `bulwark ssh`.
+//! Remote binary auto-deploy for `bulwark ssh` (WO-18).
 //!
 //! The remote read gate must run on the remote kernel. This module resolves a
 //! launch plan for that gate, preferring trace-minimal delivery before falling

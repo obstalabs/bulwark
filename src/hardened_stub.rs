@@ -23,6 +23,6 @@ pub fn abi_version() -> Option<i32> {
 pub fn apply_read_floor(_allow_paths: &[String]) -> Result<()> {
     bail!(
         "hardened mode (Landlock read floor) is not available on this platform — \
-         it requires Linux 5.13+. The macOS enforcement floor is tracked in bulwark/."
+         it requires Linux 5.13+. The macOS enforcement floor is tracked in bulwark/WO-26."
     )
 }

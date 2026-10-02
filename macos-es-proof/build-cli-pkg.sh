@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build a signed + notarized + STAPLED .pkg for the bulwark CLI.
+# WO-17: build a signed + notarized + STAPLED .pkg for the bulwark CLI.
 #
 # WHY a .pkg (not a bare binary): a bare Mach-O cannot be stapled, so a bare
 # notarized binary relies on Gatekeeper's ONLINE check (needs internet on first

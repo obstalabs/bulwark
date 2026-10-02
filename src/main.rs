@@ -20,7 +20,7 @@ mod protect;
 mod receipt;
 mod remote;
 
-// split the platform gate behind cfg-gated modules.
+// WO-28/WO-23: split the platform gate behind cfg-gated modules.
 // Linux uses fanotify. macOS uses Endpoint Security. Other platforms keep a
 // fail-closed stub with the same public surface so the portable core builds
 // without ever running a command ungated.
@@ -70,7 +70,7 @@ use socket::SocketProvider;
 /// Canonical policy file name used when creating a new file.
 const POLICY_FILE: &str = "Bulwark.toml";
 
-/// Policy epoch for the integrity record. Bumping it taints existing
+/// Policy epoch for the integrity record (WO-13). Bumping it taints existing
 /// runs as a policy change. The MVP uses a fixed epoch — a future change that
 /// edits live policy will thread the real epoch through here.
 const POLICY_EPOCH: u64 = 1;
@@ -302,6 +302,7 @@ enum Cmd {
         state: Option<PathBuf>,
     },
 
+    // WO-13: integrity circuit-breaker taint reset.
     /// Clear the integrity taint marker after an unclean restart or object
     /// drift, once you have reviewed the audit event. This is the
     /// explicit operator acknowledgement: a tainted gate keeps re-prompting (or
@@ -1299,9 +1300,9 @@ fn place_hivebus_material(
 
     // One `tee` per value, each its own ssh session piping the value on stdin —
     // leak-free (no argv) and the simplest framing. The owner follows the gate:
-    // root by default, or the dropped worker uid so the unprivileged agent
+    // root by default, or the dropped worker uid (WO-49) so the unprivileged agent
     // can read its OWN seed. The seed is the worker's own key — this is hygiene
-    // (keep other remote users out), not secret-isolation.
+    // (keep other remote users out), not secret-isolation (WO-45).
     let mut worker_fingerprint = None;
     let mut architect_fingerprint = None;
 
@@ -2014,7 +2015,7 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         (set, marks)
     };
 
-    // Integrity circuit-breaker: evaluate whether this run is tainted by
+    // Integrity circuit-breaker (WO-13): evaluate whether this run is tainted by
     // an unclean prior restart or object-identity drift, record this run's
     // context, and (if tainted) bypass the allow-session cache so every protected
     // open is freshly decided until an operator runs `bulwark reset`.

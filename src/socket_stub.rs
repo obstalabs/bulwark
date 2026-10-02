@@ -17,7 +17,7 @@ use anyhow::{bail, Result};
 use crate::consent::{ConsentProvider, ConsentRequest, Source, Verdict};
 
 const SOCKET_UNAVAILABLE: &str = "the consent socket is not available on this platform yet \
-             (it is part of the Linux gate; see bulwark/for the macOS gate)";
+             (it is part of the Linux gate; see bulwark/WO-26 for the macOS gate)";
 
 fn unavailable<T>() -> Result<T> {
     bail!(SOCKET_UNAVAILABLE)

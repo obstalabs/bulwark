@@ -131,7 +131,7 @@ echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ]
 # ---------------------------------------------------------------------------
 echo
 {
-  echo "# bulwark macOS ES GATE — verification receipt"
+  echo "# bulwark macOS ES GATE — WO-23 verification receipt"
   echo "date_utc:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:            $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
   echo "gate_bundle_id:  ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"

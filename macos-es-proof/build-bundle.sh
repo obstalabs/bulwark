@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build es_proof as a .app BUNDLE with an embedded provisioning
+# WO-26 Path B: build es_proof as a .app BUNDLE with an embedded provisioning
 # profile, so AMFI authorizes the restricted ES entitlement.
 #
 # WHY: AMFI error -413 "No matching profile found" — the
