@@ -1,4 +1,4 @@
-// macOS Endpoint Security proof-of-gate client.
+// WO-26: macOS Endpoint Security proof-of-gate client.
 //
 // The SMALLEST thing that proves the macOS gate chain end to end on a real Mac:
 // a signed, ES-entitled, root-launched binary that subscribes to
@@ -8,7 +8,7 @@
 //
 // This is the macOS analog of the Linux fanotify VM demo. It proves
 // entitlement -> sign -> notarize -> subscribe -> AUTH verdict gates a syscall.
-// It is NOT bulwark's policy engine (that is ); the marker is a stand-in for
+// It is NOT bulwark's policy engine (that is WO-4); the marker is a stand-in for
 // "this inode is protected" so the gate itself can be proven in isolation.
 //
 // SAFETY / DEADLINE DISCIPLINE: the AUTH handler must answer the kernel fast.
@@ -83,7 +83,7 @@ let res = es_new_client(&client) { (clientPtr, message) in
     //   authorized flags UInt32.max = allow ALL opens
     let rr: es_respond_result_t
     if isMarked {
-        // DENY immediately and do not share mutable proof-log state across
+        // WO-39: DENY immediately and do not share mutable proof-log state across
         // callback/timer queues. The harness seals on the real open() result.
         // `false`: do not cache a deny (re-evaluate each time).
         rr = es_respond_flags_result(clientPtr, message, 0, false)

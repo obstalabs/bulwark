@@ -36,7 +36,7 @@ fn read_stat(pid: i32) -> Option<(String, i32)> {
     Some((comm, ppid))
 }
 
-/// read `(comm, ppid)` from libproc on macOS, where `/proc` is absent.
+/// WO-24: read `(comm, ppid)` from libproc on macOS, where `/proc` is absent.
 #[cfg(target_os = "macos")]
 fn read_stat(pid: i32) -> Option<(String, i32)> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -121,7 +121,7 @@ pub fn is_descendant_of(pid: i32, root: i32, max_depth: usize) -> bool {
     false
 }
 
-// proctree reads /proc (Linux-only), so its tests are Linux-meaningful.
+// WO-35: proctree reads /proc (Linux-only), so its tests are Linux-meaningful.
 // Gate them to Linux so `cargo test` is green on macOS without --skip, while
 // keeping full proctree coverage on Linux (the cfg keeps them ON there).
 #[cfg(all(test, target_os = "linux"))]

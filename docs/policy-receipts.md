@@ -1,4 +1,4 @@
-# — Policy + receipts: evidence
+# WO-5 — Policy + receipts: evidence
 
 **Target:** Debian 13 arm64, kernel 6.12.74. **Date:** 2026-06-03.
 
@@ -8,7 +8,7 @@
 - `cargo clippy --all-targets -- -D warnings` — clean
 - `cargo test` — **25 unit + 5 CLI tests pass**
 - `cargo test --test gate_integration -- --ignored` under sudo — **6/6 pass**
-  (gate regression check after the `gate::run` signature change)
+  (WO-3 gate regression check after the `gate::run` signature change)
 
 ## What shipped
 
@@ -29,7 +29,7 @@
 ```
 $ bulwark check ~/.ssh/id_ed25519 --profile default
   policy:     protected
-  MVP effect: read DENIED (prompt deferred to )
+  MVP effect: read DENIED (prompt deferred to WO-8)
 
 $ bulwark check ~/dev/proj/main.rs --profile dev
   policy:     allow (workspace)
@@ -49,7 +49,7 @@ TS(ms)          PID      DECISION  PATH                  ANCESTRY
 ## MVP semantics (operator-narrowed)
 
 `default.outside_workspace=prompt` and `default.on_timeout=deny` are stored
-canonically, but the Linux MVP has no interactive prompt (deferred to ), so
+canonically, but the Linux MVP has no interactive prompt (deferred to WO-8), so
 a `prompt` outcome resolves to **deny** (fail-safe) at the gate and `check`
 states this explicitly. Concrete protected paths resolve to inodes at launch as
 before; decision-time matching of wildcard protected patterns (`**/*secret*`) in

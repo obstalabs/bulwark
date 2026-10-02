@@ -1,4 +1,4 @@
-// production-shaped macOS Endpoint Security AUTH_OPEN edge.
+// WO-23: production-shaped macOS Endpoint Security AUTH_OPEN edge.
 //
 // The Rust core launches the supervised process stopped, writes an edge config
 // containing root pid + protected dev:ino set, starts this signed ES client, and
@@ -17,9 +17,9 @@ struct InodeKey: Hashable {
 }
 
 struct GrantRoot {
-    let key: InodeKey // inode identity of the operator-granted root
-    let recursive: Bool // directory grants cover descendants
-    let path: String // canonical path used for symlink-safe boundary checks
+    let key: InodeKey // WO-41: inode identity of the operator-granted root
+    let recursive: Bool // WO-41: directory grants cover descendants
+    let path: String // WO-41: canonical path used for symlink-safe boundary checks
 }
 
 enum GateMode: String {
@@ -28,15 +28,15 @@ enum GateMode: String {
 }
 
 struct GateConfig {
-    let mode: GateMode // deny-list vs default-deny allow-list behavior
+    let mode: GateMode // WO-41: deny-list vs default-deny allow-list behavior
     let rootPid: pid_t
     let readyPath: String
     let receiptPath: String?
     let protected: Set<InodeKey>
-    let allowOnce: Set<InodeKey> // one-open startup consent grants
+    let allowOnce: Set<InodeKey> // WO-24: one-open startup consent grants
     let allowed: Set<InodeKey>
-    let allowGlobs: [String] // macOS runtime base-set globs
-    let allowRoots: [GrantRoot] // operator grants pinned to root identity
+    let allowGlobs: [String] // WO-41: macOS runtime base-set globs
+    let allowRoots: [GrantRoot] // WO-41: operator grants pinned to root identity
 }
 
 func parseInode(_ value: Substring) -> InodeKey? {
@@ -310,7 +310,7 @@ func pathIsUnder(_ path: String, root: String) -> Bool {
 }
 
 func grantRootAllows(_ root: GrantRoot, key: InodeKey, canonicalPath: String) -> Bool {
-    // prevent symlink/hardlink escapes by requiring the grant root's
+    // WO-41: prevent symlink/hardlink escapes by requiring the grant root's
     // inode to remain unchanged and the opened object's canonical path to stay
     // under that root.
     guard inodeKey(at: root.path) == root.key else {
@@ -562,12 +562,12 @@ let res = es_new_client(&client) { clientPtr, message in
             cacheKernelAllow = allow && !protectedHit
 
         case .allowlist:
-            // default-deny mode has no prompt path; the pushed policy
+            // WO-41: default-deny mode has no prompt path; the pushed policy
             // must decide immediately for every AUTH_OPEN event in-tree.
             let path = tokenPath(file.pointee.path)
             pathForReceipt = path
             let allowedByPolicy = allowlistAllows(key, path: path, config: config)
-            // FIX: a DIRECTORY carries no file content to protect, and path
+            // WO-41 FIX: a DIRECTORY carries no file content to protect, and path
             // resolution requires opening every directory component (/, /usr,
             // /usr/lib, ...) on the way to an allowed file. Allowing only files
             // under a glob denies the containing directories -> the kernel can't
@@ -599,7 +599,7 @@ let res = es_new_client(&client) { clientPtr, message in
             }
         }
 
-        // AUTH_OPEN requires a FLAGS response. Do not use
+        // WO-23: AUTH_OPEN requires a FLAGS response. Do not use
         // es_respond_auth_result for this event type.
         let rr: es_respond_result_t
         if allow {
@@ -635,7 +635,7 @@ guard res == ES_NEW_CLIENT_RESULT_SUCCESS, let client else {
     exit(66)
 }
 
-// FIX: mute our OWN process before going live. In default-deny allow-list
+// WO-41 FIX: mute our OWN process before going live. In default-deny allow-list
 // mode EVERY open() system-wide is adjudicated, including the edge's own opens
 // (ready marker, receipt log, dyld, etc.). Without self-muting the edge gates
 // itself: its ready-marker write is denied (path not in the allow-set) -> the

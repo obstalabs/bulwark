@@ -1,6 +1,6 @@
 //! Non-Linux stub of the fanotify gate.
 //!
-//! fail-closed platform stub for the cfg-split gate seam.
+//! WO-28: fail-closed platform stub for the cfg-split gate seam.
 //!
 //! Bulwark's enforcement gate is Linux-only (fanotify `FAN_OPEN_PERM`). This
 //! stub mirrors the public surface of `gate.rs` so the portable core (CLI,
@@ -8,7 +8,7 @@
 //! the actual gate is supplied per-OS.
 //!
 //! It is **fail-closed**: `run` does not execute the supervised command. It
-//! refuses with a clear error pointing at the macOS gate work. A stub
+//! refuses with a clear error pointing at the macOS gate work (WO-26). A stub
 //! that silently ran the command unprotected would be the "I thought it was
 //! protected" trap one layer down — so it runs nothing at all.
 
@@ -69,7 +69,7 @@ pub fn run(
 ) -> Result<i32> {
     bail!(
         "the kernel read-gate is not implemented on this platform yet — \
-         bulwark refuses to run an agent ungated (see bulwark/, macOS Endpoint Security gate). \
+         bulwark refuses to run an agent ungated (see bulwark/WO-26, macOS Endpoint Security gate). \
          The Linux fanotify gate is available on Linux."
     )
 }

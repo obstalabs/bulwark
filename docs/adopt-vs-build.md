@@ -1,8 +1,8 @@
-# Adopt-vs-Build Evaluation
+# Adopt-vs-Build Evaluation (WO-2)
 
 **Status:** Decided — 2026-06-02
 **Decision:** BUILD a standalone fanotify supervisor on Linux. REUSE Santa's *architecture* (not code) as the macOS reference. Do NOT wrap Sandlock, Fence, or YoloFS.
-**Gate result:** Linux-core build child PROCEEDS. macOS child PROCEEDS as a Santa-shaped Endpoint Security client. No build child is descoped.
+**Gate result:** Linux-core build child (WO-3) PROCEEDS. macOS child (WO-4) PROCEEDS as a Santa-shaped Endpoint Security client. No build child is descoped.
 
 ---
 
@@ -73,20 +73,20 @@ Both confirm the documented negative by execution: purely static, no per-`open()
 3. **fanotify is the native primitive.** `FAN_OPEN_PERM` *is* the userspace permit/deny hook Sandlock chose not to use. The spike clears all four criteria in ~110 lines. The primitive is a weekend; a fork of someone else's static sandbox is not.
 4. **Trust flows up, not down.** Folding Bulwark into a static-sandbox dependency inherits that tool's path-based fragility into the security layer. Bulwark must own inode-truth structurally.
 
-**Do NOT wrap** — so the "if wrap, define integration seam" branch is N/A for Linux. The one productive reuse is conceptual, on macOS (below).
+**Do NOT wrap** — so the WO-2 "if wrap, define integration seam" branch is N/A for Linux. The one productive reuse is conceptual, on macOS (below).
 
 ## What we keep from the survey
 
-- **Santa = the macOS architectural template.** It already gates file open/read via File Access Authorization on the exact Endpoint Security AUTH primitive will use — de-risking "can you AUTH-gate reads on macOS within the ES deadline" (answer: yes, FAA proves it). Reuse the *shape*: ES AUTH client + userspace decision daemon + persistent rule DB + audit/sync log + system-extension packaging + the Apple entitlement/notarization path. Build the *interactive* decision loop ourselves — Santa's FAA is policy-DB-driven, not a live prompt, and it documents a "deadline reached → deny" hazard that the interactive design must respect.
+- **Santa = the macOS architectural template.** It already gates file open/read via File Access Authorization on the exact Endpoint Security AUTH primitive WO-4 will use — de-risking "can you AUTH-gate reads on macOS within the ES deadline" (answer: yes, FAA proves it). Reuse the *shape*: ES AUTH client + userspace decision daemon + persistent rule DB + audit/sync log + system-extension packaging + the Apple entitlement/notarization path. Build the *interactive* decision loop ourselves — Santa's FAA is policy-DB-driven, not a live prompt, and it documents a "deadline reached → deny" hazard that the interactive design must respect.
 - **Santa's identity gaps are a warning, not a model.** FAA is path-based with documented symlink/hard-link bypasses. Bulwark decides by inode specifically to avoid this class — the spike demonstrates the fix.
 - **YoloFS validates the thesis.** An independent research group built the same "block the thread, ask userspace" loop and motivated it with secret-read scenarios — confirming the primitive is real and needed. Its CoW staging is a *write* defense (orthogonal to our read gate) and out of scope.
 
 ## Build children: proceed / descope
 
-- **(Linux MVP, fanotify) — PROCEED.** Primitive proven hands-on. This is the core.
-- **(macOS, Endpoint Security) — PROCEED**, modeled on Santa's architecture, interactive loop built in-house, inode/identity model owned.
-- **(policy + receipts) — PROCEED** unchanged; the receipt schema must carry `dev+ino`, `pid` chain, decision, operator, reason (the spike already emits all of these).
-- **(NR seam) — PROCEED** unchanged.
+- **WO-3 (Linux MVP, fanotify) — PROCEED.** Primitive proven hands-on. This is the core.
+- **WO-4 (macOS, Endpoint Security) — PROCEED**, modeled on Santa's architecture, interactive loop built in-house, inode/identity model owned.
+- **WO-5 (policy + receipts) — PROCEED** unchanged; the receipt schema must carry `dev+ino`, `pid` chain, decision, operator, reason (the spike already emits all of these).
+- **WO-6 (NR seam) — PROCEED** unchanged.
 - **Descoped:** nothing. No wrap/integration child is created, since the decision is build.
 
 ## References

@@ -1,10 +1,10 @@
-# — Off-band interactive consent: evidence
+# WO-8 — Off-band interactive consent: evidence
 
 **Target:** Debian 13 arm64, kernel 6.12.74. **Date:** 2026-06-03.
 
 ## What shipped
 
-The interactive consent layer deferred from . A protected open by the
+The interactive consent layer deferred from WO-3. A protected open by the
 supervised tree is held at the kernel while the operator is asked over a channel
 the agent has no descriptor on; the agent only ever sees `EPERM` or success.
 
@@ -77,7 +77,7 @@ times out to deny.
 | 5 | Native channel, optional nr-pro/hivebus; degrade to static-deny | `--consent static\|socket`; trait-based providers |
 | 6 | Receipts record decision + source + inode + ancestry, never content | receipts above |
 | 7 | VM: real off-band prompt; deny ⇒ EPERM; agent context shows nothing | this document |
-| 8 | Linux first; macOS parity tracked with | Linux shipped; carries macOS |
+| 8 | Linux first; macOS parity tracked with WO-4 | Linux shipped; WO-4 carries macOS |
 
 ## Deviation from spec (recorded)
 

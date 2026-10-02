@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# verify the production macOS ES allow-list gate on the entitled Intel Mac.
+# WO-41: verify the production macOS ES allow-list gate on the entitled Intel Mac.
 #
 # RUN ON THE INTEL MAC (the expendable box), NOT the M2 daily driver. AUTH mode
 # holds the kernel on the edge's verdict; a wedged edge stalls watched opens.
 # No system extension is installed (root-launched bundle), so recovery is just
 # `sudo pkill bulwark_es_gate`.
 #
-# This exercises the acceptance claims through the REAL `bulwark run`
+# This exercises the WO-41 acceptance claims through the REAL `bulwark run`
 # path (not the es_proof stand-in), and seals a receipt only if all pass:
 #   1. an allowed folder is readable by the supervised tree
 #   2. a sibling folder is denied by default, with no prompt
@@ -39,7 +39,7 @@ fail() { echo "!! $*"; exit 2; }
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE - run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
 
-# Same bundle-sealability gate as only the signed/notarized/
+# Same bundle-sealability gate as WO-38/WO-23: only the signed/notarized/
 # stapled production bundle is closure proof.
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
@@ -52,7 +52,7 @@ echo "   bundle_id=$SIGNED_ID id_ok=$BUNDLE_ID_OK entitlement=$ENT_OK staple=$ST
 
 export BULWARK_MACOS_ES_GATE="$PWD/$GATE_EDGE"
 
-# deny-mode can pass with an old edge, so explicitly reject stale
+# WO-41: deny-mode can pass with an old edge, so explicitly reject stale
 # bundles that cannot parse allow-list config lines.
 if strings "$GATE_EDGE" | grep -q "allowlist" && \
    strings "$GATE_EDGE" | grep -q "allow_glob" && \
@@ -64,7 +64,7 @@ fi
 echo "   allowlist_edge=$EDGE_ALLOWLIST_OK"
 if [ "$EDGE_ALLOWLIST_OK" != 1 ]; then
   {
-    echo "# bulwark macOS ES ALLOW-LIST GATE - verification receipt"
+    echo "# bulwark macOS ES ALLOW-LIST GATE - WO-41 verification receipt"
     echo "date_utc:              $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host:                  $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
     echo "gate_bundle_id:        ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"

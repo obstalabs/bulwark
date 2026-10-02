@@ -1,4 +1,4 @@
-//! Integrity circuit-breaker.
+//! Integrity circuit-breaker (WO-13).
 //!
 //! Bulwark's fanotify gate fails *open* on hard supervisor death: a held
 //! permission event is released by the kernel as allowed when the supervisor is

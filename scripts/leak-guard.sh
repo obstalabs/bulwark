@@ -24,18 +24,32 @@ flag() {
   fi
 }
 
-# 1. Work-order references (internal tracking; belong in the ledger, not the code).
-flag "work-order reference (use the ledger, not a code comment)" \
-  'WO-[0-9]+'
+# WO-104: allow WO tags + shipping product names; block unsold tooling and PII.
+# Guard policy: strip what we do NOT sell, and PII. Everything else may ship.
+#
+# ALLOWED in source (these are shipping products / OSS — they are the funnel, not a
+# leak): WO-NNNN provenance tags (Workledger, hiveram.com); hivebus (hivebus.dev OSS +
+# the boardroom feature of neurorouter-pro); NeuroRouter / nr-pro; vectorcourt / oracul;
+# pastewatch. Do NOT add rules blocking these — doing so removes the funnel on purpose.
+#
+# BLOCKED (rules 1-2 below): tooling we do NOT sell yet, plus internal workflow
+# artifacts that are never a product. These must not enter the public tree.
+flag "unsold internal tooling name (tokencontrol/wocontrol are not products yet)" \
+  'tokencontrol|wocontrol'
+flag "internal workflow artifact (belongs out-of-band, never in public source)" \
+  '(docs/plans/|work-orders\.md|codex exec )'
 
-# 2. A REAL code-signing identity: 'Developer ID ...: First Last (TEAMID)' where the
+# PII / credential guards below remain: real signing identities and Team IDs must
+# never enter the tree.
+
+# 1. A REAL code-signing identity: 'Developer ID ...: First Last (TEAMID)' where the
 #    team id is the genuine 10-char form. The documented placeholder is
 #    '... NAME (TEAMID)' / '... <NAME> (<TEAMID>)', which does NOT match (the team id
 #    must be exactly 10 of [A-Z0-9]). So real identities trip; placeholders do not.
 flag "real Apple signing identity (use an env var / placeholder)" \
   'Developer ID [A-Za-z]+: [A-Za-z]+ [A-Za-z]+ \([A-Z0-9]{10}\)'
 
-# 3. A bare Apple Team ID assigned to a variable/flag: --team-id "XXXXXXXXXX" or
+# 2. A bare Apple Team ID assigned to a variable/flag: --team-id "XXXXXXXXXX" or
 #    team-id=XXXXXXXXXX with the genuine 10-char form (placeholder is <YOUR_TEAM_ID>,
 #    which has non-alnum chars and so does not match the 10-char run). POSIX ERE
 #    (git grep) — no \b; use a non-alnum boundary or end-of-line instead.

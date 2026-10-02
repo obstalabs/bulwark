@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic source checks for sealable app-bundle proof evidence.
+# WO-38: deterministic source checks for sealable app-bundle proof evidence.
 set -euo pipefail
 cd "$(dirname "$0")"
 

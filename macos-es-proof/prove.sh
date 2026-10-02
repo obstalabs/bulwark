@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# prove the macOS ES gate on the Intel test Mac.
+# WO-26: prove the macOS ES gate on the Intel test Mac.
 #
 # RUN THIS ON THE INTEL MAC (the expendable box), NOT the M2 daily driver.
 # AUTH mode holds the kernel on our verdict; if es_proof wedges, every watched
@@ -19,7 +19,7 @@ BUNDLE_ID="dev.obstalabs.bulwark.es-proof"
 NOTARY_RECEIPT="notarization.receipt"
 ES_BIN="$APP_BIN"
 
-# only the notarized+stapled app-bundle path can seal . A bare Mach-O
+# WO-38: only the notarized+stapled app-bundle path can seal WO-26. A bare Mach-O
 # can be a dev diagnostic on an AMFI-disabled machine, but it is not closure proof.
 if [ ! -x "$ES_BIN" ]; then
     echo "!! $ES_BIN missing — run ./build.sh then ./build-bundle.sh, and copy"
@@ -157,9 +157,10 @@ sudo pkill -f "es_proof $MARKER" 2>/dev/null
 [ -n "${ES_REAL_PID:-}" ] && sudo kill "$ES_REAL_PID" 2>/dev/null
 sleep 1
 
-# Emit the receipt (the proof artifact).
+# Emit the receipt (the WO-26 proof artifact).
 {
-  echo "# bulwark macOS ES gate — proof receipt"
+  # WO-26: receipt header names the WO this proof seals.
+  echo "# bulwark macOS ES gate — proof receipt (WO-26)"
   echo "date_utc:       $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:           $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
   echo "client_path:    $ES_BIN"

@@ -44,7 +44,7 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
-      # compile the Rust macOS cfg path on the existing Linux runner.
+      # WO-40: compile the Rust macOS cfg path on the existing Linux runner.
       # `cargo check` does not link an Apple binary, but it catches gate_macos.rs
       # type errors that Linux-only CI used to miss.
       - name: macOS Rust cfg check
@@ -79,7 +79,7 @@ jobs:
       - name: Unit tests
         run: cargo test --verbose
 
-      # the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
+      # WO-36: the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
       # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
       # This works on both a passwordless-sudo runner and a runner that runs as
       # root (no sudo binary), instead of hard-coding `sudo` and failing with
@@ -130,7 +130,7 @@ jobs:
 
   macos-swift-edge:
     name: macOS Swift ES edge compile
-    # enable after registering a self-hosted macOS runner. The current
+    # WO-40: enable after registering a self-hosted macOS runner. The current
     # repo runner inventory has only nullbot-1 (Linux/ARM64), so leaving this
     # gated avoids a permanently queued required check while preserving the exact
     # compile/link path that should become mandatory on the first Mac runner.

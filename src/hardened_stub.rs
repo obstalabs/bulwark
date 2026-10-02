@@ -1,6 +1,6 @@
 //! Non-Linux stub of the Landlock hardened read-floor.
 //!
-//! fail-closed platform stub for the cfg-split hardened seam.
+//! WO-28: fail-closed platform stub for the cfg-split hardened seam.
 //!
 //! `hardened.rs` applies a Landlock LSM ruleset (Linux 5.13+) as a crash-safe
 //! kernel-enforced read floor. This stub mirrors its public surface so the
@@ -23,6 +23,6 @@ pub fn abi_version() -> Option<i32> {
 pub fn apply_read_floor(_allow_paths: &[String]) -> Result<()> {
     bail!(
         "hardened mode (Landlock read floor) is not available on this platform — \
-         it requires Linux 5.13+. The macOS enforcement floor is tracked in bulwark/."
+         it requires Linux 5.13+. The macOS enforcement floor is tracked in bulwark/WO-26."
     )
 }

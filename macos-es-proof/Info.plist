@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Info.plist for the ES proof app bundle. The CFBundleIdentifier
+    <!-- WO-26: Info.plist for the ES proof app bundle. The CFBundleIdentifier
          MUST exactly match the App ID created on the Developer Portal (the one
          with the Endpoint Security capability enabled), or the provisioning
          profile will not match and AMFI error -413 persists. -->

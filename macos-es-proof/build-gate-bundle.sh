@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build + sign the production-shaped Bulwark ES gate bundle.
+# WO-23: build + sign the production-shaped Bulwark ES gate bundle.
 #
 # PREREQ (operator, Developer Portal):
 #   1. App ID: dev.obstalabs.bulwark.es-gate with Endpoint Security enabled.
@@ -49,8 +49,8 @@ codesign --force --sign "$IDENTITY" \
 echo "==> verifying signature + entitlement"
 codesign -dv --entitlements - "$APP" 2>&1 | grep -E "TeamIdentifier|endpoint-security|Runtime" || true
 
-# Notarize + staple (the verification seal runs against the production artifact,
-# not a dev-only signed bundle). A locally
+# Notarize + staple (the WO-38 sealability requirement: WO-23's verification seal
+# runs against the production artifact, not a dev-only signed bundle). A locally
 # signed bundle DOES run under AMFI for dev iteration (embedded profile + no
 # quarantine), but closure proof requires the notarized+stapled artifact.
 NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"

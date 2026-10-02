@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-// deterministic source-contract tests for the macOS ES gate core.
+// WO-23: deterministic source-contract tests for the macOS ES gate core.
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
@@ -113,7 +113,7 @@ fn ci_compiles_macos_rust_and_documents_swift_link_check() {
 fn allowlist_gate_has_sealed_hardware_harness() {
     let source = repo_file("macos-es-proof/verify-allowlist-gate.sh");
     for needle in [
-        "",
+        "WO-41",
         "RUN ON THE INTEL MAC",
         "bulwark run",
         "--deny-all",

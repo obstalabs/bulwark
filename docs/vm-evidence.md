@@ -1,4 +1,4 @@
-# — Linux fanotify MVP: VM closure evidence
+# WO-3 — Linux fanotify MVP: VM closure evidence
 
 **Target:** Debian 13 arm64, kernel `6.12.74+deb13+1-arm64`, Landlock LSM + fanotify `FAN_OPEN_PERM` present.
 **Binary:** `bulwark run` (debug), run as root (fanotify needs `CAP_SYS_ADMIN`).
@@ -63,4 +63,4 @@ The decision is by `(dev, ino)` — the benign name cannot lie.
 
 Deferred to a follow-up WO (explicitly out of this MVP slice): interactive
 operator prompt (allow-once / allow-session / deny), decision persistence, and
-`on_timeout=deny` UX. See parent / notes.
+`on_timeout=deny` UX. See parent WO-1 / WO-3 notes.

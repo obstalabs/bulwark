@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# verify the production macOS ES gate on the entitled Intel Mac.
+# WO-23: verify the production macOS ES gate on the entitled Intel Mac.
 #
 # RUN ON THE INTEL MAC (the expendable box), NOT the M2 daily driver. AUTH mode
 # holds the kernel on the edge's verdict; a wedged edge stalls watched opens.
 # No system extension is installed (root-launched bundle), so recovery is just
 # `sudo pkill bulwark_es_gate`.
 #
-# This exercises the five acceptance claims through the REAL `bulwark run`
+# This exercises the five WO-23 acceptance claims through the REAL `bulwark run`
 # path (not the es_proof stand-in), and seals a receipt only if all pass:
 #   1. protected file DENIED to the supervised tree
 #   2. the SAME protected file ALLOWED to an unsupervised process
@@ -33,7 +33,7 @@ fail() { echo "!! $*"; exit 2; }
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE — run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
 
-# --- the same bundle-sealability gate as only the signed/notarized/
+# --- the same bundle-sealability gate as WO-38: only the signed/notarized/
 #     stapled production bundle is closure proof. ---
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
@@ -131,7 +131,8 @@ echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ]
 # ---------------------------------------------------------------------------
 echo
 {
-  echo "# bulwark macOS ES GATE — verification receipt"
+  # WO-23: receipt header names the WO this run verifies.
+  echo "# bulwark macOS ES GATE — WO-23 verification receipt"
   echo "date_utc:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:            $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
   echo "gate_bundle_id:  ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"

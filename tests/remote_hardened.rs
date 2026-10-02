@@ -1,4 +1,4 @@
-//! integration: `bulwark ssh --hardened` applies a crash-safe Landlock read
+//! WO-25 integration: `bulwark ssh --hardened` applies a crash-safe Landlock read
 //! floor on the remote agent (allow-list), over `ssh nullbot@localhost`.
 //!
 //! `#[ignore]` + VM only: needs passwordless `ssh localhost`, passwordless `sudo`,

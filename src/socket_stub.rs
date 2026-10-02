@@ -1,6 +1,6 @@
 //! Non-Linux stub of the consent socket.
 //!
-//! fail-closed platform stub for the cfg-split consent socket seam.
+//! WO-28: fail-closed platform stub for the cfg-split consent socket seam.
 //!
 //! The real `socket.rs` binds a Unix socket and authenticates the operator via
 //! `SO_PEERCRED` (Linux-specific). This stub mirrors its public surface so the
@@ -17,13 +17,13 @@ use anyhow::{bail, Result};
 use crate::consent::{ConsentProvider, ConsentRequest, Source, Verdict};
 
 const SOCKET_UNAVAILABLE: &str = "the consent socket is not available on this platform yet \
-             (it is part of the Linux gate; see bulwark/for the macOS gate)";
+             (it is part of the Linux gate; see bulwark/WO-26 for the macOS gate)";
 
 fn unavailable<T>() -> Result<T> {
     bail!(SOCKET_UNAVAILABLE)
 }
 
-/// let callers reject socket consent before recording a supervised run.
+/// WO-30: let callers reject socket consent before recording a supervised run.
 pub fn ensure_available() -> Result<()> {
     unavailable()
 }

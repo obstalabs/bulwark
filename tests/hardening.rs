@@ -1,4 +1,4 @@
-//! hardening integration tests: bind-mount coverage and graceful-teardown
+//! WO-12 hardening integration tests: bind-mount coverage and graceful-teardown
 //! fail-closed. Require Linux + root (fanotify) and `mount`, so they are
 //! `#[ignore]` and run under `sudo` like the other integration suites.
 //!
@@ -153,7 +153,7 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     );
 }
 
-/// `--worker-uid` drops the agent to an unprivileged uid while the
+/// WO-49: `--worker-uid` drops the agent to an unprivileged uid while the
 /// supervisor stays root, and the gate STILL enforces on the dropped child.
 /// Uses `nobody` (65534), present on essentially every Linux host.
 #[test]
@@ -192,7 +192,7 @@ fn worker_uid_drops_agent_and_gate_still_denies() {
     );
 }
 
-/// headline: an unprivileged dropped agent CANNOT `SIGKILL` the root
+/// WO-49 headline: an unprivileged dropped agent CANNOT `SIGKILL` the root
 /// supervisor, so it cannot force the fanotify fail-open. The agent reads its own
 /// parent pid, tries `kill -9` on it (must fail with EPERM), then reads the
 /// protected file (must still be denied). Contrast: without `--worker-uid`, a
