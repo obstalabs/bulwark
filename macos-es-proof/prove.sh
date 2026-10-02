@@ -159,6 +159,7 @@ sleep 1
 
 # Emit the receipt (the WO-26 proof artifact).
 {
+  # WO-26: receipt header names the WO this proof seals.
   echo "# bulwark macOS ES gate — proof receipt (WO-26)"
   echo "date_utc:       $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:           $(hostname) / $(sw_vers -productVersion) / $(uname -m)"

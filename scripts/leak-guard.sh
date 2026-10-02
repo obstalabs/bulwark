@@ -24,6 +24,7 @@ flag() {
   fi
 }
 
+# WO-104: allow WO tags + shipping product names; block unsold tooling and PII.
 # Guard policy: strip what we do NOT sell, and PII. Everything else may ship.
 #
 # ALLOWED in source (these are shipping products / OSS — they are the funnel, not a

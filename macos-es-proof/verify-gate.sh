@@ -131,6 +131,7 @@ echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ]
 # ---------------------------------------------------------------------------
 echo
 {
+  # WO-23: receipt header names the WO this run verifies.
   echo "# bulwark macOS ES GATE — WO-23 verification receipt"
   echo "date_utc:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:            $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
