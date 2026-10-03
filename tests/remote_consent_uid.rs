@@ -387,12 +387,10 @@ fn unsafe_worker_refuses_before_key_handoff() {
     f.assert_refused(&out, "SSH login uid");
 }
 
-// WO-110: non-interactive verdicts keep the existing no-worker path and no query.
+// WO-114: --auto no longer keeps the no-worker path; the lane owner could write
+// its own allow verdict, so dispatch refuses before any remote call.
 #[test]
 fn auto_verdict_refuses_missing_worker_before_launch() {
-    // WO-114: supersedes the WO-110 line above, which the scope check pins:
-    // --auto no longer keeps the no-worker path. The lane owner could write its
-    // own allow verdict, so dispatch refuses before any remote call.
     let f = RemoteFixture::new();
     let out = f.run(
         &["--protect", "/fixture-secret", "--auto", "deny"],
