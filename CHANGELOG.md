@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+<!-- WO-110: make the new interactive refusal and its remedy explicit. -->
+- Interactive `bulwark ssh` now refuses to launch without a safe worker identity.
+  Use `--auto-worker-uid`, or `--worker-uid` with a uid other than root and the
+  SSH login user. Failed or invalid remote identity checks also refuse launch.
+  Non-interactive `--auto` and `--hardened` behavior is unchanged.
+
 ## [0.8.0] - 2026-06-29
 
 ### Added
