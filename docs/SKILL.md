@@ -99,14 +99,24 @@ process tree are denied at the kernel (EPERM) before any bytes reach the reader.
 Run an agent on a remote Linux host under enforcement, with consent routed to the
 local operator. Enforcement is on the remote kernel; SSH is only transport.
 
+Interactive consent (no `--auto`) refuses to launch unless the remote agent runs
+under `--auto-worker-uid` or a `--worker-uid` other than root and the SSH login
+user. The consent lanes are owned by the SSH login user, so an agent running as
+that user (the default under `sudo`) or as root could answer its own prompts. The
+login uid is checked on the remote host; a failed or malformed check also refuses.
+
 **Flags:**
 - `--protect <PATH>` — protect a path on the remote host (repeatable)
+- `--auto-worker-uid` — run the remote agent as a fresh anonymous uid (no account created)
+- `--worker-uid <UID>` — run the remote agent as this existing uid; for interactive
+  consent it must be neither root nor the SSH login user
 - `--deploy <auto|never|memfd|shm|scp|dist>` — how to obtain the remote binary if absent
 - `--auto <VERDICT>` — answer every prompt non-interactively (CI)
 
 **Exit codes:**
 - 0: the remote agent exited 0
-- non-zero: the remote exit code, or a transport/deploy error
+- non-zero: the remote exit code, a transport/deploy error, or a refused unsafe
+  worker identity (before anything is deployed or launched)
 
 ### bulwark check
 

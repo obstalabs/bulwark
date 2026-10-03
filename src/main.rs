@@ -325,12 +325,16 @@ enum Cmd {
     /// `bulwark ssh --hardened` so a host that cannot harden fails before launch.
     LandlockCheck,
 
+    // WO-115: state the interactive worker-uid requirement in the help text.
     /// Run an agent on a REMOTE host under Bulwark enforcement, with consent
     /// routed back to the local operator. Enforcement runs on the remote
     /// kernel (SSH is only transport). A protected read is denied immediately
     /// (the remote kernel deadline is met); a prompt appears locally, and your
     /// allow-session reply lets the next read through. Requires the `bulwark`
-    /// binary on the remote host.
+    /// binary on the remote host. Interactive consent (no `--auto`) refuses to
+    /// launch unless the agent runs under `--auto-worker-uid` or a
+    /// `--worker-uid` other than root and the SSH login user, so it cannot
+    /// answer its own prompts.
     Ssh {
         /// Remote target, `user@host`.
         target: String,
@@ -387,10 +391,12 @@ enum Cmd {
         hivebus_worker_seed_generate: bool,
 
         // WO-49: worker privilege drop.
+        // WO-115: interactive consent needs a uid that cannot open the lanes.
         /// drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
-        /// already exist on the remote host.
+        /// already exist on the remote host. For interactive consent it must
+        /// differ from the SSH login user, who owns the consent lanes.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
