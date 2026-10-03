@@ -389,19 +389,23 @@ fn unsafe_worker_refuses_before_key_handoff() {
 
 // WO-110: non-interactive verdicts keep the existing no-worker path and no query.
 #[test]
-fn auto_verdict_keeps_existing_default_worker_behavior() {
+fn auto_verdict_refuses_missing_worker_before_launch() {
+    // WO-114: supersedes the WO-110 line above, which the scope check pins:
+    // --auto no longer keeps the no-worker path. The lane owner could write its
+    // own allow verdict, so dispatch refuses before any remote call.
     let f = RemoteFixture::new();
     let out = f.run(
         &["--protect", "/fixture-secret", "--auto", "deny"],
         &[("FIXTURE_ID_STATUS", "255")],
     );
-    f.assert_launched(&out, "default", false);
-    assert!(!f.root.join("queries").exists());
+    f.assert_refused(&out, "--auto-worker-uid");
+    assert!(!f.root.join("ssh.calls").exists());
 }
 
-// WO-110: --auto with worker selection retains its existing picker-only path.
+// WO-114: --auto with worker selection now checks the picked uid against the SSH
+// login uid like interactive consent; a failed identity query refuses first.
 #[test]
-fn auto_verdict_keeps_auto_worker_behavior() {
+fn auto_verdict_auto_worker_requires_identity_check() {
     let f = RemoteFixture::new();
     let out = f.run(
         &[
@@ -413,8 +417,22 @@ fn auto_verdict_keeps_auto_worker_behavior() {
         ],
         &[("FIXTURE_ID_STATUS", "255")],
     );
+    f.assert_refused(&out, "SSH login uid");
+    assert_eq!(f.contents("queries"), "identity\n");
+
+    let f = RemoteFixture::new();
+    let out = f.run(
+        &[
+            "--protect",
+            "/fixture-secret",
+            "--auto",
+            "deny",
+            "--auto-worker-uid",
+        ],
+        &[],
+    );
     f.assert_launched(&out, PICKED_UID, false);
-    assert_eq!(f.contents("queries"), "picker\n");
+    assert_eq!(f.contents("queries"), "identity\npicker\n");
 }
 
 // WO-110: hardened dispatch stays consent-free and never queries the login uid.
