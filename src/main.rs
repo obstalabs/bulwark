@@ -943,6 +943,52 @@ struct SshArgs<'a> {
     command: &'a [String],
 }
 
+// WO-110: an interactive worker must not be root or own its consent FIFOs.
+fn interactive_remote_worker_uid(
+    target: &str,
+    worker_uid: Option<u32>,
+    auto_worker_uid: bool,
+    run_id: u32,
+) -> Result<u32> {
+    let remedy = "use --auto-worker-uid or --worker-uid with a non-root uid different from the SSH login uid";
+    let explicit_worker = if auto_worker_uid {
+        None
+    } else {
+        match worker_uid {
+            Some(uid) if uid != 0 => Some(uid),
+            _ => anyhow::bail!("refusing interactive remote consent: {remedy}"),
+        }
+    };
+
+    let login = run_remote_capture(target, "id -u").with_context(|| {
+        format!(
+            "refusing interactive remote consent: cannot query SSH login uid on {target}; {remedy}"
+        )
+    })?;
+    let login_uid = if !login.is_empty() && login.bytes().all(|b| b.is_ascii_digit()) {
+        login.parse::<u32>().ok()
+    } else {
+        None
+    }
+    .with_context(|| {
+        format!("refusing interactive remote consent: invalid SSH login uid on {target}; {remedy}")
+    })?;
+
+    let uid = match explicit_worker {
+        Some(uid) => uid,
+        None => pick_remote_worker_uid(target, run_id).with_context(|| {
+            format!("refusing interactive remote consent: cannot resolve worker uid; {remedy}")
+        })?,
+    };
+    if uid == 0 || uid == login_uid {
+        anyhow::bail!(
+            "refusing interactive remote consent: worker uid {uid} can access the lanes \
+             owned by SSH login uid {login_uid}; {remedy}"
+        );
+    }
+    Ok(uid)
+}
+
 fn cmd_ssh(args: SshArgs) -> Result<i32> {
     use std::io::{BufRead, BufReader, Write};
 
@@ -989,6 +1035,17 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
     // the path is somehow occupied.
     let run_id = std::process::id();
+    // WO-110: refuse unsafe interactive identities before any remote deployment.
+    let worker_uid = if auto.is_none() {
+        Some(interactive_remote_worker_uid(
+            target,
+            worker_uid,
+            auto_worker_uid,
+            run_id,
+        )?)
+    } else {
+        worker_uid
+    };
     let run_token = rand_token();
     let deploy_id = format!("{run_id}-{run_token}");
     // Resolve delivery before choosing the lane base; streamed
@@ -1004,12 +1061,9 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE and
     // flows it into the SAME path `--worker-uid` uses. No account is created, so
     // there is nothing to tear down. The explicit `--worker-uid` is unchanged.
-    let worker_uid = if auto_worker_uid {
-        Some(pick_remote_worker_uid(
-            target,
-            remote_bulwark.plain_invocation(),
-            run_id,
-        )?)
+    // WO-110: interactive dispatch already resolved and validated its worker.
+    let worker_uid = if auto_worker_uid && auto.is_some() {
+        Some(pick_remote_worker_uid(target, run_id)?)
     } else {
         worker_uid
     };
@@ -1430,7 +1484,8 @@ fn remote_uid_pick_snippet(run_id: u32) -> String {
 
 /// WO-50: resolve a fresh anonymous worker uid on the remote host. Returns the
 /// picked numeric uid; creates no account (nothing to tear down).
-fn pick_remote_worker_uid(target: &str, _remote_bin: &str, run_id: u32) -> Result<u32> {
+// WO-110: identity selection does not require deploying the gate first.
+fn pick_remote_worker_uid(target: &str, run_id: u32) -> Result<u32> {
     let out = run_remote_capture(target, &remote_uid_pick_snippet(run_id))
         .context("pick a free worker uid on the remote")?;
     out.trim()
