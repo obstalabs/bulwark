@@ -42,11 +42,14 @@ own stdio:
 The operator never types into a shared terminal stream with the agent.
 
 <!-- WO-110: enforce the identity boundary rather than merely recommending it. -->
+<!-- WO-114: the boundary applies to --auto as well; the lane accepts any allow line. -->
 The prompt and verdict lanes are FIFOs created with mode `600`, owned by the
-SSH login user. Interactive remote consent (without `--auto`) now refuses to
+SSH login user. Remote consent dispatch, with or without `--auto`, refuses to
 launch unless an explicitly selected worker uid is neither root nor the SSH login
 user. Both root and the lane owner can open these FIFOs and answer their own
-consent by writing to the verdict lane, so neither is accepted as the worker.
+consent by writing to the verdict lane, so neither is accepted as the worker. The
+gate applies any well-formed `allow-session` line it reads from the verdict lane,
+so under `--auto deny` a lane-owning agent could grant itself the next read.
 
 Use `--auto-worker-uid` for a fresh anonymous uid, or `--worker-uid <uid>` with a
 non-root uid different from the SSH login user. Separating stdio from the control
@@ -54,7 +57,7 @@ lanes does not keep a root or lane-owning agent out of them. The login uid is
 queried on the remote host, and the auto-selected worker is checked against it
 too. A failed, empty, or malformed identity query refuses the dispatch before
 deployment, key handoff, lane creation, or agent launch; it never falls back to
-the login user or root. `--auto` and `--hardened` retain their existing behavior.
+the login user or root. Only `--hardened`, which has no consent lanes, is exempt.
 
 ## Grants are scoped, not bare inodes
 
@@ -112,17 +115,18 @@ handoff, byte-identical remote script.
 
 ## Drop the remote worker to an unprivileged uid
 
-<!-- WO-110: distinguish the underlying sudo default from admitted interactive runs. -->
+<!-- WO-110: distinguish the underlying sudo default from admitted consent runs. -->
+<!-- WO-114: --auto no longer admits the sudo default. -->
 The remote gate runs `sudo bulwark run ... -- <agent>`. Without a worker override,
-as still permitted with `--auto`, `SUDO_UID` identifies a non-root SSH login user
-and the gate drops the agent to that uid. That user owns the mode-600 consent
-FIFOs, so such an agent can still read prompts and write verdicts: it is not
-off-band isolation. Interactive `bulwark ssh` now refuses this default. Select
+`SUDO_UID` identifies a non-root SSH login user and the gate drops the agent to
+that uid. That user owns the mode-600 consent FIFOs, so such an agent could read
+prompts and write its own verdicts: it is not off-band isolation. `bulwark ssh`
+refuses this default for every consent run, `--auto` included. Select
 `--auto-worker-uid`, or `--worker-uid` with a non-root uid different from the
-SSH login user, to launch with interactive consent.
+SSH login user, to launch with consent.
 
 Without an explicit worker uid, a root SSH login leaves the underlying agent at
-uid 0; that identity is refused for interactive SSH consent. The underlying
+uid 0; that identity is refused for SSH consent dispatch. The underlying
 `bulwark run --allow-root` option also keeps it at uid 0.
 A root agent can `SIGKILL` its own supervisor — and fanotify has a
 kernel-documented residual: when the supervisor dies, the kernel releases any held
@@ -237,7 +241,8 @@ This is the first slice of the remote tier, proven end-to-end. It is not yet the
 finished production trust channel:
 
 <!-- WO-110: state the shipped refusal without claiming a privileged FIFO proof. -->
-- **Interactive consent refuses unsafe worker identities.** Choose
+<!-- WO-114: the refusal covers --auto. -->
+- **Consent dispatch refuses unsafe worker identities, `--auto` included.** Choose
   `--auto-worker-uid` or a `--worker-uid` other than root and the SSH login user
   that owns the mode-600 FIFOs; missing or unverified identities refuse launch. See
   [Control lanes, not terminal chatter](#control-lanes-not-terminal-chatter)
