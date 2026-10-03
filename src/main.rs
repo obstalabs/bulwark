@@ -325,14 +325,15 @@ enum Cmd {
     /// `bulwark ssh --hardened` so a host that cannot harden fails before launch.
     LandlockCheck,
 
-    // WO-115: state the interactive worker-uid requirement in the help text.
+    // WO-115: state the worker-uid requirement in the help text.
+    // WO-114: the requirement covers --auto; the sentence no longer exempts it.
     /// Run an agent on a REMOTE host under Bulwark enforcement, with consent
     /// routed back to the local operator. Enforcement runs on the remote
     /// kernel (SSH is only transport). A protected read is denied immediately
     /// (the remote kernel deadline is met); a prompt appears locally, and your
     /// allow-session reply lets the next read through. Requires the `bulwark`
-    /// binary on the remote host. Interactive consent (no `--auto`) refuses to
-    /// launch unless the agent runs under `--auto-worker-uid` or a
+    /// binary on the remote host. Consent dispatch, with or without `--auto`,
+    /// refuses to launch unless the agent runs under `--auto-worker-uid` or a
     /// `--worker-uid` other than root and the SSH login user, so it cannot
     /// answer its own prompts.
     Ssh {
@@ -391,12 +392,13 @@ enum Cmd {
         hivebus_worker_seed_generate: bool,
 
         // WO-49: worker privilege drop.
-        // WO-115: interactive consent needs a uid that cannot open the lanes.
+        // WO-115: consent needs a uid that cannot open the lanes.
+        // WO-114: --auto runs are held to the same rule.
         /// drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
-        /// already exist on the remote host. For interactive consent it must
-        /// differ from the SSH login user, who owns the consent lanes.
+        /// already exist on the remote host. For consent, `--auto` included, it
+        /// must differ from the SSH login user, who owns the consent lanes.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
@@ -949,8 +951,10 @@ struct SshArgs<'a> {
     command: &'a [String],
 }
 
-// WO-110: an interactive worker must not be root or own its consent FIFOs.
-fn interactive_remote_worker_uid(
+// WO-110: a consent worker must not be root or own its consent FIFOs.
+// WO-114: this covers --auto too; the verdict lane accepts any well-formed allow
+// line, so a lane-owning agent could answer its own `--auto deny`.
+fn remote_consent_worker_uid(
     target: &str,
     worker_uid: Option<u32>,
     auto_worker_uid: bool,
@@ -962,14 +966,12 @@ fn interactive_remote_worker_uid(
     } else {
         match worker_uid {
             Some(uid) if uid != 0 => Some(uid),
-            _ => anyhow::bail!("refusing interactive remote consent: {remedy}"),
+            _ => anyhow::bail!("refusing remote consent: {remedy}"),
         }
     };
 
     let login = run_remote_capture(target, "id -u").with_context(|| {
-        format!(
-            "refusing interactive remote consent: cannot query SSH login uid on {target}; {remedy}"
-        )
+        format!("refusing remote consent: cannot query SSH login uid on {target}; {remedy}")
     })?;
     let login_uid = if !login.is_empty() && login.bytes().all(|b| b.is_ascii_digit()) {
         login.parse::<u32>().ok()
@@ -977,18 +979,18 @@ fn interactive_remote_worker_uid(
         None
     }
     .with_context(|| {
-        format!("refusing interactive remote consent: invalid SSH login uid on {target}; {remedy}")
+        format!("refusing remote consent: invalid SSH login uid on {target}; {remedy}")
     })?;
 
     let uid = match explicit_worker {
         Some(uid) => uid,
         None => pick_remote_worker_uid(target, run_id).with_context(|| {
-            format!("refusing interactive remote consent: cannot resolve worker uid; {remedy}")
+            format!("refusing remote consent: cannot resolve worker uid; {remedy}")
         })?,
     };
     if uid == 0 || uid == login_uid {
         anyhow::bail!(
-            "refusing interactive remote consent: worker uid {uid} can access the lanes \
+            "refusing remote consent: worker uid {uid} can access the lanes \
              owned by SSH login uid {login_uid}; {remedy}"
         );
     }
@@ -1041,17 +1043,18 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
     // the path is somehow occupied.
     let run_id = std::process::id();
-    // WO-110: refuse unsafe interactive identities before any remote deployment.
-    let worker_uid = if auto.is_none() {
-        Some(interactive_remote_worker_uid(
-            target,
-            worker_uid,
-            auto_worker_uid,
-            run_id,
-        )?)
-    } else {
-        worker_uid
-    };
+    // WO-110: refuse unsafe worker identities before any remote deployment.
+    // WO-114: --auto is no longer exempt; every consent dispatch runs the agent
+    // as a uid that cannot open the lanes, so `--auto deny` is a real boundary.
+    // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE
+    // inside this check and flows it into the SAME path `--worker-uid` uses. No
+    // account is created, so there is nothing to tear down.
+    let worker_uid = Some(remote_consent_worker_uid(
+        target,
+        worker_uid,
+        auto_worker_uid,
+        run_id,
+    )?);
     let run_token = rand_token();
     let deploy_id = format!("{run_id}-{run_token}");
     // Resolve delivery before choosing the lane base; streamed
@@ -1064,16 +1067,8 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
-    // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE and
-    // flows it into the SAME path `--worker-uid` uses. No account is created, so
-    // there is nothing to tear down. The explicit `--worker-uid` is unchanged.
-    // WO-110: interactive dispatch already resolved and validated its worker.
-    let worker_uid = if auto_worker_uid && auto.is_some() {
-        Some(pick_remote_worker_uid(target, run_id)?)
-    } else {
-        worker_uid
-    };
-
+    // WO-114: no second worker resolution here; the uid was settled above for
+    // every consent dispatch, before the remote deployment resolved.
     let protect_args = protect
         .iter()
         .map(|p| format!("--protect {}", shell_quote(p)))

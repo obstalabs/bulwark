@@ -60,6 +60,7 @@ fn auto_allow_session_lets_second_read_through() {
             "never",
             "--auto",
             "allow-session",
+            "--auto-worker-uid",
             "--protect",
         ])
         .arg(&secret)
@@ -160,6 +161,7 @@ fn deploy_dist_fetches_and_runs() {
             "dist",
             "--auto",
             "deny",
+            "--auto-worker-uid",
             "--protect",
         ])
         .arg(&secret)
@@ -206,6 +208,7 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
                 "never",
                 "--auto",
                 "deny",
+                "--auto-worker-uid",
                 "--hivebus-worker-seed-generate",
                 "--protect",
                 "/tmp/bulwark-nonexistent-protect",
@@ -347,6 +350,7 @@ fn hivebus_accepts_bulwark_seed_and_derives_same_fingerprint() {
             "never",
             "--auto",
             "deny",
+            "--auto-worker-uid",
             "--hivebus-worker-seed-generate",
             "--protect",
             "/tmp/bulwark-nonexistent-protect",
@@ -437,7 +441,7 @@ fn deploy_never_without_binary_errors_clearly() {
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)
-        .args(["--auto", "deny"]) // WO-110: isolate deployment diagnostics.
+        .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110: isolate deployment diagnostics.
         .args(["--", "true"])
         .output()
         .expect("spawn");
