@@ -80,8 +80,11 @@ fn scenario(tag: &str, verdict: &str) -> (String, String) {
     let _ = gate_child.wait();
     op.join().unwrap();
 
-    let read = fs::read_to_string(&agent_read).unwrap_or_default();
-    let recs = fs::read_to_string(&receipts).unwrap_or_default();
+    // WO-103: a run that never produced its evidence must fail, not pass the
+    // negative assertions vacuously on an empty string.
+    let read = fs::read_to_string(&agent_read)
+        .expect("agent_read.txt missing: the supervised command never ran");
+    let recs = fs::read_to_string(&receipts).expect("r.jsonl missing: the gate wrote no receipts");
     (read, recs)
 }
 
@@ -150,10 +153,18 @@ fn agent_cannot_answer_its_own_consent() {
         .args(["bash", "-c", &inner])
         .status()
         .expect("spawn gate");
-    assert!(status.success() || !status.success()); // gate exit code is the child's
+    // WO-103: the gate exits with the child's status and the supervised script
+    // ends in `echo done`, so anything but 0 means the gate itself failed to run
+    // (no root/fanotify, refused arguments, child killed), not a denied read.
+    assert!(
+        status.success(),
+        "gate did not run the agent to completion: {status}"
+    );
 
-    let read = fs::read_to_string(&agent_read).unwrap_or_default();
-    let recs = fs::read_to_string(&receipts).unwrap_or_default();
+    // WO-103: missing evidence must fail the test, not satisfy the negative check.
+    let read = fs::read_to_string(&agent_read)
+        .expect("agent_read.txt missing: the supervised command never ran");
+    let recs = fs::read_to_string(&receipts).expect("r.jsonl missing: the gate wrote no receipts");
     assert!(
         !read.contains("SECRETVALUE"),
         "agent self-approval must NOT yield the secret; got: {read:?}"
@@ -234,9 +245,16 @@ int main(int c,char**v){int s=socket(AF_UNIX,SOCK_STREAM,0);
         .args(["bash", "-c", &inner])
         .status()
         .expect("spawn gate");
-    assert!(status.success() || !status.success());
+    // WO-103: same contract as above: the script ends in `echo done`, so a
+    // non-zero status is a gate failure, which must not count as a denied read.
+    assert!(
+        status.success(),
+        "gate did not run the agent to completion: {status}"
+    );
 
-    let read = fs::read_to_string(&agent_read).unwrap_or_default();
+    // WO-103: missing evidence must fail the test, not satisfy the negative check.
+    let read = fs::read_to_string(&agent_read)
+        .expect("agent_read.txt missing: the supervised command never ran");
     assert!(
         !read.contains("SECRETVALUE"),
         "a dead supervised peer must NOT be able to answer its own consent; got: {read:?}"

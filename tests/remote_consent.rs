@@ -105,11 +105,19 @@ fn remote_split_denies_then_caches_allow_session() {
         .args(["bash", "-c", &inner])
         .status()
         .expect("spawn remote gate");
-    assert!(status.success() || !status.success());
+    // WO-103: the gate exits with the child's status and the script ends in an
+    // `echo ... > file` redirect, so a non-zero status means the remote gate did
+    // not run the agent (no root/fanotify, lane open failure, child killed).
+    assert!(
+        status.success(),
+        "remote gate did not run the agent: {status}"
+    );
     let _ = relay.join();
     thread::sleep(Duration::from_millis(200));
 
-    let second = fs::read_to_string(&agent_out).unwrap_or_default();
+    // WO-103: a missing agent.out must fail here, not as an opaque content miss.
+    let second = fs::read_to_string(&agent_out)
+        .expect("agent.out missing: the supervised command never wrote its second read");
     assert!(
         second.contains("SECRETVALUE"),
         "the second read must pass from cache after allow-session; got: {second:?}"
