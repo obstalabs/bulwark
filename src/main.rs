@@ -378,17 +378,25 @@ enum Cmd {
         deploy: String,
 
         // WO-29: dispatch-time hivebus key handoff.
+        // WO-120: hardened dispatch never places key material; reject the pair at
+        // parse time instead of silently skipping the handoff.
         /// relay this hivebus architect PUBLIC key (base64 ed25519, the
         /// form hivebus `--print-public-key` emits) to the remote, so the worker
         /// there can verify architect-signed messages on first contact.
-        #[arg(long = "hivebus-architect-pub", value_name = "FILE")]
+        #[arg(
+            long = "hivebus-architect-pub",
+            value_name = "FILE",
+            conflicts_with = "hardened"
+        )]
         hivebus_architect_pub: Option<PathBuf>,
 
         // WO-29: dispatch-time hivebus key handoff.
+        // WO-120: same conflict; an operator must not expect a fingerprint that
+        // the hardened path cannot produce.
         /// generate a fresh per-dispatch worker ed25519 seed, place it on
         /// the remote (mode 0600), and print the worker's pinnable public-key
         /// fingerprint locally so you can pin it before first contact.
-        #[arg(long = "hivebus-worker-seed-generate")]
+        #[arg(long = "hivebus-worker-seed-generate", conflicts_with = "hardened")]
         hivebus_worker_seed_generate: bool,
 
         // WO-49: worker privilege drop.

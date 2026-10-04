@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+<!-- WO-120: the silent-ignore is the bug; name the refusal. -->
+- `bulwark ssh --hardened` now refuses `--hivebus-architect-pub` and
+  `--hivebus-worker-seed-generate` at argument parsing. Hardened dispatch never
+  placed the key material, so the flags were accepted and silently ignored,
+  leaving an operator expecting a worker fingerprint or a relayed architect key
+  that did not exist.
+
 ## [0.9.0] - 2026-10-04
 
 ### Security
