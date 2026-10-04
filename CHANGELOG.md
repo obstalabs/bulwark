@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-04
+
 ### Security
 <!-- WO-114: name the shipped bypass and the fix plainly. -->
 - In 0.8.0 and earlier, an agent run with `bulwark ssh --auto deny` and no worker
@@ -15,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that lane. `--auto` runs now require `--auto-worker-uid` or a `--worker-uid`
   other than root and the SSH login user, checked on the remote host before
   anything is deployed or launched.
+- `anyhow` bumped to 1.0.103 (RUSTSEC-2026-0190). bulwark never calls the
+  affected downcast APIs, so it was not exploitable through bulwark; the bump
+  clears the advisory for anyone scanning the binary.
 
 ### Changed
 <!-- WO-110: make the new interactive refusal and its remedy explicit. -->
@@ -23,6 +28,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identity, with or without `--auto`. Use `--auto-worker-uid`, or `--worker-uid`
   with a uid other than root and the SSH login user. Failed or invalid remote
   identity checks also refuse launch. `--hardened` behavior is unchanged.
+- CI now builds the static musl Linux gate and asserts its linkage on every pull
+  request, not only at release time.
+
+### Fixed
+- Refusal messages in the macOS and non-Linux stub builds no longer print a
+  truncated `bulwark/.` reference where the explanation belongs.
+
+### Documentation
+- Corrected the macOS privilege-drop guidance (`sudo` + `PATH` form), the remote
+  consent description, and the platform and `--deploy` lists in the skill
+  contract (`docs/SKILL.md`).
+- The worker-uid requirement for remote consent is documented in the skill
+  contract, `docs/remote.md` and `bulwark ssh --help`.
+- The README leads with the enforcement mechanism; remote gate setup is
+  described by outcome.
 
 ## [0.8.0] - 2026-06-29
 
