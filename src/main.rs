@@ -2920,6 +2920,27 @@ fn cmd_mutate(glob: &str, policy_path: Option<&Path>, which: Mutate) -> Result<(
     Ok(())
 }
 
+// WO-132@v1: test scratch directories were named by pid alone, so a leftover
+// directory of the same name owned by another user (a root CI step, say)
+// survived the ignored cleanup and the next test's write failed with EACCES.
+// Name each one by pid, nanos and a per-process counter, and refuse to adopt an
+// existing directory, so setup fails loudly instead of the test body.
+#[cfg(test)]
+pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bulwark-{tag}-{pid}-{nanos}-{n}"));
+    std::fs::create_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot create fresh test dir {}: {e}", dir.display()));
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2928,9 +2949,8 @@ mod tests {
     // come from the same bytes, and the identity from the same handle.
     #[test]
     fn policy_snapshot_digests_the_parsed_bytes() {
-        let dir = std::env::temp_dir().join(format!("bulwark-snap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = test_scratch_dir("snap");
         let file = dir.join("Bulwark.toml");
         let mut policy = Policy::default_profile();
         assert!(policy.add_protected("/wo117/guarded"));
@@ -2959,9 +2979,8 @@ mod tests {
     // WO-117 (R1): the snapshot keeps Policy::load's error texts.
     #[test]
     fn policy_snapshot_errors_match_policy_load() {
-        let dir = std::env::temp_dir().join(format!("bulwark-snaperr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = test_scratch_dir("snaperr");
         let missing = dir.join("missing.toml");
         let err = snapshot_policy(&integrity::PolicySource::Explicit(missing.clone()))
             .err()

@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+<!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
+- Unit tests no longer name their scratch directories by process id alone, so a
+  leftover directory from another user or a root step cannot make them fail.
+
 ## [0.9.1] - 2026-10-05
 
 ### Security

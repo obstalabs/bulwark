@@ -178,8 +178,8 @@ mod tests {
 
     #[test]
     fn render_counts_allow_and_deny(/* via temp file */) {
-        let dir = std::env::temp_dir().join(format!("bulwark-audit-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = crate::test_scratch_dir("audit");
         let f = dir.join("r.jsonl");
         let body = concat!(
             r#"{"ts_ms":1,"pid":1,"decision":"allow","path":"/a","ancestry":"x(1)"}"#,

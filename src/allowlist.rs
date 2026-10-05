@@ -500,16 +500,10 @@ mod tests {
 #[cfg(test)]
 mod inode_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
+    // WO-132@v1: collision-free scratch dir (pid + nanos + counter, never reused).
     fn scratch(tag: &str) -> std::path::PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d =
-            std::env::temp_dir().join(format!("bulwark-allow-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch_dir(&format!("allow-{tag}"))
     }
 
     fn key_of(p: &Path) -> InodeKey {
