@@ -196,8 +196,10 @@ fn hardened_denies_intermediate_symlink_grant() {
 // operator grant used to be skipped with only a stderr line: the floor applied,
 // the agent started, and could not read /dev/null or /etc/passwd. The floor must
 // grant READ_FILE to files and READ_FILE|READ_DIR to directories. Landlock needs
-// no root, so this test is not ignored; where the kernel has no Landlock it
-// says so and returns (cargo has no runtime skip).
+// no root, so this test is not ignored. Where the kernel has no Landlock (a
+// developer Mac, an old kernel) it prints why and returns, because cargo has no
+// runtime skip; on the Linux CI runner Landlock is expected, so a failed probe
+// there is a broken test and FAILS instead of passing while testing nothing.
 #[test]
 fn hardened_floor_grants_files_and_directories_alike() {
     let probe = Command::new(bin())
@@ -205,8 +207,20 @@ fn hardened_floor_grants_files_and_directories_alike() {
         .output()
         .expect("spawn landlock-check");
     if !probe.status.success() {
+        let probe_stderr = String::from_utf8_lossy(&probe.stderr);
+        if cfg!(target_os = "linux") && std::env::var_os("CI").is_some() {
+            panic!(
+                "Landlock expected on the Linux CI runner, but `bulwark landlock-check` failed \
+                 (status {}); this test would otherwise pass without testing anything. stderr: {}",
+                probe.status,
+                probe_stderr.trim()
+            );
+        }
         eprintln!(
-            "SKIP hardened_floor_grants_files_and_directories_alike: no Landlock on this kernel"
+            "SKIP hardened_floor_grants_files_and_directories_alike: no Landlock on this kernel \
+             (landlock-check status {}; {})",
+            probe.status,
+            probe_stderr.trim()
         );
         return;
     }
