@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-05
+
 ### Security
 <!-- WO-127: the macOS 27 fail-open, in user language, no internal references. -->
 - The macOS gate failed open on macOS 27 with 0.9.0. The Endpoint Security edge
