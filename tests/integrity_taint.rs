@@ -7,6 +7,7 @@
 //! and object-identity drift both taint; and `bulwark reset` clears it.
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -141,9 +142,16 @@ fn object_identity_drift_taints() {
         "first run clean; stderr:\n{first}"
     );
 
-    // Swap the file for a brand-new inode at the same path.
-    fs::remove_file(&secret).unwrap();
-    fs::write(&secret, "SECRET=2\n").unwrap();
+    // Swap the file for a brand-new inode at the same path. The replacement is
+    // created BEFORE the original is gone and renamed over it, so its inode is
+    // guaranteed to differ: delete-then-create lets ext4 hand back the freed
+    // inode number, which (dev, ino) cannot tell apart.
+    let old_ino = fs::metadata(&secret).unwrap().ino();
+    let replacement = dir.join("secret.env.new");
+    fs::write(&replacement, "SECRET=2\n").unwrap();
+    fs::rename(&replacement, &secret).unwrap();
+    let new_ino = fs::metadata(&secret).unwrap().ino();
+    assert_ne!(old_ino, new_ino, "the swap must produce a different inode");
 
     // Run 2: the path now resolves to a different inode -> drift.
     let drifted = run_gate(&secret, &state, &["true"]);
@@ -212,19 +220,14 @@ fn in_tree_policy_rewrite_taints_next_run() {
     let policy = dir.join("Bulwark.toml");
     fs::write(&secret, "SECRET=1\n").unwrap();
 
-    let seeded = Command::new(bin())
-        .arg("deny")
-        .arg(&secret)
-        .arg("--policy")
-        .arg(&policy)
-        .output()
-        .expect("spawn deny");
-    assert!(
-        seeded.status.success(),
-        "seeding the policy failed ({}); stderr:\n{}",
-        seeded.status,
-        String::from_utf8_lossy(&seeded.stderr)
-    );
+    // WO-117: seed a policy that protects only this test's secret. Seeding it
+    // with `bulwark deny` would copy in the whole default profile, whose home
+    // paths (~/.ssh, ...) need not be markable on the host running the test.
+    fs::write(
+        &policy,
+        format!("[protected]\nprompt = [\"{}\"]\n", secret.display()),
+    )
+    .unwrap();
 
     // WO-117: run the gate under the policy file and require a successful exit;
     // the gate exits with the child's status and every child here succeeds.
