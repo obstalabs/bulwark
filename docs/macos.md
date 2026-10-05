@@ -15,6 +15,39 @@ system extension is installed; recovery is `sudo pkill bulwark_es_gate`.
 - **[Behavior matrix](macos-behavior-matrix.md)** — what is/isn't supported on macOS
   vs Linux at a glance.
 
+## macOS 27 status
+
+<!-- WO-127: state the 0.9.0 fail-open and the 0.9.1 fix plainly. -->
+**0.9.0 is affected on macOS 27; fixed in 0.9.1.** On macOS 27.0.1 the 0.9.0
+Endpoint Security edge crashed on the very first open every supervised process
+makes at startup (`/dev/dtracehelper`, a devfs node whose device number is
+negative on this release). The edge converted that number in a way that trapped,
+the client died, and the kernel treated the absent client as *allow* for every
+later read, including the protected files. No receipt was written, and when the
+agent had already finished, the supervisor reported a normal run. The headline
+promise did not hold on that OS.
+
+0.9.1 fixes the conversion so no kernel value can crash the handler, flushes the
+receipt log before the edge exits, and makes the supervisor exit non-zero with an
+audit record whenever the edge dies abnormally, even after the agent finished.
+The seal harness (`verify-gate.sh`) now covers a directly exec'd `cat`, `bash -c`
+and a sleep-then-exec shape against a user-owned file under `/private/tmp`,
+repeated. Until you are on 0.9.1, do not rely on the macOS gate on macOS 27.
+
+Two behaviours of the fixed edge are worth knowing. If the edge cannot deliver a
+deny to the kernel, it records an `edge-error` receipt marked "intended deny" and
+exits with code 70; the kernel may still allow that one pending open after the
+edge is gone, so a few bytes can be read before the supervisor kills the agent,
+and the run fails loudly rather than reporting success. In deny-list mode, while
+a run is active, a process outside the run whose ancestry cannot be read (for
+example a backup tool that is exiting) is also denied the protected file; this is
+deliberate fail-closed behaviour, not a bug.
+
+Known gap, not yet fixed: the default-deny allow-list mode (`--deny-all --allow`)
+still treats a process whose ancestry cannot be read as outside the supervised
+tree, so such a process is not held to the allow-list. Deny-list mode (the
+default, `--protect`) does not have this gap.
+
 ## Crash posture (honest limitation)
 
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,

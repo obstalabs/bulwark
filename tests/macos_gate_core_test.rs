@@ -57,6 +57,135 @@ fn swift_edge_decides_by_inode_and_tracks_supervised_tree() {
     );
 }
 
+// WO-127: the edge must convert Darwin's Int32 dev_t without trapping and must
+// land on the same key Rust derives, or devfs opens kill the client and the
+// kernel allows every later read.
+#[test]
+fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
+    let source = repo_file("macos-es-proof/es_gate.swift");
+    assert!(
+        source.contains("UInt64(bitPattern: Int64(st.st_dev))"),
+        "edge must sign-extend st_dev through Int64"
+    );
+    assert!(
+        !source.contains("UInt64(st.st_dev)"),
+        "the trapping UInt64(st.st_dev) conversion must be gone"
+    );
+    assert!(
+        !source.contains("WO-127 AUTH_OPEN raw"),
+        "the capture-only diagnostic hunk must not ship"
+    );
+    // In-flight-aware shutdown must guard BOTH exit paths: the tree-drain exit
+    // and the SIGINT/SIGTERM source the Rust supervisor uses to stop the edge.
+    // A flush that timed out must not exit clean: flushForExit() reports whether
+    // the in-flight decisions drained, and both exits turn a false into the
+    // dedicated non-zero code the supervisor treats as abnormal.
+    assert!(source.contains("func flushForExit() -> Bool"));
+    assert!(source.contains("func flushReceipts()"));
+    assert!(source.contains("let exitReceiptsIncomplete: Int32 = 71"));
+    let exit_expr = "exit(flushForExit() ? 0 : exitReceiptsIncomplete)";
+    let drain_exit = between(&source, "func scheduleDrainExit()", "var allowOnce");
+    assert!(
+        drain_exit.contains(exit_expr),
+        "drain exit must flush and fail on timeout"
+    );
+    let signal_exit = between(&source, "DispatchSource.makeSignalSource", "dispatchMain()");
+    assert!(
+        signal_exit.contains(exit_expr),
+        "signal exit must flush and fail on timeout"
+    );
+    // The wait is bounded well inside the supervisor's SIGTERM-to-SIGKILL window.
+    let wait_decl = between(&source, "let shutdownWait", "\n");
+    assert!(
+        wait_decl.contains(".milliseconds(400)"),
+        "shutdownWait must be 400 ms; got {wait_decl}"
+    );
+    // Only tree-relevant decisions are counted in flight (the client sees every
+    // open on the host); the guard is the same on enter and on leave.
+    let auth_open = between(&source, "case ES_EVENT_TYPE_AUTH_OPEN:", "default:");
+    assert!(auth_open.contains("let tracked = membership != .outside"));
+    let enter = between(auth_open, "if tracked {", "}");
+    assert!(
+        enter.contains("authInFlight.enter()"),
+        "enter must be guarded by tracked"
+    );
+    let leave = between(auth_open, "defer {", "let allow: Bool");
+    assert!(
+        leave.contains("if tracked"),
+        "leave must be guarded by tracked"
+    );
+    assert!(leave.contains("authInFlight.leave()"));
+    // Unknown ancestry on a protected open fails closed in deny-list mode: a
+    // failed parent lookup is not proof the opener is outside the tree.
+    let denylist = between(&source, "case .denylist:", "case .allowlist:");
+    assert!(
+        denylist.contains(".unknown"),
+        "deny-list branch must test .unknown"
+    );
+    assert!(denylist.contains(r#"source = "edge-error""#));
+    let unknown_branch = between(denylist, ".unknown", "} else if");
+    assert!(
+        unknown_branch.contains("allow = false"),
+        "unknown ancestry must DENY"
+    );
+    // A failed kernel response is receipted and the edge exits non-zero, which
+    // the supervisor treats as abnormal.
+    let respond_failure = between(
+        &source,
+        "if rr != ES_RESPOND_RESULT_SUCCESS",
+        "let path = pathForReceipt",
+    );
+    assert!(respond_failure.contains("kernel response failed"));
+    assert!(respond_failure.contains(r#"source: "edge-error""#));
+    assert!(respond_failure.contains("flushReceipts()"));
+    assert!(respond_failure.contains("exit(70)"));
+}
+
+// WO-127: the source slice between two unique markers, so a contract test pins
+// WHERE a call sits (drain exit vs signal handler), not just that it exists.
+fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let s = source
+        .find(start)
+        .unwrap_or_else(|| panic!("marker {start:?} not found"));
+    let rest = &source[s..];
+    let e = rest
+        .find(end)
+        .unwrap_or_else(|| panic!("marker {end:?} not found after {start:?}"));
+    &rest[..e]
+}
+
+// WO-127: pins the Rust convention the edge now matches: std sign-extends the
+// 32-bit Darwin dev_t into the u64 key, so a negative devfs dev stays a stable key.
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_dev_key_is_the_sign_extended_darwin_dev_t() {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata("/dev/null").unwrap();
+    let path = std::ffi::CString::new("/dev/null").unwrap();
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::stat(path.as_ptr(), &mut st) }, 0);
+    let raw: i32 = st.st_dev;
+    assert_eq!(
+        meta.dev(),
+        (raw as i64) as u64,
+        "MetadataExt::dev() must be the sign-extension of the raw dev_t {raw}"
+    );
+}
+
+// WO-127: an edge that died by a signal after the child finished used to be
+// reported as a normal run; the supervisor must name it and fail.
+#[test]
+fn rust_supervisor_reports_abnormal_edge_exit_after_child_exit() {
+    let source = repo_file("src/gate_macos.rs");
+    for needle in [
+        "ES edge exited abnormally",
+        "ES edge exited while child was running",
+        r#"source: "integrity""#,
+    ] {
+        assert!(source.contains(needle), "gate_macos.rs missing {needle}");
+    }
+}
+
 #[test]
 fn behavior_matrix_documents_macos_linux_divergences() {
     let doc = repo_file("docs/macos-behavior-matrix.md");

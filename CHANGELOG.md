@@ -6,6 +6,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-05
+
+### Security
+<!-- WO-127: the macOS 27 fail-open, in user language, no internal references. -->
+- The macOS gate failed open on macOS 27 with 0.9.0. The Endpoint Security edge
+  crashed on the first open every supervised process makes at startup (a devfs
+  node whose device number is negative on that release), the kernel then allowed
+  every later read including protected files, no receipt was written, and a run
+  whose agent had already finished was reported as normal. The edge now converts
+  device numbers without crashing and keys them exactly as the Rust side does,
+  flushes the receipt log before it exits, and the supervisor exits non-zero with
+  an audit record whenever the edge dies abnormally, even after the agent is
+  done. A protected open by a process whose ancestry cannot be established is
+  now denied and receipted as `edge-error` instead of being treated as outside
+  the supervised tree, and a failed kernel response is receipted and ends the
+  run instead of being logged and dropped. An edge that cannot finish writing
+  its receipts before it exits now exits non-zero instead of reporting a clean
+  run. The hardware seal gains direct-exec,
+  `bash -c` and sleep-then-exec shapes against a user-owned `/private/tmp`
+  file, repeated, and fails if the edge died, an integrity or `edge-error`
+  record appears, the static deny receipt does not name the fixture inode, or
+  any piece of evidence could not be read.
+<!-- WO-117: the silent fail-open across launches, in user language. -->
+- A policy file that changed between runs is no longer honored silently. Each
+  run now records a digest of the `Bulwark.toml` it loaded, keyed by the policy
+  path (or the directory searched), alongside the existing integrity state. If
+  the file for the same project has different contents on the next launch, for
+  example because an agent running under the gate rewrote it, that run starts
+  tainted with a `policy changed` reason in the audit receipt, exactly like
+  inode drift, until an operator reviews the change and runs `bulwark reset`.
+  Byte-identical rewrites, first runs, and alternating between projects stay
+  clean. `bulwark allow` and `bulwark deny` taint the next run once by design.
+
+### Fixed
+<!-- WO-120: the silent-ignore is the bug; name the refusal. -->
+- `bulwark ssh --hardened` now refuses `--hivebus-architect-pub` and
+  `--hivebus-worker-seed-generate` at argument parsing. Hardened dispatch never
+  placed the key material, so the flags were accepted and silently ignored,
+  leaving an operator expecting a worker fingerprint or a relayed architect key
+  that did not exist.
+
 ## [0.9.0] - 2026-10-04
 
 ### Security

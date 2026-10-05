@@ -168,7 +168,12 @@ func pidFromAuditToken(_ token: audit_token_t) -> pid_t {
 
 func inodeKey(_ file: UnsafePointer<es_file_t>) -> InodeKey {
     let st = file.pointee.stat
-    return InodeKey(dev: UInt64(st.st_dev), ino: UInt64(st.st_ino))
+    // WO-127@v4: dev_t is Int32 on Darwin and devfs reports a negative value
+    // (/dev/dtracehelper, opened by every process at startup on macOS 27).
+    // A plain UInt64 conversion trapped on it and killed the client, which the
+    // kernel treats as allow. Sign-extend through Int64 instead: it cannot trap
+    // and it matches the Rust side, whose std MetadataExt::dev() also sign-extends.
+    return InodeKey(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
 }
 
 func tokenPath(_ token: es_string_token_t) -> String {
@@ -192,7 +197,8 @@ func parentPid(_ pid: pid_t) -> pid_t? {
     if size <= 0 {
         return nil
     }
-    return pid_t(info.pbi_ppid)
+    // WO-127@v4: no kernel-provided value may trap the handler; pids fit in pid_t.
+    return pid_t(truncatingIfNeeded: info.pbi_ppid)
 }
 
 func processName(_ pid: pid_t) -> String {
@@ -221,23 +227,41 @@ func ancestry(_ pid: pid_t, maxDepth: Int = 16) -> String {
     return parts.joined(separator: " <- ")
 }
 
-func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
+// WO-127@v4: outcome of walking a pid's parent chain. `unknown` means a parent
+// could not be read or the walk hit maxDepth; it is not proof the process is
+// outside the supervised tree, so a protected open must not be allowed on it.
+enum TreeAncestry {
+    case inTree
+    case outside
+    case unknown
+}
+
+// WO-127@v4: tri-state parent walk; a failed lookup or the depth limit is unknown.
+func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
     if pid == root {
-        return true
+        return .inTree
     }
     var current = pid
     var depth = 0
-    while current > 1 && depth < maxDepth {
+    while current > 1 {
+        if depth >= maxDepth {
+            return .unknown
+        }
         guard let parent = parentPid(current) else {
-            return false
+            return .unknown
         }
         if parent == root {
-            return true
+            return .inTree
         }
         current = parent
         depth += 1
     }
-    return false
+    return .outside
+}
+
+// WO-127@v4: FORK/EXEC membership keeps its old meaning; only inTree counts.
+func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
+    ancestryOf(pid, root: root, maxDepth: maxDepth) == .inTree
 }
 
 func jsonEscape(_ value: String) -> String {
@@ -417,6 +441,39 @@ func appendReceipt(_ line: String) {
     }
 }
 
+// WO-127@v4: wait for every queued receipt write before the edge exits. Receipts
+// are written asynchronously after the kernel response, so exiting without this
+// drops the last decisions of a run, often the protected open itself. The queue
+// is serial, so an empty sync block runs only after all earlier writes.
+func flushReceipts() {
+    receiptQueue.sync {}
+}
+
+// WO-127@v4: AUTH_OPEN handlers for the supervised tree (or unknown ancestry) still
+// running. The kernel response goes out before the receipt is built and
+// enqueued, so a shutdown that only drained the receipt queue could exit in
+// between and lose the final receipt. Only tree-relevant opens are counted: the
+// client sees every open on the host, and once the tree has drained no new
+// tree open can start, so this group empties promptly at teardown.
+let authInFlight = DispatchGroup()
+// Bounded so a wedged handler cannot hang teardown, and kept inside the 500 ms
+// (20 x 25 ms) the Rust terminate_edge() allows after SIGTERM before SIGKILL.
+let shutdownWait: DispatchTimeInterval = .milliseconds(400)
+// Exit status when in-flight decisions did not finish in time: their receipts
+// may be missing, so the run must not look clean (the supervisor fails any
+// non-zero edge exit).
+let exitReceiptsIncomplete: Int32 = 71
+
+// WO-127@v4: drain in-flight tree decisions, then the receipt queue; false on timeout.
+func flushForExit() -> Bool {
+    let drained = authInFlight.wait(timeout: .now() + shutdownWait) == .success
+    flushReceipts()
+    if !drained {
+        FileHandle.standardError.write("[bulwark-es] FATAL decisions still in flight at shutdown; receipts may be incomplete\n".data(using: .utf8)!)
+    }
+    return drained
+}
+
 func receiptLine(
     pid: pid_t,
     key: InodeKey,
@@ -474,7 +531,9 @@ let drainGrace: DispatchTimeInterval = .milliseconds(100)
 func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {
-            exit(0)
+            // WO-127@v4: this is how a normal run ends; the final receipts must
+            // reach the log, and a flush that timed out must not exit clean.
+            exit(flushForExit() ? 0 : exitReceiptsIncomplete)
         }
         // Not empty after the grace — an orphan was recorded; keep enforcing.
         // Its eventual EXIT will reschedule this check.
@@ -524,9 +583,23 @@ let res = es_new_client(&client) { clientPtr, message in
         // Membership-set first (reparent-proof), ancestry walk only as an
         // additive fallback for a pid we have not yet seen fork (e.g. the very
         // first opens before its NOTIFY_FORK is processed).
-        let treeHit = treeContains(eventPid) || hasAncestor(eventPid, root: config.rootPid)
+        let membership: TreeAncestry = treeContains(eventPid)
+            ? .inTree
+            : ancestryOf(eventPid, root: config.rootPid)
+        let treeHit = membership == .inTree
         if treeHit {
             treeInsert(eventPid)
+        }
+        // WO-127@v4: count tree-relevant decisions until their receipt is enqueued;
+        // see authInFlight and flushForExit().
+        let tracked = membership != .outside
+        if tracked {
+            authInFlight.enter()
+        }
+        defer {
+            if tracked {
+                authInFlight.leave()
+            }
         }
 
         let allow: Bool
@@ -537,7 +610,13 @@ let res = es_new_client(&client) { clientPtr, message in
         switch config.mode {
         case .denylist:
             let protectedHit = config.protected.contains(key)
-            if !treeHit {
+            if !treeHit && protectedHit && membership == .unknown {
+                // WO-127@v4: a failed parent lookup is not proof the opener is
+                // outside the supervised tree; a protected open fails closed.
+                allow = false
+                source = "edge-error"
+                reason = "protected inode opened by a process whose ancestry could not be established"
+            } else if !treeHit {
                 allow = true
                 source = "outside-tree"
                 reason = protectedHit ? "protected inode opened outside supervised tree" : "outside supervised tree"
@@ -609,7 +688,20 @@ let res = es_new_client(&client) { clientPtr, message in
         }
         if rr != ES_RESPOND_RESULT_SUCCESS {
             FileHandle.standardError.write("[bulwark-es] FATAL respond_flags_result=\(rr.rawValue)\n".data(using: .utf8)!)
-            return
+            // WO-127@v4: the kernel never got this answer, so the open is left to its
+            // deadline. Record it, flush, and exit non-zero: the supervisor treats
+            // a non-zero edge exit as abnormal, kills a live child and fails the run.
+            appendReceipt(receiptLine(
+                pid: eventPid,
+                key: key,
+                decision: allow ? "allow" : "deny",
+                source: "edge-error",
+                path: pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt,
+                ancestry: ancestry(eventPid),
+                reason: "kernel response failed (\(rr.rawValue)); intended \(allow ? "allow" : "deny")"
+            ))
+            flushReceipts()
+            exit(70)
         }
 
         let path = pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt
@@ -683,10 +775,22 @@ guard sub == ES_RETURN_SUCCESS else {
 
 FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
 
-let sigHandler: @convention(c) (Int32) -> Void = { _ in
-    exit(0)
+// WO-127@v4: a normal run ends through the drain exit above; the Rust supervisor
+// sends SIGTERM only when startup fails (terminate_edge), and an operator may
+// send SIGINT. Handle both on a dispatch queue instead of in a C signal handler,
+// which may only call async-signal-safe functions, so in-flight decisions and
+// queued receipts can be flushed before exit; a flush that timed out exits
+// non-zero instead of 0.
+let signalQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.signals")
+var signalSources: [DispatchSourceSignal] = []
+for sig in [SIGINT, SIGTERM] {
+    signal(sig, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
+    source.setEventHandler {
+        exit(flushForExit() ? 0 : exitReceiptsIncomplete)
+    }
+    source.resume()
+    signalSources.append(source)
 }
-signal(SIGINT, sigHandler)
-signal(SIGTERM, sigHandler)
 
 dispatchMain()

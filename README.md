@@ -170,10 +170,13 @@ a lever an agent may pull must be a ratchet.
 ## Integrity circuit-breaker
 
 Each run records its integrity context — a generation counter, a clean-shutdown
-marker, the policy epoch, and the inode identity of every protected object — to a
-state file. The next run enters **tainted mode** when the prior run ended
-uncleanly (no clean-shutdown marker: a `SIGKILL`, crash, OOM, or power loss) or
-when a protected path now resolves to a different inode (object-identity drift).
+marker, a digest of the policy file it loaded, and the inode identity of every
+protected object — to a state file. The next run enters **tainted mode** when the
+prior run ended uncleanly (no clean-shutdown marker: a `SIGKILL`, crash, OOM, or
+power loss), when a protected path now resolves to a different inode
+(object-identity drift), or when the `Bulwark.toml` for the same project has
+different contents than last time (policy tamper: bulwark gates reads, not
+writes, so an agent rewriting its own policy is caught on the next launch).
 
 A tainted run denies protected reads by default and, in socket mode, bypasses the
 allow-session cache so every protected open is decided fresh — no pre-taint grant

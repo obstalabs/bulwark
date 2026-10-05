@@ -13,6 +13,10 @@
 #   3. a SYMLINK to the protected inode is denied (inode identity, not path)
 #   4. a HARDLINK to the protected inode is denied (same inode key)
 #   5. >=1000 opens complete without a gate death (no deadline misses / SIGKILL)
+#   6. (WO-127) a user-owned /private/tmp file is denied to a DIRECTLY exec'd
+#      cat, to bash -c, and to a sleep-then-exec shape, REPS times each, with a
+#      `source: static` deny receipt every time. Every process start opens devfs
+#      (/dev/dtracehelper), the open that crashed the 0.9.0 edge on macOS 27.
 #
 # Prereqs on this Mac:
 #   - bulwark binary built for macOS (cargo build) at ./bulwark or on PATH
@@ -20,15 +24,93 @@
 #   - BULWARK_MACOS_ES_GATE exported to the edge binary inside the bundle
 #   - the calling terminal has Full Disk Access
 set -uo pipefail
-cd "$(dirname "$0")"
+
+fail() { echo "!! $*"; exit 2; }
+
+# WO-127@v4: TEST 6 helpers. Pure (no sudo, no cd, no side effects) so their
+# rejections can be exercised without root: `VERIFY_GATE_LIB_ONLY=1 . ./verify-gate.sh`
+# defines them and returns before anything below the marker runs.
+REPS="${REPS:-5}"
+RECEIPT_READER="${RECEIPT_READER:-sudo cat}"   # receipts are root-owned 0600
+# Upper bound for REPS: each repetition is three sudo'd gate runs, and 3*REPS is
+# computed in shell arithmetic, so the value must stay small enough to be both
+# finite in wall-clock terms and far from any integer wrap.
+MAX_REPS=1000
+
+# validate_reps <value>: a positive integer within MAX_REPS and nothing else.
+# REPS=invalid used to run zero shapes and still seal; a huge REPS used to wrap.
+# WO-127@v4: a bad REPS must refuse before any test, never seal zero runs.
+validate_reps() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "${#1}" -le "${#MAX_REPS}" ] || return 1
+  [ "$1" -le "$MAX_REPS" ]
+}
+
+# shape_verdict <stdout> <stderr-file> <receipts-file> <fixture-ino>: print the
+# first reason a shape FAILS, nothing when it is a clean static deny. A shape is
+# only a deny if the content stayed hidden, the edge did not die, no integrity or
+# edge-error record was written, and a static deny receipt names the fixture inode.
+# Evidence is fed to grep as here-strings or file arguments, never through a
+# producer pipe: under pipefail a `printf | grep -q` match on a body larger than
+# the pipe buffer kills printf with SIGPIPE and turns the match into "not found".
+# Missing evidence is a failure in its own right, never a pass, and so is a
+# grep that could not inspect the evidence: every grep below is tri-state
+# (0 = match, 1 = no match, anything else = inspection failed), because a read
+# error reported as exit 2 must never be read as "not found".
+#
+# evidence_grep <what> <pattern> [file]: sets EVIDENCE_HIT=1 on a match, 0 on no
+# match; when grep itself failed it sets EVIDENCE_REASON and returns 1. Without
+# a file argument the subject is the here-string in EVIDENCE_TEXT. It is called
+# directly, never in a command substitution, so the globals reach the caller.
+# WO-127@v4: a grep that cannot read the evidence must fail the shape, not pass it.
+evidence_grep() {
+  local what="$1" pattern="$2" rc
+  EVIDENCE_HIT=0
+  EVIDENCE_REASON=""
+  if [ "$#" -ge 3 ]; then
+    grep -q -- "$pattern" "$3"; rc=$?
+  else
+    grep -q -- "$pattern" <<<"$EVIDENCE_TEXT"; rc=$?
+  fi
+  case "$rc" in
+    0) EVIDENCE_HIT=1 ;;
+    1) EVIDENCE_HIT=0 ;;
+    *) EVIDENCE_REASON="evidence inspection failed ($what, grep $rc)"; return 1 ;;
+  esac
+}
+
+# WO-127@v4: one fail-closed verdict per shape run, from stdout, stderr and receipts.
+shape_verdict() {
+  local out="$1" err="$2" rcpt="$3" ino="$4" body
+  EVIDENCE_TEXT="$out"
+  evidence_grep "stdout content" "top-secret" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "content printed"; return; fi
+  if [ ! -r "$err" ]; then echo "stderr file missing or unreadable: $err"; return; fi
+  evidence_grep "stderr file" "ES edge exited" "$err" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "abnormal edge exit reported"; return; fi
+  if ! body=$($RECEIPT_READER "$rcpt" 2>/dev/null); then echo "receipt reader failed for $rcpt"; return; fi
+  EVIDENCE_TEXT="$body"
+  evidence_grep "integrity receipt" '"source":"integrity"' || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "integrity record in receipts"; return; fi
+  evidence_grep "edge-error receipt" '"source":"edge-error"' || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "edge-error record in receipts"; return; fi
+  evidence_grep "static deny receipt" "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"static\"" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" != 1 ]; then echo "no static deny receipt for fixture ino $ino"; return; fi
+}
+
+if [ -n "${VERIFY_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
+# ---- executable-only setup from here on (not run when sourced as a library) ----
+# WO-127@v4: refuse a bad REPS before any test runs, so a typo cannot seal nothing.
+validate_reps "$REPS" || fail "REPS must be a positive integer no greater than $MAX_REPS (got '$REPS')"
+
+cd "$(dirname "$0")" || fail "cannot enter the harness directory"
 
 BULWARK="${BULWARK:-./bulwark}"
 GATE_APP="bulwark_es_gate.app"
 GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
 GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
 RECEIPT="gate-receipt.txt"
-
-fail() { echo "!! $*"; exit 2; }
 
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE — run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
@@ -127,6 +209,54 @@ LOAD_N=$(grep -oE 'opened [0-9]+' "$LOAD_OUT" | awk '{print $2}')
 echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL)"
 
 # ---------------------------------------------------------------------------
+# TEST 6 (WO-127): direct exec + user-owned /private/tmp fixture, repeated.
+# The 0.9.0 edge died on the first devfs open of any supervised process (the
+# startup open of /dev/dtracehelper has a negative dev_t on macOS 27), so the
+# kernel allowed everything that followed and no receipt was written. Each
+# shape below must be denied AND leave a `source: static` deny receipt, on
+# every repetition; the receipts are root-owned, so they are read with sudo.
+# ---------------------------------------------------------------------------
+# WO-127@v4: user-owned /private/tmp fixture for the direct-exec seal shapes.
+echo
+USER_FIX_DIR="/private/tmp/bulwark-gate-user.$$"
+USER_FIX="$USER_FIX_DIR/guarded.txt"
+mkdir -p "$USER_FIX_DIR"
+echo "top-secret" > "$USER_FIX"
+chmod 644 "$USER_FIX"
+USER_FIX_INO=$(stat -f %i "$USER_FIX")
+echo "==> TEST 6 (WO-127: user-owned $USER_FIX ino=$USER_FIX_INO, direct cat / bash -c / sleep+exec, x$REPS): expect ALL DENIED with static receipts"
+DIRECT_OK=1; BASHC_OK=1; SLEEP_OK=1; SHAPE_RUNS=0
+# shape_denied <tag> <ok-var-name> <command...>: run once, keep stderr in a
+# per-run file, and judge it with shape_verdict (content, edge death, integrity
+# or edge-error records, static receipt bound to the fixture inode).
+# WO-127@v4: run one shape under the gate and judge it with shape_verdict.
+shape_denied() {
+  local tag="$1" var="$2"; shift 2
+  local rcpt="$WORK/$tag.jsonl" err="$WORK/$tag.stderr" out reason
+  SHAPE_RUNS=$((SHAPE_RUNS + 1))
+  out=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+          --receipts "$rcpt" --protect "$USER_FIX" -- "$@" 2>"$err")
+  reason=$(shape_verdict "$out" "$err" "$rcpt" "$USER_FIX_INO")
+  if [ -n "$reason" ]; then
+    echo "   $tag: FAIL ($reason)"; eval "$var=0"
+    sed 's/^/     stderr: /' "$err" | tail -5
+  fi
+}
+# WO-127@v4: enumerate once and fail loudly if that fails, instead of letting an
+# empty expansion silently run zero shapes.
+REP_LIST=$(seq 1 "$REPS") || fail "cannot enumerate REPS=$REPS"
+for i in $REP_LIST; do
+  shape_denied "direct.$i" DIRECT_OK /bin/cat "$USER_FIX"
+  shape_denied "bashc.$i"  BASHC_OK  /bin/bash -c "cat '$USER_FIX'"
+  shape_denied "sleep.$i"  SLEEP_OK  /bin/sh -c "sleep 1; exec cat '$USER_FIX'"
+done
+# WO-127@v4: the seal requires every planned run to have happened, not just the
+# ones that did run to have passed.
+[ "$SHAPE_RUNS" -eq $((3 * REPS)) ] && RUNS_OK=1 || RUNS_OK=0
+echo "   direct=$DIRECT_OK bash_c=$BASHC_OK sleep_exec=$SLEEP_OK runs=$SHAPE_RUNS/$((3 * REPS)) (1 = denied with a static receipt for ino $USER_FIX_INO on every run)"
+rm -rf "$USER_FIX_DIR"
+
+# ---------------------------------------------------------------------------
 # Seal.
 # ---------------------------------------------------------------------------
 echo
@@ -142,9 +272,15 @@ echo
   echo "test4_deny_hardlink:  $([ "$DENY_HARD_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test2_unsupervised:   $([ "$UNSUP_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test5_throughput:     $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL) (${LOAD_N:-0} opens)"
+  # WO-127@v4: the direct-exec shapes are part of the seal, not an extra.
+  echo "test6_direct_exec:    $([ "$DIRECT_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
+  echo "test6_bash_c:         $([ "$BASHC_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
+  echo "test6_sleep_exec:     $([ "$SLEEP_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
+  echo "test6_runs:           $([ "$RUNS_OK" = 1 ] && echo PASS || echo FAIL) ($SHAPE_RUNS of $((3 * REPS)) shape runs executed)"
   if [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$DENY_PATH_OK" = 1 ] && [ "$DENY_SYM_OK" = 1 ] && \
-     [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ]; then
-    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
+     [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ] && \
+     [ "$DIRECT_OK" = 1 ] && [ "$BASHC_OK" = 1 ] && [ "$SLEEP_OK" = 1 ] && [ "$RUNS_OK" = 1 ]; then
+    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink, and to direct cat / bash -c / sleep+exec x$REPS with static receipts), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
   elif [ "${BUNDLE_VALID:-0}" != 1 ]; then
     echo "verdict:         NOT SEALED — gate bundle not validated (sign/notarize/staple/spctl)."
   else
