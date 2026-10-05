@@ -20,7 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A policy that names a protected path absent on this host (the default
   profile's `~/.ssh` on a fresh runner, for example) no longer aborts the run
   with `fanotify_mark ... No such file or directory`: only the paths that
-  resolved are marked, and the skip note now names the absent paths.
+  resolved are marked, and the skip note now names the absent paths. Only an
+  absent path is skipped; a protected path that cannot be stat'ed for any other
+  reason (permission denied through its parent, an I/O error) refuses the run
+  before launch, naming the path and the OS error.
 <!-- WO-135@v2: the 0.9.1 x86_64 gnu binary required glibc 2.39. -->
 - The static musl build is now the documented Linux install, and the glibc
   (`-gnu`) builds are cross-compiled against glibc 2.31 with a release-time

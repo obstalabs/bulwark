@@ -71,6 +71,12 @@ pub struct LenientResolution {
     pub skipped: Vec<std::path::PathBuf>,
 }
 
+// WO-131@v1: the two stat failures that prove a path is absent. ENOTDIR means a
+// component on the way is a regular file, so nothing can exist below it.
+fn is_absent(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
+}
+
 impl ProtectedSet {
     /// Resolve each path to its inode. A directory contributes its own inode and
     /// is recorded as a protected directory, then is walked recursively (bounded
@@ -96,10 +102,17 @@ impl ProtectedSet {
     /// stores (`~/.aws`, `~/.kube`, ...) which may be absent on a given host.
     /// Returns the set together with the paths that resolved and the paths that
     /// were skipped, so the caller marks exactly what resolved.
+    ///
+    /// Only "absent" is lenient: `NotFound`, and `ENOTDIR` (a path component is
+    /// a regular file, so the path cannot exist). Any other metadata error
+    /// (EACCES through an unreadable parent, EIO, a FUSE or NFS refusal) is an
+    /// error naming the path: the path may well exist, and dropping it would
+    /// silently remove it from the protected set.
     // WO-131@v1: the caller used to mark every requested path, skipped ones
     // included, and fanotify_mark on an absent `~/.ssh` aborted the run with
-    // ENOENT. Report which paths resolved instead of only counting the rest.
-    pub fn resolve_lenient<I, P>(paths: I) -> LenientResolution
+    // ENOENT. Report which paths resolved instead of only counting the rest, and
+    // refuse on any stat failure that does not prove the path is absent.
+    pub fn resolve_lenient<I, P>(paths: I) -> Result<LenientResolution>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -111,20 +124,28 @@ impl ProtectedSet {
             let p = p.as_ref();
             let meta = match fs::metadata(p) {
                 Ok(m) => m,
-                Err(_) => {
+                Err(e) if is_absent(&e) => {
                     skipped.push(p.to_path_buf());
                     continue;
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "cannot stat protected path {} (it is not absent, so it is not skipped)",
+                            p.display()
+                        )
+                    });
                 }
             };
             b.add(p, &meta, 0);
             present.push(p.to_path_buf());
         }
         b.warn_if_capped();
-        LenientResolution {
+        Ok(LenientResolution {
             set: b.into_set(),
             present,
             skipped,
-        }
+        })
     }
 
     /// True if this inode is in the launch snapshot (open should be denied).
@@ -390,7 +411,8 @@ mod tests {
         fs::write(&inside, b"k").unwrap();
         let absent = base.join("no-such-dot-ssh");
 
-        let r = ProtectedSet::resolve_lenient([present.as_path(), absent.as_path()]);
+        let r = ProtectedSet::resolve_lenient([present.as_path(), absent.as_path()])
+            .expect("an absent path is a skip, not a refusal");
         assert_eq!(
             r.present,
             vec![present.clone()],
@@ -403,6 +425,60 @@ mod tests {
         );
         assert!(!r.set.is_empty());
         assert!(r.set.protects(&key_of(&inside), &s(&inside)));
+    }
+
+    /// WO-131@v1: a metadata error other than "absent" (EACCES through a mode
+    /// 000 parent) must refuse the run, not be reported as a skipped path. Root
+    /// ignores mode bits, so the test says so and returns when euid is 0.
+    #[cfg(unix)]
+    #[test]
+    fn lenient_resolution_refuses_an_unreadable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "SKIP lenient_resolution_refuses_an_unreadable_parent: running as root, mode 000 does not deny"
+            );
+            return;
+        }
+        let base = scratch("lenient-eacces");
+        let locked = base.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        let target = locked.join("id_key");
+        fs::write(&target, b"k").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = ProtectedSet::resolve_lenient([target.as_path()]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let err = match r {
+            Ok(r) => panic!(
+                "an EACCES path must refuse the run, not resolve or skip; skipped={:?} present={:?}",
+                r.skipped, r.present
+            ),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&target.display().to_string()),
+            "the refusal must name the path; got: {msg}"
+        );
+        assert!(
+            msg.contains("os error 13"),
+            "the refusal must carry the OS error; got: {msg}"
+        );
+    }
+
+    /// WO-131@v1: a path through a regular file cannot exist (ENOTDIR), so it is
+    /// skipped like an absent path, not refused.
+    #[test]
+    fn lenient_resolution_skips_a_path_through_a_regular_file() {
+        let base = scratch("lenient-enotdir");
+        let plain = base.join("plain");
+        fs::write(&plain, b"x").unwrap();
+        let through = plain.join("id_key");
+        let r = ProtectedSet::resolve_lenient([through.as_path()])
+            .expect("ENOTDIR proves the path is absent: a skip, not a refusal");
+        assert_eq!(r.skipped, vec![through]);
+        assert!(r.present.is_empty());
     }
 
     /// Recursion does not follow a symlinked directory out of the tree: a file

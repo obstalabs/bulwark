@@ -2147,7 +2147,10 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 policy.protected_globs(&home).len()
             );
         }
-        let resolved = ProtectedSet::resolve_lenient(&concrete);
+        // WO-131@v1: a stat failure that does not prove the path absent (EACCES,
+        // EIO, ...) refuses the run here, before any launch or state write,
+        // naming the path and the OS error. Only absent paths are skipped.
+        let resolved = ProtectedSet::resolve_lenient(&concrete)?;
         if !resolved.skipped.is_empty() {
             let names = resolved
                 .skipped
@@ -2163,7 +2166,8 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         // WO-131@v1: mark only the paths that resolved. Marking every requested
         // path handed the skipped, absent ones to fanotify_mark too, which failed
         // with ENOENT and aborted the run (seen on the CI runner for ~/.ssh). A
-        // path that exists but cannot be marked still refuses the run in the gate.
+        // path that stats but cannot be marked still refuses the run in the gate;
+        // a path that cannot be stat'ed at all was refused above, never skipped.
         let marks = resolved.present.clone();
         (resolved.set, marks)
     };
