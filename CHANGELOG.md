@@ -21,6 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   profile's `~/.ssh` on a fresh runner, for example) no longer aborts the run
   with `fanotify_mark ... No such file or directory`: only the paths that
   resolved are marked, and the skip note now names the absent paths.
+<!-- WO-135@v2: the 0.9.1 x86_64 gnu binary required glibc 2.39. -->
+- The static musl build is now the documented Linux install, and the glibc
+  (`-gnu`) builds are cross-compiled against glibc 2.31 with a release-time
+  check that fails if a binary needs anything newer; the 0.9.1 x86_64 gnu
+  archive required glibc 2.39 and did not load cleanly on Debian 12 or Ubuntu
+  22.04.
 
 ## [0.9.1] - 2026-10-05
 

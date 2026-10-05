@@ -76,6 +76,34 @@ jobs:
             exit 1
           fi
 
+      # WO-135@v2: the release gnu binaries are built with cross so they link
+      # against an older glibc than ubuntu-latest's 2.39 (0.9.1 shipped an x86_64
+      # binary that needed 2.39). Build the x86_64 gnu target the same way here
+      # and assert the floor on every PR, so a regression is caught before a tag.
+      - name: Install cross (gnu floor check)
+        run: cargo install cross --locked
+
+      - name: Build x86_64 gnu via cross (release shape)
+        run: cross build --release --target x86_64-unknown-linux-gnu
+
+      - name: Assert glibc floor (gnu, cross build)
+        env:
+          GLIBC_FLOOR: "2.31"
+        run: |
+          set -o pipefail
+          bin="target/x86_64-unknown-linux-gnu/release/bulwark"
+          need=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -uV | awk 'END{print}')
+          echo "x86_64-unknown-linux-gnu: highest glibc symbol version required = ${need:-none}; floor = ${GLIBC_FLOOR}"
+          if [ -z "$need" ]; then
+            echo "::error::no GLIBC_ symbol versions found; is $bin a glibc binary?"
+            exit 1
+          fi
+          highest=$(printf '%s\n%s\n' "$need" "$GLIBC_FLOOR" | sort -V | awk 'END{print}')
+          if [ "$highest" != "$GLIBC_FLOOR" ]; then
+            echo "::error::x86_64-unknown-linux-gnu requires glibc ${need}, above the floor ${GLIBC_FLOOR}"
+            exit 1
+          fi
+
       - name: Unit tests
         run: cargo test --verbose
 

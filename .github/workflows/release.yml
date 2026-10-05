@@ -23,8 +23,10 @@ jobs:
     strategy:
       matrix:
         include:
+          # WO-135@v2: cross (not the ubuntu-latest host) so the gnu binary links
+          # against the cross image's older glibc instead of the runner's 2.39.
           - target: x86_64-unknown-linux-gnu
-            cross: false
+            cross: true
             static: false
           - target: aarch64-unknown-linux-gnu
             cross: true
@@ -55,6 +57,29 @@ jobs:
       - name: Build (cross)
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
+
+      # WO-135@v2: a gnu binary that needs a newer glibc than GLIBC_FLOOR fails
+      # at load time on Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34),
+      # which is how 0.9.1 shipped a binary wanting 2.39. Fail the build instead.
+      # readelf reads any ELF regardless of the runner's own architecture.
+      - name: Assert glibc floor (gnu)
+        if: ${{ !matrix.static }}
+        env:
+          GLIBC_FLOOR: "2.31"
+        run: |
+          set -o pipefail
+          bin="target/${{ matrix.target }}/release/bulwark"
+          need=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -uV | awk 'END{print}')
+          echo "${{ matrix.target }}: highest glibc symbol version required = ${need:-none}; floor = ${GLIBC_FLOOR}"
+          if [ -z "$need" ]; then
+            echo "::error::${{ matrix.target }}: no GLIBC_ symbol versions found; is $bin a glibc binary?"
+            exit 1
+          fi
+          highest=$(printf '%s\n%s\n' "$need" "$GLIBC_FLOOR" | sort -V | awk 'END{print}')
+          if [ "$highest" != "$GLIBC_FLOOR" ]; then
+            echo "::error::${{ matrix.target }} requires glibc ${need}, above the floor ${GLIBC_FLOOR}"
+            exit 1
+          fi
 
       - name: Assert static linkage (musl)
         if: matrix.static
@@ -219,8 +244,8 @@ jobs:
           ## Which archive?
           | Platform | Archive |
           |----------|---------|
-          | Linux x86_64 | \`bulwark-${version}-x86_64-unknown-linux-gnu.tar.gz\` (or \`-musl\` for a static build) |
-          | Linux aarch64 | \`bulwark-${version}-aarch64-unknown-linux-gnu.tar.gz\` (or \`-musl\`) |
+          | Linux x86_64 | \`bulwark-${version}-x86_64-unknown-linux-musl.tar.gz\` (static, runs on any distro; \`-gnu\` needs glibc 2.31 or newer) |
+          | Linux aarch64 | \`bulwark-${version}-aarch64-unknown-linux-musl.tar.gz\` (static; \`-gnu\` needs glibc 2.31 or newer) |
           | macOS Apple Silicon | \`bulwark-${version}-aarch64-apple-darwin.tar.gz\` (or \`.pkg\`) |
           | macOS Intel | \`bulwark-${version}-x86_64-apple-darwin.tar.gz\` (or \`.pkg\`) |
 
