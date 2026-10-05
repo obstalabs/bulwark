@@ -21,6 +21,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::allowlist::AllowList;
 use crate::consent::{ConsentRequest, Source, Verdict};
 use crate::protect::{InodeKey, ProtectedSet};
+use crate::receipt::{Decision, Receipt, ReceiptLog};
 
 const ES_EDGE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 const EDGE_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -188,7 +189,8 @@ pub fn run(
         ),
     }
     kill_pid(child_pid, libc::SIGCONT).context("resume supervised child")?;
-    let code = supervise(child_pid, &mut edge_child)?;
+    // WO-127: the receipt log is where an abnormal edge death is recorded.
+    let code = supervise(child_pid, &mut edge_child, receipts)?;
     terminate_edge(&mut edge_child)?;
     Ok(code)
 }
@@ -497,7 +499,31 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
     }
 }
 
-fn supervise(child_pid: libc::pid_t, edge: &mut Child) -> Result<i32> {
+// WO-127: an abnormal edge death is a fail-open window the kernel already
+// honored; it must leave an audit record even when the run otherwise looks done.
+fn record_edge_death(
+    receipts: Option<&Path>,
+    child_pid: libc::pid_t,
+    status: &std::process::ExitStatus,
+    detail: &str,
+) {
+    // Best effort: the error the caller returns is the primary signal.
+    let Ok(mut log) = ReceiptLog::new(receipts) else {
+        return;
+    };
+    log.record(&Receipt {
+        pid: child_pid,
+        dev: 0,
+        ino: 0,
+        decision: Decision::Deny,
+        path: "",
+        ancestry: "",
+        reason: &format!("ES edge exited abnormally ({status}); {detail}"),
+        source: "integrity",
+    });
+}
+
+fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) -> Result<i32> {
     // The foreground child exiting is NOT the end of the supervised tree: a
     // process that double-fork()s leaves an orphan (reparented to launchd) that
     // may still read after its parent is gone. The ES edge tracks the whole tree
@@ -516,10 +542,29 @@ fn supervise(child_pid: libc::pid_t, edge: &mut Child) -> Result<i32> {
             if foreground_code.is_none() {
                 foreground_code = try_wait(child_pid)?;
             }
+            // WO-127: only a clean drain (exit 0) is a normal end. An edge killed
+            // by a signal or exiting non-zero stopped answering the kernel at
+            // some point, and the kernel allowed every open after that. That is
+            // true even if the child has already finished: the 0.9.0 leak looked
+            // like a normal run precisely because the agent was quick.
             match foreground_code {
-                Some(code) => return Ok(code),
+                Some(code) if status.success() => return Ok(code),
+                Some(code) => {
+                    let detail = format!(
+                        "the supervised command (pid {child_pid}) had already exited with {code}; \
+                         opens after the edge died were not gated"
+                    );
+                    record_edge_death(receipts, child_pid, &status, &detail);
+                    bail!("ES edge exited abnormally ({status}) after the supervised command finished; {detail}");
+                }
                 None => {
                     let _ = kill_pid(child_pid, libc::SIGKILL);
+                    record_edge_death(
+                        receipts,
+                        child_pid,
+                        &status,
+                        "supervised command was still running and was killed",
+                    );
                     bail!("ES edge exited while child was running: {status}");
                 }
             }
@@ -641,5 +686,122 @@ mod allowlist_edge_tests {
             !body.contains("allow_root="),
             "grants must not be emitted as path-beneath allow_root; got:\n{body}"
         );
+    }
+}
+
+// WO-127: the supervisor must fail closed on an abnormal edge death, including
+// after the foreground child already finished (that is how the 0.9.0 leak hid).
+// The spawned children are reaped by `supervise` itself through libc::waitpid,
+// exactly as in production, so std's `wait()` must not be called on them here.
+#[cfg(test)]
+#[allow(clippy::zombie_processes)]
+mod supervise_tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn scratch(tag: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("bulwark-sup-{tag}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // WO-127: a fake edge that signals readiness, then exits the way asked:
+    // "trap" dies by SIGTRAP like the real 0.9.0 crash, "clean" drains with 0.
+    fn fake_edge(ready: &Path, how: &str) -> Child {
+        let script = match how {
+            "trap" => format!("echo ready > '{}'; kill -TRAP $$", ready.display()),
+            _ => format!("echo ready > '{}'; sleep 0.3; exit 0", ready.display()),
+        };
+        Command::new("/bin/sh")
+            .args(["-c", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fake edge")
+    }
+
+    fn wait_ready(ready: &Path) {
+        for _ in 0..200 {
+            if ready.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("fake edge never signalled readiness");
+    }
+
+    fn pid_alive(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn abnormal_edge_exit_after_child_finished_is_an_error_with_audit() {
+        let dir = scratch("after");
+        let receipts = dir.join("r.jsonl");
+        // The supervised command already finished before the edge dies.
+        let child = Command::new("/usr/bin/true").spawn().unwrap();
+        let child_pid = child.id() as libc::pid_t;
+        thread::sleep(Duration::from_millis(200));
+        let ready = dir.join("ready");
+        let mut edge = fake_edge(&ready, "trap");
+        wait_ready(&ready);
+
+        let err = supervise(child_pid, &mut edge, Some(&receipts))
+            .expect_err("an edge killed by a signal must not look like a normal run");
+        let msg = err.to_string();
+        assert!(msg.contains("ES edge exited abnormally"), "{msg}");
+        let body = fs::read_to_string(&receipts).expect("audit record missing");
+        assert!(body.contains(r#""source":"integrity""#), "{body}");
+        assert!(body.contains("ES edge exited abnormally"), "{body}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn abnormal_edge_exit_with_live_child_kills_it() {
+        let dir = scratch("live");
+        let receipts = dir.join("r.jsonl");
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let child_pid = child.id() as libc::pid_t;
+        let ready = dir.join("ready");
+        let mut edge = fake_edge(&ready, "trap");
+        wait_ready(&ready);
+
+        let err = supervise(child_pid, &mut edge, Some(&receipts))
+            .expect_err("edge death with a live child must fail");
+        assert!(
+            err.to_string()
+                .contains("ES edge exited while child was running"),
+            "{err}"
+        );
+        // Reap: a SIGKILLed child shows up as signaled, never still running.
+        let mut status: libc::c_int = 0;
+        let r = unsafe { libc::waitpid(child_pid, &mut status, 0) };
+        assert_eq!(r, child_pid);
+        assert!(libc::WIFSIGNALED(status), "child was not killed");
+        assert!(!pid_alive(child_pid));
+        assert!(fs::read_to_string(&receipts)
+            .unwrap_or_default()
+            .contains(r#""source":"integrity""#));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_edge_drain_returns_the_child_exit_code() {
+        let dir = scratch("clean");
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let child_pid = child.id() as libc::pid_t;
+        let ready = dir.join("ready");
+        let mut edge = fake_edge(&ready, "clean");
+        wait_ready(&ready);
+        let code = supervise(child_pid, &mut edge, None).expect("clean drain");
+        assert_eq!(code, 7);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

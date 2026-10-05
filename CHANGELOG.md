@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Security
+<!-- WO-127: the macOS 27 fail-open, in user language, no internal references. -->
+- The macOS gate failed open on macOS 27 with 0.9.0. The Endpoint Security edge
+  crashed on the first open every supervised process makes at startup (a devfs
+  node whose device number is negative on that release), the kernel then allowed
+  every later read including protected files, no receipt was written, and a run
+  whose agent had already finished was reported as normal. The edge now converts
+  device numbers without crashing and keys them exactly as the Rust side does,
+  flushes the receipt log before it exits, and the supervisor exits non-zero with
+  an audit record whenever the edge dies abnormally, even after the agent is
+  done. The hardware seal gains direct-exec, `bash -c` and sleep-then-exec
+  shapes against a user-owned `/private/tmp` file, repeated.
 <!-- WO-117: the silent fail-open across launches, in user language. -->
 - A policy file that changed between runs is no longer honored silently. Each
   run now records a digest of the `Bulwark.toml` it loaded, keyed by the policy

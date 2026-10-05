@@ -168,7 +168,12 @@ func pidFromAuditToken(_ token: audit_token_t) -> pid_t {
 
 func inodeKey(_ file: UnsafePointer<es_file_t>) -> InodeKey {
     let st = file.pointee.stat
-    return InodeKey(dev: UInt64(st.st_dev), ino: UInt64(st.st_ino))
+    // WO-127: dev_t is Int32 on Darwin and devfs reports a negative value
+    // (/dev/dtracehelper, opened by every process at startup on macOS 27).
+    // A plain UInt64 conversion trapped on it and killed the client, which the
+    // kernel treats as allow. Sign-extend through Int64 instead: it cannot trap
+    // and it matches the Rust side, whose std MetadataExt::dev() also sign-extends.
+    return InodeKey(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
 }
 
 func tokenPath(_ token: es_string_token_t) -> String {
@@ -192,7 +197,8 @@ func parentPid(_ pid: pid_t) -> pid_t? {
     if size <= 0 {
         return nil
     }
-    return pid_t(info.pbi_ppid)
+    // WO-127: no kernel-provided value may trap the handler; pids fit in pid_t.
+    return pid_t(truncatingIfNeeded: info.pbi_ppid)
 }
 
 func processName(_ pid: pid_t) -> String {
@@ -417,6 +423,14 @@ func appendReceipt(_ line: String) {
     }
 }
 
+// WO-127: wait for every queued receipt write before the edge exits. Receipts
+// are written asynchronously after the kernel response, so exiting without this
+// drops the last decisions of a run, often the protected open itself. The queue
+// is serial, so an empty sync block runs only after all earlier writes.
+func flushReceipts() {
+    receiptQueue.sync {}
+}
+
 func receiptLine(
     pid: pid_t,
     key: InodeKey,
@@ -474,6 +488,8 @@ let drainGrace: DispatchTimeInterval = .milliseconds(100)
 func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {
+            // WO-127: the final receipts must reach the log before exit.
+            flushReceipts()
             exit(0)
         }
         // Not empty after the grace — an orphan was recorded; keep enforcing.
@@ -683,10 +699,21 @@ guard sub == ES_RETURN_SUCCESS else {
 
 FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
 
-let sigHandler: @convention(c) (Int32) -> Void = { _ in
-    exit(0)
+// WO-127: the Rust supervisor stops the edge with SIGTERM at the end of every
+// run. Handle SIGINT/SIGTERM on a dispatch queue instead of in a C signal
+// handler, which may only call async-signal-safe functions, so the queued
+// receipts can be flushed before exit. Exit status stays 0, as before.
+let signalQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.signals")
+var signalSources: [DispatchSourceSignal] = []
+for sig in [SIGINT, SIGTERM] {
+    signal(sig, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
+    source.setEventHandler {
+        flushReceipts()
+        exit(0)
+    }
+    source.resume()
+    signalSources.append(source)
 }
-signal(SIGINT, sigHandler)
-signal(SIGTERM, sigHandler)
 
 dispatchMain()

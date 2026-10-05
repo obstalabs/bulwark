@@ -57,6 +57,66 @@ fn swift_edge_decides_by_inode_and_tracks_supervised_tree() {
     );
 }
 
+// WO-127: the edge must convert Darwin's Int32 dev_t without trapping and must
+// land on the same key Rust derives, or devfs opens kill the client and the
+// kernel allows every later read.
+#[test]
+fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
+    let source = repo_file("macos-es-proof/es_gate.swift");
+    assert!(
+        source.contains("UInt64(bitPattern: Int64(st.st_dev))"),
+        "edge must sign-extend st_dev through Int64"
+    );
+    assert!(
+        !source.contains("UInt64(st.st_dev)"),
+        "the trapping UInt64(st.st_dev) conversion must be gone"
+    );
+    assert!(
+        !source.contains("WO-127 AUTH_OPEN raw"),
+        "the capture-only diagnostic hunk must not ship"
+    );
+    assert!(source.contains("func flushReceipts()"));
+    // Both exit paths flush: the drain exit and the SIGINT/SIGTERM source.
+    let flush_calls = source.matches("flushReceipts()\n").count();
+    assert!(
+        flush_calls >= 2,
+        "expected flushReceipts() before both exits, found {flush_calls} call(s)"
+    );
+    assert!(source.contains("DispatchSource.makeSignalSource"));
+}
+
+// WO-127: pins the Rust convention the edge now matches: std sign-extends the
+// 32-bit Darwin dev_t into the u64 key, so a negative devfs dev stays a stable key.
+#[cfg(target_os = "macos")]
+#[test]
+fn rust_dev_key_is_the_sign_extended_darwin_dev_t() {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata("/dev/null").unwrap();
+    let path = std::ffi::CString::new("/dev/null").unwrap();
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::stat(path.as_ptr(), &mut st) }, 0);
+    let raw: i32 = st.st_dev;
+    assert_eq!(
+        meta.dev(),
+        (raw as i64) as u64,
+        "MetadataExt::dev() must be the sign-extension of the raw dev_t {raw}"
+    );
+}
+
+// WO-127: an edge that died by a signal after the child finished used to be
+// reported as a normal run; the supervisor must name it and fail.
+#[test]
+fn rust_supervisor_reports_abnormal_edge_exit_after_child_exit() {
+    let source = repo_file("src/gate_macos.rs");
+    for needle in [
+        "ES edge exited abnormally",
+        "ES edge exited while child was running",
+        r#"source: "integrity""#,
+    ] {
+        assert!(source.contains(needle), "gate_macos.rs missing {needle}");
+    }
+}
+
 #[test]
 fn behavior_matrix_documents_macos_linux_divergences() {
     let doc = repo_file("docs/macos-behavior-matrix.md");

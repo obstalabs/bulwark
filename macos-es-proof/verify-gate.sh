@@ -13,6 +13,10 @@
 #   3. a SYMLINK to the protected inode is denied (inode identity, not path)
 #   4. a HARDLINK to the protected inode is denied (same inode key)
 #   5. >=1000 opens complete without a gate death (no deadline misses / SIGKILL)
+#   6. (WO-127) a user-owned /private/tmp file is denied to a DIRECTLY exec'd
+#      cat, to bash -c, and to a sleep-then-exec shape, REPS times each, with a
+#      `source: static` deny receipt every time. Every process start opens devfs
+#      (/dev/dtracehelper), the open that crashed the 0.9.0 edge on macOS 27.
 #
 # Prereqs on this Mac:
 #   - bulwark binary built for macOS (cargo build) at ./bulwark or on PATH
@@ -127,6 +131,44 @@ LOAD_N=$(grep -oE 'opened [0-9]+' "$LOAD_OUT" | awk '{print $2}')
 echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL)"
 
 # ---------------------------------------------------------------------------
+# TEST 6 (WO-127): direct exec + user-owned /private/tmp fixture, repeated.
+# The 0.9.0 edge died on the first devfs open of any supervised process (the
+# startup open of /dev/dtracehelper has a negative dev_t on macOS 27), so the
+# kernel allowed everything that followed and no receipt was written. Each
+# shape below must be denied AND leave a `source: static` deny receipt, on
+# every repetition; the receipts are root-owned, so they are read with sudo.
+# ---------------------------------------------------------------------------
+echo
+REPS="${REPS:-5}"
+USER_FIX_DIR="/private/tmp/bulwark-gate-user.$$"
+USER_FIX="$USER_FIX_DIR/guarded.txt"
+mkdir -p "$USER_FIX_DIR"
+echo "top-secret" > "$USER_FIX"
+chmod 644 "$USER_FIX"
+echo "==> TEST 6 (WO-127: user-owned $USER_FIX, direct cat / bash -c / sleep+exec, x$REPS): expect ALL DENIED with static receipts"
+DIRECT_OK=1; BASHC_OK=1; SLEEP_OK=1
+# shape_denied <tag> <ok-var-name> <command...>: run once, require no content on
+# stdout and a static deny receipt for the fixture.
+shape_denied() {
+  local tag="$1" var="$2"; shift 2
+  local rcpt="$WORK/$tag.jsonl" out
+  out=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+          --receipts "$rcpt" --protect "$USER_FIX" -- "$@" 2>/dev/null)
+  if printf '%s' "$out" | grep -q "top-secret"; then
+    echo "   $tag: READABLE (content printed)"; eval "$var=0"
+  elif ! sudo grep -q '"decision":"deny","source":"static"' "$rcpt" 2>/dev/null; then
+    echo "   $tag: denied but NO static deny receipt"; eval "$var=0"
+  fi
+}
+for i in $(seq 1 "$REPS"); do
+  shape_denied "direct.$i" DIRECT_OK /bin/cat "$USER_FIX"
+  shape_denied "bashc.$i"  BASHC_OK  /bin/bash -c "cat '$USER_FIX'"
+  shape_denied "sleep.$i"  SLEEP_OK  /bin/sh -c "sleep 1; exec cat '$USER_FIX'"
+done
+echo "   direct=$DIRECT_OK bash_c=$BASHC_OK sleep_exec=$SLEEP_OK (1 = denied with static receipt on all $REPS runs)"
+rm -rf "$USER_FIX_DIR"
+
+# ---------------------------------------------------------------------------
 # Seal.
 # ---------------------------------------------------------------------------
 echo
@@ -142,9 +184,14 @@ echo
   echo "test4_deny_hardlink:  $([ "$DENY_HARD_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test2_unsupervised:   $([ "$UNSUP_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test5_throughput:     $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL) (${LOAD_N:-0} opens)"
+  # WO-127: the direct-exec shapes are part of the seal, not an extra.
+  echo "test6_direct_exec:    $([ "$DIRECT_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
+  echo "test6_bash_c:         $([ "$BASHC_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
+  echo "test6_sleep_exec:     $([ "$SLEEP_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   if [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$DENY_PATH_OK" = 1 ] && [ "$DENY_SYM_OK" = 1 ] && \
-     [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ]; then
-    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
+     [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ] && \
+     [ "$DIRECT_OK" = 1 ] && [ "$BASHC_OK" = 1 ] && [ "$SLEEP_OK" = 1 ]; then
+    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink, and to direct cat / bash -c / sleep+exec x$REPS with static receipts), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
   elif [ "${BUNDLE_VALID:-0}" != 1 ]; then
     echo "verdict:         NOT SEALED — gate bundle not validated (sign/notarize/staple/spctl)."
   else
