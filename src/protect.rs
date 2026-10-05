@@ -309,17 +309,14 @@ impl Build {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A unique scratch directory under the system temp dir (no external dep).
+    /// A fresh scratch directory under the system temp dir (no external dep).
+    // WO-132@v1: the old pid+counter name repeated across runs, and the ignored
+    // remove_dir_all let a leftover unwritable directory of that name fail the
+    // test with EACCES; the crate helper names by pid, nanos and counter and
+    // refuses an existing directory.
     fn scratch(tag: &str) -> std::path::PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d =
-            std::env::temp_dir().join(format!("bulwark-protect-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch_dir(&format!("protect-{tag}"))
     }
 
     fn key_of(p: &Path) -> InodeKey {

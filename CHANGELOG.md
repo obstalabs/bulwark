@@ -8,8 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 <!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
-- Unit tests no longer name their scratch directories by process id alone, so a
-  leftover directory from another user or a root step cannot make them fail.
+- Tests no longer name their scratch directories or images by process id alone,
+  so a leftover from another user or a root step cannot make them fail.
 <!-- WO-134@v1: file-level Landlock rules were dropped; hardened mode could not read /dev/null. -->
 - `--hardened` now grants read access to regular files and devices on the allow
   list, not only directories. Landlock rejected the directory right on a file, so
