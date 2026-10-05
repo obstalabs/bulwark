@@ -75,14 +75,61 @@ fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
         !source.contains("WO-127 AUTH_OPEN raw"),
         "the capture-only diagnostic hunk must not ship"
     );
+    // In-flight-aware shutdown must guard BOTH exit paths: the tree-drain exit
+    // and the SIGINT/SIGTERM source the Rust supervisor uses to stop the edge.
+    assert!(source.contains("func flushForExit()"));
     assert!(source.contains("func flushReceipts()"));
-    // Both exit paths flush: the drain exit and the SIGINT/SIGTERM source.
-    let flush_calls = source.matches("flushReceipts()\n").count();
+    let drain_exit = between(&source, "func scheduleDrainExit()", "var allowOnce");
     assert!(
-        flush_calls >= 2,
-        "expected flushReceipts() before both exits, found {flush_calls} call(s)"
+        drain_exit.contains("flushForExit()"),
+        "drain exit must flush"
     );
-    assert!(source.contains("DispatchSource.makeSignalSource"));
+    let signal_exit = between(&source, "DispatchSource.makeSignalSource", "dispatchMain()");
+    assert!(
+        signal_exit.contains("flushForExit()"),
+        "signal exit must flush"
+    );
+    // Every AUTH_OPEN handler is counted in flight until its receipt is enqueued.
+    let auth_open = between(&source, "case ES_EVENT_TYPE_AUTH_OPEN:", "default:");
+    assert!(auth_open.contains("authInFlight.enter()"));
+    assert!(auth_open.contains("authInFlight.leave()"));
+    // Unknown ancestry on a protected open fails closed in deny-list mode: a
+    // failed parent lookup is not proof the opener is outside the tree.
+    let denylist = between(&source, "case .denylist:", "case .allowlist:");
+    assert!(
+        denylist.contains(".unknown"),
+        "deny-list branch must test .unknown"
+    );
+    assert!(denylist.contains(r#"source = "edge-error""#));
+    let unknown_branch = between(denylist, ".unknown", "} else if");
+    assert!(
+        unknown_branch.contains("allow = false"),
+        "unknown ancestry must DENY"
+    );
+    // A failed kernel response is receipted and the edge exits non-zero, which
+    // the supervisor treats as abnormal.
+    let respond_failure = between(
+        &source,
+        "if rr != ES_RESPOND_RESULT_SUCCESS",
+        "let path = pathForReceipt",
+    );
+    assert!(respond_failure.contains("kernel response failed"));
+    assert!(respond_failure.contains(r#"source: "edge-error""#));
+    assert!(respond_failure.contains("flushReceipts()"));
+    assert!(respond_failure.contains("exit(70)"));
+}
+
+// WO-127: the source slice between two unique markers, so a contract test pins
+// WHERE a call sits (drain exit vs signal handler), not just that it exists.
+fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let s = source
+        .find(start)
+        .unwrap_or_else(|| panic!("marker {start:?} not found"));
+    let rest = &source[s..];
+    let e = rest
+        .find(end)
+        .unwrap_or_else(|| panic!("marker {end:?} not found after {start:?}"));
+    &rest[..e]
 }
 
 // WO-127: pins the Rust convention the edge now matches: std sign-extends the

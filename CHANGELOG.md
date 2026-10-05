@@ -16,8 +16,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   device numbers without crashing and keys them exactly as the Rust side does,
   flushes the receipt log before it exits, and the supervisor exits non-zero with
   an audit record whenever the edge dies abnormally, even after the agent is
-  done. The hardware seal gains direct-exec, `bash -c` and sleep-then-exec
-  shapes against a user-owned `/private/tmp` file, repeated.
+  done. A protected open by a process whose ancestry cannot be established is
+  now denied and receipted as `edge-error` instead of being treated as outside
+  the supervised tree, and a failed kernel response is receipted and ends the
+  run instead of being logged and dropped. The hardware seal gains direct-exec,
+  `bash -c` and sleep-then-exec shapes against a user-owned `/private/tmp`
+  file, repeated, and fails if the edge died, an integrity or `edge-error`
+  record appears, or the static deny receipt does not name the fixture inode.
 <!-- WO-117: the silent fail-open across launches, in user language. -->
 - A policy file that changed between runs is no longer honored silently. Each
   run now records a digest of the `Bulwark.toml` it loaded, keyed by the policy

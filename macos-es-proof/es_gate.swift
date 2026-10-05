@@ -227,23 +227,39 @@ func ancestry(_ pid: pid_t, maxDepth: Int = 16) -> String {
     return parts.joined(separator: " <- ")
 }
 
-func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
+// WO-127: outcome of walking a pid's parent chain. `unknown` means a parent
+// could not be read or the walk hit maxDepth; it is not proof the process is
+// outside the supervised tree, so a protected open must not be allowed on it.
+enum TreeAncestry {
+    case inTree
+    case outside
+    case unknown
+}
+
+func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
     if pid == root {
-        return true
+        return .inTree
     }
     var current = pid
     var depth = 0
-    while current > 1 && depth < maxDepth {
+    while current > 1 {
+        if depth >= maxDepth {
+            return .unknown
+        }
         guard let parent = parentPid(current) else {
-            return false
+            return .unknown
         }
         if parent == root {
-            return true
+            return .inTree
         }
         current = parent
         depth += 1
     }
-    return false
+    return .outside
+}
+
+func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
+    ancestryOf(pid, root: root, maxDepth: maxDepth) == .inTree
 }
 
 func jsonEscape(_ value: String) -> String {
@@ -431,6 +447,18 @@ func flushReceipts() {
     receiptQueue.sync {}
 }
 
+// WO-127: AUTH_OPEN handlers still running. The kernel response goes out before
+// the receipt is built and enqueued, so a shutdown that only drained the receipt
+// queue could exit in between and lose the final receipt. Shutdown first waits
+// (bounded, so a wedged handler cannot hang teardown) for in-flight handlers.
+let authInFlight = DispatchGroup()
+let shutdownWait: DispatchTimeInterval = .seconds(1)
+
+func flushForExit() {
+    _ = authInFlight.wait(timeout: .now() + shutdownWait)
+    flushReceipts()
+}
+
 func receiptLine(
     pid: pid_t,
     key: InodeKey,
@@ -489,7 +517,7 @@ func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {
             // WO-127: the final receipts must reach the log before exit.
-            flushReceipts()
+            flushForExit()
             exit(0)
         }
         // Not empty after the grace — an orphan was recorded; keep enforcing.
@@ -535,12 +563,18 @@ let res = es_new_client(&client) { clientPtr, message in
         return
 
     case ES_EVENT_TYPE_AUTH_OPEN:
+        // WO-127: counted until the receipt is enqueued; see flushForExit().
+        authInFlight.enter()
+        defer { authInFlight.leave() }
         let file = msg.event.open.file
         let key = inodeKey(file)
         // Membership-set first (reparent-proof), ancestry walk only as an
         // additive fallback for a pid we have not yet seen fork (e.g. the very
         // first opens before its NOTIFY_FORK is processed).
-        let treeHit = treeContains(eventPid) || hasAncestor(eventPid, root: config.rootPid)
+        let membership: TreeAncestry = treeContains(eventPid)
+            ? .inTree
+            : ancestryOf(eventPid, root: config.rootPid)
+        let treeHit = membership == .inTree
         if treeHit {
             treeInsert(eventPid)
         }
@@ -553,7 +587,13 @@ let res = es_new_client(&client) { clientPtr, message in
         switch config.mode {
         case .denylist:
             let protectedHit = config.protected.contains(key)
-            if !treeHit {
+            if !treeHit && protectedHit && membership == .unknown {
+                // WO-127: a failed parent lookup is not proof the opener is
+                // outside the supervised tree; a protected open fails closed.
+                allow = false
+                source = "edge-error"
+                reason = "protected inode opened by a process whose ancestry could not be established"
+            } else if !treeHit {
                 allow = true
                 source = "outside-tree"
                 reason = protectedHit ? "protected inode opened outside supervised tree" : "outside supervised tree"
@@ -625,7 +665,20 @@ let res = es_new_client(&client) { clientPtr, message in
         }
         if rr != ES_RESPOND_RESULT_SUCCESS {
             FileHandle.standardError.write("[bulwark-es] FATAL respond_flags_result=\(rr.rawValue)\n".data(using: .utf8)!)
-            return
+            // WO-127: the kernel never got this answer, so the open is left to its
+            // deadline. Record it, flush, and exit non-zero: the supervisor treats
+            // a non-zero edge exit as abnormal, kills a live child and fails the run.
+            appendReceipt(receiptLine(
+                pid: eventPid,
+                key: key,
+                decision: allow ? "allow" : "deny",
+                source: "edge-error",
+                path: pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt,
+                ancestry: ancestry(eventPid),
+                reason: "kernel response failed (\(rr.rawValue)); intended \(allow ? "allow" : "deny")"
+            ))
+            flushReceipts()
+            exit(70)
         }
 
         let path = pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt
@@ -701,15 +754,15 @@ FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.m
 
 // WO-127: the Rust supervisor stops the edge with SIGTERM at the end of every
 // run. Handle SIGINT/SIGTERM on a dispatch queue instead of in a C signal
-// handler, which may only call async-signal-safe functions, so the queued
-// receipts can be flushed before exit. Exit status stays 0, as before.
+// handler, which may only call async-signal-safe functions, so in-flight
+// decisions and queued receipts can be flushed before exit. Exit status stays 0.
 let signalQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.signals")
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM] {
     signal(sig, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
     source.setEventHandler {
-        flushReceipts()
+        flushForExit()
         exit(0)
     }
     source.resume()
