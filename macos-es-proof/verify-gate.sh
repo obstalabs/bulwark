@@ -216,8 +216,8 @@ echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ]
 # shape below must be denied AND leave a `source: static` deny receipt, on
 # every repetition; the receipts are root-owned, so they are read with sudo.
 # ---------------------------------------------------------------------------
-echo
 # WO-127@v4: user-owned /private/tmp fixture for the direct-exec seal shapes.
+echo
 USER_FIX_DIR="/private/tmp/bulwark-gate-user.$$"
 USER_FIX="$USER_FIX_DIR/guarded.txt"
 mkdir -p "$USER_FIX_DIR"
