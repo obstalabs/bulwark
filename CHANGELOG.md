@@ -28,6 +28,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   archive required glibc 2.39 and did not load cleanly on Debian 12 or Ubuntu
   22.04.
 
+### Changed
+<!-- WO-128@v1: measurement instrument; the allow/deny decision is unchanged. -->
+- macOS allow-list receipts now say when an open outside the supervised tree came
+  from a process whose ancestry could not be established, instead of reporting it
+  as an ordinary outside open. Decisions are unchanged.
+
 ## [0.9.1] - 2026-10-05
 
 ### Security
