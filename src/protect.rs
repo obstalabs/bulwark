@@ -63,6 +63,14 @@ pub struct ProtectedSet {
     origins: Vec<ProtectedOrigin>, // WO-24: first resolved path for each inode
 }
 
+// WO-131@v1: what lenient resolution kept and what it dropped. `present` is the
+// list the gate may mark; `skipped` is reported to the operator by name.
+pub struct LenientResolution {
+    pub set: ProtectedSet,
+    pub present: Vec<std::path::PathBuf>,
+    pub skipped: Vec<std::path::PathBuf>,
+}
+
 impl ProtectedSet {
     /// Resolve each path to its inode. A directory contributes its own inode and
     /// is recorded as a protected directory, then is walked recursively (bounded
@@ -86,27 +94,37 @@ impl ProtectedSet {
     /// Resolve protected paths leniently: paths that do not exist are skipped
     /// rather than erroring. This suits a default profile that lists credential
     /// stores (`~/.aws`, `~/.kube`, ...) which may be absent on a given host.
-    /// Returns the set plus the count of skipped (missing) paths.
-    pub fn resolve_lenient<I, P>(paths: I) -> (Self, usize)
+    /// Returns the set together with the paths that resolved and the paths that
+    /// were skipped, so the caller marks exactly what resolved.
+    // WO-131@v1: the caller used to mark every requested path, skipped ones
+    // included, and fanotify_mark on an absent `~/.ssh` aborted the run with
+    // ENOENT. Report which paths resolved instead of only counting the rest.
+    pub fn resolve_lenient<I, P>(paths: I) -> LenientResolution
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
         let mut b = Build::default();
-        let mut skipped = 0usize;
+        let mut present = Vec::new();
+        let mut skipped = Vec::new();
         for p in paths {
             let p = p.as_ref();
             let meta = match fs::metadata(p) {
                 Ok(m) => m,
                 Err(_) => {
-                    skipped += 1;
+                    skipped.push(p.to_path_buf());
                     continue;
                 }
             };
             b.add(p, &meta, 0);
+            present.push(p.to_path_buf());
         }
         b.warn_if_capped();
-        (b.into_set(), skipped)
+        LenientResolution {
+            set: b.into_set(),
+            present,
+            skipped,
+        }
     }
 
     /// True if this inode is in the launch snapshot (open should be denied).
@@ -358,6 +376,33 @@ mod tests {
             !set.protects(&k, &s(&secret)),
             "a file outside the protected tree must stay allowed"
         );
+    }
+
+    /// WO-131@v1: an absent path is skipped from the set AND reported as skipped,
+    /// never as a path to mark; the present path is reported for marking. The
+    /// gate marking an absent `~/.ssh` is what aborted the run with ENOENT.
+    #[test]
+    fn lenient_resolution_separates_present_from_skipped() {
+        let base = scratch("lenient");
+        let present = base.join("present");
+        fs::create_dir_all(&present).unwrap();
+        let inside = present.join("id_key");
+        fs::write(&inside, b"k").unwrap();
+        let absent = base.join("no-such-dot-ssh");
+
+        let r = ProtectedSet::resolve_lenient([present.as_path(), absent.as_path()]);
+        assert_eq!(
+            r.present,
+            vec![present.clone()],
+            "only the existing path may be marked"
+        );
+        assert_eq!(
+            r.skipped,
+            vec![absent.clone()],
+            "the absent path is named, not just counted"
+        );
+        assert!(!r.set.is_empty());
+        assert!(r.set.protects(&key_of(&inside), &s(&inside)));
     }
 
     /// Recursion does not follow a symlinked directory out of the tree: a file

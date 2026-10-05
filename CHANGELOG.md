@@ -16,6 +16,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/dev/null`, `/etc/passwd`, `/etc/resolv.conf` and every other file in the
   runtime base set or a file-level `--allow` were silently left unreadable; the
   stderr line for a dropped rule now includes the OS error.
+<!-- WO-131@v1: skipped-as-absent paths were still handed to fanotify_mark. -->
+- A policy that names a protected path absent on this host (the default
+  profile's `~/.ssh` on a fresh runner, for example) no longer aborts the run
+  with `fanotify_mark ... No such file or directory`: only the paths that
+  resolved are marked, and the skip note now names the absent paths.
 
 ## [0.9.1] - 2026-10-05
 

@@ -2147,14 +2147,25 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 policy.protected_globs(&home).len()
             );
         }
-        let (set, skipped) = ProtectedSet::resolve_lenient(&concrete);
-        if skipped > 0 {
+        let resolved = ProtectedSet::resolve_lenient(&concrete);
+        if !resolved.skipped.is_empty() {
+            let names = resolved
+                .skipped
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             eprintln!(
-                "[bulwark] note: {skipped} protected path(s) not present on this host, skipped"
+                "[bulwark] note: {} protected path(s) not present on this host, skipped: {names}",
+                resolved.skipped.len()
             );
         }
-        let marks: Vec<PathBuf> = concrete.iter().map(PathBuf::from).collect();
-        (set, marks)
+        // WO-131@v1: mark only the paths that resolved. Marking every requested
+        // path handed the skipped, absent ones to fanotify_mark too, which failed
+        // with ENOENT and aborted the run (seen on the CI runner for ~/.ssh). A
+        // path that exists but cannot be marked still refuses the run in the gate.
+        let marks = resolved.present.clone();
+        (resolved.set, marks)
     };
 
     // Integrity circuit-breaker (WO-13): evaluate whether this run is tainted by
