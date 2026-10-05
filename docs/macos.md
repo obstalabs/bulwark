@@ -43,6 +43,11 @@ a run is active, a process outside the run whose ancestry cannot be read (for
 example a backup tool that is exiting) is also denied the protected file; this is
 deliberate fail-closed behaviour, not a bug.
 
+Known gap, not yet fixed: the default-deny allow-list mode (`--deny-all --allow`)
+still treats a process whose ancestry cannot be read as outside the supervised
+tree, so such a process is not held to the allow-list. Deny-list mode (the
+default, `--protect`) does not have this gap.
+
 ## Crash posture (honest limitation)
 
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,
