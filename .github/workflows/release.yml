@@ -46,7 +46,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (aarch64)
+      - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked
 
@@ -58,28 +58,15 @@ jobs:
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
 
-      # WO-135@v2: a gnu binary that needs a newer glibc than GLIBC_FLOOR fails
-      # at load time on Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34),
-      # which is how 0.9.1 shipped a binary wanting 2.39. Fail the build instead.
-      # readelf reads any ELF regardless of the runner's own architecture.
+      # WO-135@v2: a gnu binary that needs a newer glibc than the floor fails at
+      # load time on Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34),
+      # which is how 0.9.1 shipped a binary wanting 2.39. One guard, shared with
+      # PR CI, fails the build instead: scripts/check-glibc-floor.sh (floor 2.31,
+      # GLIBC_FLOOR to override). readelf reads any ELF regardless of the
+      # runner's own architecture.
       - name: Assert glibc floor (gnu)
         if: ${{ !matrix.static }}
-        env:
-          GLIBC_FLOOR: "2.31"
-        run: |
-          set -o pipefail
-          bin="target/${{ matrix.target }}/release/bulwark"
-          need=$(readelf -V "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -uV | awk 'END{print}')
-          echo "${{ matrix.target }}: highest glibc symbol version required = ${need:-none}; floor = ${GLIBC_FLOOR}"
-          if [ -z "$need" ]; then
-            echo "::error::${{ matrix.target }}: no GLIBC_ symbol versions found; is $bin a glibc binary?"
-            exit 1
-          fi
-          highest=$(printf '%s\n%s\n' "$need" "$GLIBC_FLOOR" | sort -V | awk 'END{print}')
-          if [ "$highest" != "$GLIBC_FLOOR" ]; then
-            echo "::error::${{ matrix.target }} requires glibc ${need}, above the floor ${GLIBC_FLOOR}"
-            exit 1
-          fi
+        run: scripts/check-glibc-floor.sh "target/${{ matrix.target }}/release/bulwark"
 
       - name: Assert static linkage (musl)
         if: matrix.static

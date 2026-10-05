@@ -26,8 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before launch, naming the path and the OS error.
 <!-- WO-135@v2: the 0.9.1 x86_64 gnu binary required glibc 2.39. -->
 - The static musl build is now the documented Linux install, and the glibc
-  (`-gnu`) builds are cross-compiled against glibc 2.31 with a release-time
-  check that fails if a binary needs anything newer; the 0.9.1 x86_64 gnu
+  (`-gnu`) builds are cross-compiled against glibc 2.31 with a check in both
+  the release and PR workflows that fails if either gnu binary needs anything
+  newer, or needs a loader feature the floor cannot vouch for; the 0.9.1 x86_64 gnu
   archive required glibc 2.39 and did not load cleanly on Debian 12 or Ubuntu
   22.04.
 
