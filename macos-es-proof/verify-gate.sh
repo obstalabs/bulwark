@@ -52,18 +52,47 @@ validate_reps() {
 # Evidence is fed to grep as here-strings or file arguments, never through a
 # producer pipe: under pipefail a `printf | grep -q` match on a body larger than
 # the pipe buffer kills printf with SIGPIPE and turns the match into "not found".
-# Missing evidence is a failure in its own right, never a pass.
+# Missing evidence is a failure in its own right, never a pass, and so is a
+# grep that could not inspect the evidence: every grep below is tri-state
+# (0 = match, 1 = no match, anything else = inspection failed), because a read
+# error reported as exit 2 must never be read as "not found".
+#
+# evidence_grep <what> <pattern> [file]: sets EVIDENCE_HIT=1 on a match, 0 on no
+# match; when grep itself failed it sets EVIDENCE_REASON and returns 1. Without
+# a file argument the subject is the here-string in EVIDENCE_TEXT. It is called
+# directly, never in a command substitution, so the globals reach the caller.
+evidence_grep() {
+  local what="$1" pattern="$2" rc
+  EVIDENCE_HIT=0
+  EVIDENCE_REASON=""
+  if [ "$#" -ge 3 ]; then
+    grep -q -- "$pattern" "$3"; rc=$?
+  else
+    grep -q -- "$pattern" <<<"$EVIDENCE_TEXT"; rc=$?
+  fi
+  case "$rc" in
+    0) EVIDENCE_HIT=1 ;;
+    1) EVIDENCE_HIT=0 ;;
+    *) EVIDENCE_REASON="evidence inspection failed ($what, grep $rc)"; return 1 ;;
+  esac
+}
+
 shape_verdict() {
   local out="$1" err="$2" rcpt="$3" ino="$4" body
-  if grep -q "top-secret" <<<"$out"; then echo "content printed"; return; fi
+  EVIDENCE_TEXT="$out"
+  evidence_grep "stdout content" "top-secret" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "content printed"; return; fi
   if [ ! -r "$err" ]; then echo "stderr file missing or unreadable: $err"; return; fi
-  if grep -q "ES edge exited" "$err"; then echo "abnormal edge exit reported"; return; fi
+  evidence_grep "stderr file" "ES edge exited" "$err" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "abnormal edge exit reported"; return; fi
   if ! body=$($RECEIPT_READER "$rcpt" 2>/dev/null); then echo "receipt reader failed for $rcpt"; return; fi
-  if grep -q '"source":"integrity"' <<<"$body"; then echo "integrity record in receipts"; return; fi
-  if grep -q '"source":"edge-error"' <<<"$body"; then echo "edge-error record in receipts"; return; fi
-  if ! grep -q "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"static\"" <<<"$body"; then
-    echo "no static deny receipt for fixture ino $ino"; return
-  fi
+  EVIDENCE_TEXT="$body"
+  evidence_grep "integrity receipt" '"source":"integrity"' || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "integrity record in receipts"; return; fi
+  evidence_grep "edge-error receipt" '"source":"edge-error"' || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" = 1 ]; then echo "edge-error record in receipts"; return; fi
+  evidence_grep "static deny receipt" "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"static\"" || { echo "$EVIDENCE_REASON"; return; }
+  if [ "$EVIDENCE_HIT" != 1 ]; then echo "no static deny receipt for fixture ino $ino"; return; fi
 }
 
 if [ -n "${VERIFY_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi

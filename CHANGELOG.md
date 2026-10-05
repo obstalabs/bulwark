@@ -24,7 +24,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run. The hardware seal gains direct-exec,
   `bash -c` and sleep-then-exec shapes against a user-owned `/private/tmp`
   file, repeated, and fails if the edge died, an integrity or `edge-error`
-  record appears, or the static deny receipt does not name the fixture inode.
+  record appears, the static deny receipt does not name the fixture inode, or
+  any piece of evidence could not be read.
 <!-- WO-117: the silent fail-open across launches, in user language. -->
 - A policy file that changed between runs is no longer honored silently. Each
   run now records a digest of the `Bulwark.toml` it loaded, keyed by the policy
