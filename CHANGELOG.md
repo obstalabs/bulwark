@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
 - Unit tests no longer name their scratch directories by process id alone, so a
   leftover directory from another user or a root step cannot make them fail.
+<!-- WO-134@v1: file-level Landlock rules were dropped; hardened mode could not read /dev/null. -->
+- `--hardened` now grants read access to regular files and devices on the allow
+  list, not only directories. Landlock rejected the directory right on a file, so
+  `/dev/null`, `/etc/passwd`, `/etc/resolv.conf` and every other file in the
+  runtime base set or a file-level `--allow` were silently left unreadable; the
+  stderr line for a dropped rule now includes the OS error.
 
 ## [0.9.1] - 2026-10-05
 
