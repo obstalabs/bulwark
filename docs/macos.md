@@ -34,6 +34,15 @@ The seal harness (`verify-gate.sh`) now covers a directly exec'd `cat`, `bash -c
 and a sleep-then-exec shape against a user-owned file under `/private/tmp`,
 repeated. Until you are on 0.9.1, do not rely on the macOS gate on macOS 27.
 
+Two behaviours of the fixed edge are worth knowing. If the edge cannot deliver a
+deny to the kernel, it records an `edge-error` receipt marked "intended deny" and
+exits with code 70; the kernel may still allow that one pending open after the
+edge is gone, so a few bytes can be read before the supervisor kills the agent,
+and the run fails loudly rather than reporting success. In deny-list mode, while
+a run is active, a process outside the run whose ancestry cannot be read (for
+example a backup tool that is exiting) is also denied the protected file; this is
+deliberate fail-closed behaviour, not a bug.
+
 ## Crash posture (honest limitation)
 
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,

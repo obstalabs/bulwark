@@ -24,48 +24,61 @@
 #   - BULWARK_MACOS_ES_GATE exported to the edge binary inside the bundle
 #   - the calling terminal has Full Disk Access
 set -uo pipefail
-cd "$(dirname "$0")"
-
-BULWARK="${BULWARK:-./bulwark}"
-GATE_APP="bulwark_es_gate.app"
-GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
-GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
-RECEIPT="gate-receipt.txt"
 
 fail() { echo "!! $*"; exit 2; }
 
-# WO-127: TEST 6 helpers. Pure (no sudo, no side effects) so their rejections
-# can be exercised without root: `VERIFY_GATE_LIB_ONLY=1 . ./verify-gate.sh`
-# defines them and returns before anything else runs.
+# WO-127: TEST 6 helpers. Pure (no sudo, no cd, no side effects) so their
+# rejections can be exercised without root: `VERIFY_GATE_LIB_ONLY=1 . ./verify-gate.sh`
+# defines them and returns before anything below the marker runs.
 REPS="${REPS:-5}"
 RECEIPT_READER="${RECEIPT_READER:-sudo cat}"   # receipts are root-owned 0600
+# Upper bound for REPS: each repetition is three sudo'd gate runs, and 3*REPS is
+# computed in shell arithmetic, so the value must stay small enough to be both
+# finite in wall-clock terms and far from any integer wrap.
+MAX_REPS=1000
 
-# validate_reps <value>: a positive integer and nothing else. REPS=invalid used
-# to run zero shapes and still seal.
+# validate_reps <value>: a positive integer within MAX_REPS and nothing else.
+# REPS=invalid used to run zero shapes and still seal; a huge REPS used to wrap.
 validate_reps() {
-  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "${#1}" -le "${#MAX_REPS}" ] || return 1
+  [ "$1" -le "$MAX_REPS" ]
 }
 
 # shape_verdict <stdout> <stderr-file> <receipts-file> <fixture-ino>: print the
 # first reason a shape FAILS, nothing when it is a clean static deny. A shape is
 # only a deny if the content stayed hidden, the edge did not die, no integrity or
 # edge-error record was written, and a static deny receipt names the fixture inode.
+# Evidence is fed to grep as here-strings or file arguments, never through a
+# producer pipe: under pipefail a `printf | grep -q` match on a body larger than
+# the pipe buffer kills printf with SIGPIPE and turns the match into "not found".
+# Missing evidence is a failure in its own right, never a pass.
 shape_verdict() {
   local out="$1" err="$2" rcpt="$3" ino="$4" body
-  if printf '%s' "$out" | grep -q "top-secret"; then echo "content printed"; return; fi
-  if grep -q "ES edge exited" "$err" 2>/dev/null; then echo "abnormal edge exit reported"; return; fi
-  body=$($RECEIPT_READER "$rcpt" 2>/dev/null)
-  if printf '%s' "$body" | grep -q '"source":"integrity"'; then echo "integrity record in receipts"; return; fi
-  if printf '%s' "$body" | grep -q '"source":"edge-error"'; then echo "edge-error record in receipts"; return; fi
-  if ! printf '%s' "$body" | grep -q "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"static\""; then
+  if grep -q "top-secret" <<<"$out"; then echo "content printed"; return; fi
+  if [ ! -r "$err" ]; then echo "stderr file missing or unreadable: $err"; return; fi
+  if grep -q "ES edge exited" "$err"; then echo "abnormal edge exit reported"; return; fi
+  if ! body=$($RECEIPT_READER "$rcpt" 2>/dev/null); then echo "receipt reader failed for $rcpt"; return; fi
+  if grep -q '"source":"integrity"' <<<"$body"; then echo "integrity record in receipts"; return; fi
+  if grep -q '"source":"edge-error"' <<<"$body"; then echo "edge-error record in receipts"; return; fi
+  if ! grep -q "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"static\"" <<<"$body"; then
     echo "no static deny receipt for fixture ino $ino"; return
   fi
 }
 
 if [ -n "${VERIFY_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
+# ---- executable-only setup from here on (not run when sourced as a library) ----
 # WO-127: refuse a bad REPS before any test runs, so a typo cannot seal nothing.
-validate_reps "$REPS" || fail "REPS must be a positive integer (got '$REPS')"
+validate_reps "$REPS" || fail "REPS must be a positive integer no greater than $MAX_REPS (got '$REPS')"
+
+cd "$(dirname "$0")" || fail "cannot enter the harness directory"
+
+BULWARK="${BULWARK:-./bulwark}"
+GATE_APP="bulwark_es_gate.app"
+GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
+GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
+RECEIPT="gate-receipt.txt"
 
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE — run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
@@ -195,7 +208,10 @@ shape_denied() {
     sed 's/^/     stderr: /' "$err" | tail -5
   fi
 }
-for i in $(seq 1 "$REPS"); do
+# WO-127: enumerate once and fail loudly if that fails, instead of letting an
+# empty expansion silently run zero shapes.
+REP_LIST=$(seq 1 "$REPS") || fail "cannot enumerate REPS=$REPS"
+for i in $REP_LIST; do
   shape_denied "direct.$i" DIRECT_OK /bin/cat "$USER_FIX"
   shape_denied "bashc.$i"  BASHC_OK  /bin/bash -c "cat '$USER_FIX'"
   shape_denied "sleep.$i"  SLEEP_OK  /bin/sh -c "sleep 1; exec cat '$USER_FIX'"

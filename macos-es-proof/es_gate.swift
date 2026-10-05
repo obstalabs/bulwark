@@ -447,16 +447,28 @@ func flushReceipts() {
     receiptQueue.sync {}
 }
 
-// WO-127: AUTH_OPEN handlers still running. The kernel response goes out before
-// the receipt is built and enqueued, so a shutdown that only drained the receipt
-// queue could exit in between and lose the final receipt. Shutdown first waits
-// (bounded, so a wedged handler cannot hang teardown) for in-flight handlers.
+// WO-127: AUTH_OPEN handlers for the supervised tree (or unknown ancestry) still
+// running. The kernel response goes out before the receipt is built and
+// enqueued, so a shutdown that only drained the receipt queue could exit in
+// between and lose the final receipt. Only tree-relevant opens are counted: the
+// client sees every open on the host, and once the tree has drained no new
+// tree open can start, so this group empties promptly at teardown.
 let authInFlight = DispatchGroup()
-let shutdownWait: DispatchTimeInterval = .seconds(1)
+// Bounded so a wedged handler cannot hang teardown, and kept inside the 500 ms
+// (20 x 25 ms) the Rust terminate_edge() allows after SIGTERM before SIGKILL.
+let shutdownWait: DispatchTimeInterval = .milliseconds(400)
+// Exit status when in-flight decisions did not finish in time: their receipts
+// may be missing, so the run must not look clean (the supervisor fails any
+// non-zero edge exit).
+let exitReceiptsIncomplete: Int32 = 71
 
-func flushForExit() {
-    _ = authInFlight.wait(timeout: .now() + shutdownWait)
+func flushForExit() -> Bool {
+    let drained = authInFlight.wait(timeout: .now() + shutdownWait) == .success
     flushReceipts()
+    if !drained {
+        FileHandle.standardError.write("[bulwark-es] FATAL decisions still in flight at shutdown; receipts may be incomplete\n".data(using: .utf8)!)
+    }
+    return drained
 }
 
 func receiptLine(
@@ -516,9 +528,9 @@ let drainGrace: DispatchTimeInterval = .milliseconds(100)
 func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {
-            // WO-127: the final receipts must reach the log before exit.
-            flushForExit()
-            exit(0)
+            // WO-127: this is how a normal run ends; the final receipts must
+            // reach the log, and a flush that timed out must not exit clean.
+            exit(flushForExit() ? 0 : exitReceiptsIncomplete)
         }
         // Not empty after the grace — an orphan was recorded; keep enforcing.
         // Its eventual EXIT will reschedule this check.
@@ -563,9 +575,6 @@ let res = es_new_client(&client) { clientPtr, message in
         return
 
     case ES_EVENT_TYPE_AUTH_OPEN:
-        // WO-127: counted until the receipt is enqueued; see flushForExit().
-        authInFlight.enter()
-        defer { authInFlight.leave() }
         let file = msg.event.open.file
         let key = inodeKey(file)
         // Membership-set first (reparent-proof), ancestry walk only as an
@@ -577,6 +586,17 @@ let res = es_new_client(&client) { clientPtr, message in
         let treeHit = membership == .inTree
         if treeHit {
             treeInsert(eventPid)
+        }
+        // WO-127: count tree-relevant decisions until their receipt is enqueued;
+        // see authInFlight and flushForExit().
+        let tracked = membership != .outside
+        if tracked {
+            authInFlight.enter()
+        }
+        defer {
+            if tracked {
+                authInFlight.leave()
+            }
         }
 
         let allow: Bool
@@ -752,18 +772,19 @@ guard sub == ES_RETURN_SUCCESS else {
 
 FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
 
-// WO-127: the Rust supervisor stops the edge with SIGTERM at the end of every
-// run. Handle SIGINT/SIGTERM on a dispatch queue instead of in a C signal
-// handler, which may only call async-signal-safe functions, so in-flight
-// decisions and queued receipts can be flushed before exit. Exit status stays 0.
+// WO-127: a normal run ends through the drain exit above; the Rust supervisor
+// sends SIGTERM only when startup fails (terminate_edge), and an operator may
+// send SIGINT. Handle both on a dispatch queue instead of in a C signal handler,
+// which may only call async-signal-safe functions, so in-flight decisions and
+// queued receipts can be flushed before exit; a flush that timed out exits
+// non-zero instead of 0.
 let signalQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.signals")
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM] {
     signal(sig, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
     source.setEventHandler {
-        flushForExit()
-        exit(0)
+        exit(flushForExit() ? 0 : exitReceiptsIncomplete)
     }
     source.resume()
     signalSources.append(source)

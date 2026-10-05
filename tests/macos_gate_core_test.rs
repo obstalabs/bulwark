@@ -77,22 +77,44 @@ fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
     );
     // In-flight-aware shutdown must guard BOTH exit paths: the tree-drain exit
     // and the SIGINT/SIGTERM source the Rust supervisor uses to stop the edge.
-    assert!(source.contains("func flushForExit()"));
+    // A flush that timed out must not exit clean: flushForExit() reports whether
+    // the in-flight decisions drained, and both exits turn a false into the
+    // dedicated non-zero code the supervisor treats as abnormal.
+    assert!(source.contains("func flushForExit() -> Bool"));
     assert!(source.contains("func flushReceipts()"));
+    assert!(source.contains("let exitReceiptsIncomplete: Int32 = 71"));
+    let exit_expr = "exit(flushForExit() ? 0 : exitReceiptsIncomplete)";
     let drain_exit = between(&source, "func scheduleDrainExit()", "var allowOnce");
     assert!(
-        drain_exit.contains("flushForExit()"),
-        "drain exit must flush"
+        drain_exit.contains(exit_expr),
+        "drain exit must flush and fail on timeout"
     );
     let signal_exit = between(&source, "DispatchSource.makeSignalSource", "dispatchMain()");
     assert!(
-        signal_exit.contains("flushForExit()"),
-        "signal exit must flush"
+        signal_exit.contains(exit_expr),
+        "signal exit must flush and fail on timeout"
     );
-    // Every AUTH_OPEN handler is counted in flight until its receipt is enqueued.
+    // The wait is bounded well inside the supervisor's SIGTERM-to-SIGKILL window.
+    let wait_decl = between(&source, "let shutdownWait", "\n");
+    assert!(
+        wait_decl.contains(".milliseconds(400)"),
+        "shutdownWait must be 400 ms; got {wait_decl}"
+    );
+    // Only tree-relevant decisions are counted in flight (the client sees every
+    // open on the host); the guard is the same on enter and on leave.
     let auth_open = between(&source, "case ES_EVENT_TYPE_AUTH_OPEN:", "default:");
-    assert!(auth_open.contains("authInFlight.enter()"));
-    assert!(auth_open.contains("authInFlight.leave()"));
+    assert!(auth_open.contains("let tracked = membership != .outside"));
+    let enter = between(auth_open, "if tracked {", "}");
+    assert!(
+        enter.contains("authInFlight.enter()"),
+        "enter must be guarded by tracked"
+    );
+    let leave = between(auth_open, "defer {", "let allow: Bool");
+    assert!(
+        leave.contains("if tracked"),
+        "leave must be guarded by tracked"
+    );
+    assert!(leave.contains("authInFlight.leave()"));
     // Unknown ancestry on a protected open fails closed in deny-list mode: a
     // failed parent lookup is not proof the opener is outside the tree.
     let denylist = between(&source, "case .denylist:", "case .allowlist:");

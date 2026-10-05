@@ -19,7 +19,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   done. A protected open by a process whose ancestry cannot be established is
   now denied and receipted as `edge-error` instead of being treated as outside
   the supervised tree, and a failed kernel response is receipted and ends the
-  run instead of being logged and dropped. The hardware seal gains direct-exec,
+  run instead of being logged and dropped. An edge that cannot finish writing
+  its receipts before it exits now exits non-zero instead of reporting a clean
+  run. The hardware seal gains direct-exec,
   `bash -c` and sleep-then-exec shapes against a user-owned `/private/tmp`
   file, repeated, and fails if the edge died, an integrity or `edge-error`
   record appears, or the static deny receipt does not name the fixture inode.
