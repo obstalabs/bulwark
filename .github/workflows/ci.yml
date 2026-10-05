@@ -114,6 +114,9 @@ jobs:
       - name: Remote consent integration tests (decision/prompt split, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test remote_consent -- --ignored --test-threads=1
 
+      - name: Integrity taint integration tests (policy digest, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test integrity_taint -- --ignored --test-threads=1
+
   supply-chain:
     name: supply-chain (cargo-deny)
     # Audits the dependency tree on every PR: RustSec security advisories, yanked

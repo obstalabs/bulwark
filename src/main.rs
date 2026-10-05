@@ -70,11 +70,6 @@ use socket::SocketProvider;
 /// Canonical policy file name used when creating a new file.
 const POLICY_FILE: &str = "Bulwark.toml";
 
-/// Policy epoch for the integrity record (WO-13). Bumping it taints existing
-/// runs as a policy change. The MVP uses a fixed epoch — a future change that
-/// edits live policy will thread the real epoch through here.
-const POLICY_EPOCH: u64 = 1;
-
 /// Accepted policy file names in the current directory, in precedence order.
 /// We accept both casings so `bulwark.toml` and `Bulwark.toml` both work on
 /// case-sensitive filesystems (Linux); on case-insensitive ones either resolves
@@ -116,6 +111,39 @@ fn find_policy_file() -> Option<PathBuf> {
         .map(Path::new)
         .find(|p| p.exists())
         .map(Path::to_path_buf)
+}
+
+// WO-117: the directory `find_policy_file` searches, which keys the integrity
+// record for auto-discovered policies (both casings share one baseline).
+// WO-117 (R2): no fallback to "."; an unresolvable cwd refuses the run.
+fn discovery_dir() -> Result<PathBuf> {
+    std::env::current_dir()
+        .context("cannot resolve the current directory the policy search is keyed by")
+}
+
+// WO-117: resolve a `run`'s policy source with the same precedence as
+// `load_policy`, so the integrity digest describes the policy actually loaded:
+// explicit --protect and --profile load no file (nothing an in-tree agent can
+// rewrite), --policy is explicit, otherwise the cwd search, which records the
+// directory even when no file exists so a file created there later is a change.
+fn run_policy_source(
+    protect: &[PathBuf],
+    profile: Option<&str>,
+    policy_path: Option<&Path>,
+) -> Result<Option<integrity::PolicySource>> {
+    if !protect.is_empty() {
+        return Ok(None);
+    }
+    if let Some(path) = policy_path {
+        return Ok(Some(integrity::PolicySource::Explicit(path.to_path_buf())));
+    }
+    if profile.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(integrity::PolicySource::Discovered {
+        dir: discovery_dir()?,
+        file: find_policy_file(),
+    }))
 }
 
 /// Output format for commands that support machine-readable output. `human` is
@@ -551,6 +579,15 @@ fn main() -> Result<()> {
                 protect: &protect,
                 profile: profile.as_deref(),
                 policy_path: policy.as_deref(),
+                // WO-117: `run` resolves a source here and snapshots it once inside cmd_run.
+                policy_input: match run_policy_source(
+                    &protect,
+                    profile.as_deref(),
+                    policy.as_deref(),
+                )? {
+                    Some(source) => PolicyInput::Resolve(source),
+                    None => PolicyInput::None,
+                },
                 receipts: receipts.as_deref(),
                 consent,
                 consent_socket,
@@ -1669,6 +1706,9 @@ struct RunArgs<'a> {
     protect: &'a [PathBuf],
     profile: Option<&'a str>,
     policy_path: Option<&'a Path>,
+    // WO-117: how `cmd_run` obtains the policy it digests: nothing (--protect or
+    // --profile), a source to snapshot once, or the snapshot `launch` took.
+    policy_input: PolicyInput,
     receipts: Option<&'a Path>,
     consent: ConsentMode,
     consent_socket: Option<PathBuf>,
@@ -1715,6 +1755,23 @@ fn launch_policy_path(agent: &str, policy_path: Option<&Path>) -> Result<PathBuf
     })
 }
 
+// WO-117: `launch` hands `run` a --protect plan, so it must also hand over the
+// policy source it was derived from, or the launch path would never record a
+// policy digest and an in-tree rewrite of Bulwark.toml would go unnoticed.
+fn launch_policy_source(
+    agent: &str,
+    policy_path: Option<&Path>,
+) -> Result<integrity::PolicySource> {
+    let resolved = launch_policy_path(agent, policy_path)?;
+    Ok(match policy_path {
+        Some(_) => integrity::PolicySource::Explicit(resolved),
+        None => integrity::PolicySource::Discovered {
+            dir: discovery_dir()?,
+            file: Some(resolved),
+        },
+    })
+}
+
 fn cmd_launch(
     agent: &str,
     policy_path: Option<&Path>,
@@ -1732,9 +1789,11 @@ fn cmd_launch(
         return cmd_launch_init(agent, &target).map(|()| 0);
     }
 
-    let policy_path = launch_policy_path(agent, policy_path)?;
-    let policy = Policy::load(&policy_path)?;
-    let plan = resolve_launch_plan(agent, &policy)?;
+    // WO-117 (R1): one open and one read; the plan and the integrity record
+    // both come from this snapshot, and cmd_run receives it instead of re-reading.
+    let policy_source = launch_policy_source(agent, policy_path)?;
+    let snapshot = snapshot_policy(&policy_source)?;
+    let plan = resolve_launch_plan(agent, &snapshot.policy)?;
     let default_receipts = if plan.audit && receipts.is_none() {
         Some(PathBuf::from("bulwark-audit.jsonl"))
     } else {
@@ -1744,6 +1803,7 @@ fn cmd_launch(
         protect: &plan.protect,
         profile: None,
         policy_path: None,
+        policy_input: PolicyInput::Ready(Box::new(snapshot)),
         receipts: receipts.or(default_receipts.as_deref()),
         consent: plan.consent,
         consent_socket,
@@ -1973,7 +2033,7 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(args: RunArgs) -> Result<i32> {
+fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
     // kernel on the agent process itself. This call does not return on success
@@ -2053,6 +2113,15 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
 
     let home = home_dir();
 
+    // WO-117 (R1): the policy file is opened and read exactly once per run, for
+    // both parsing and digesting. `launch` already took its snapshot; `run`
+    // takes it here from the source the dispatcher resolved.
+    let snapshot = match std::mem::replace(&mut args.policy_input, PolicyInput::None) {
+        PolicyInput::Ready(snapshot) => Some(*snapshot),
+        PolicyInput::Resolve(source) => Some(snapshot_policy(&source)?),
+        PolicyInput::None => None,
+    };
+
     let (protected, mark_paths): (ProtectedSet, Vec<PathBuf>) = if !args.protect.is_empty() {
         // Explicit paths: strict resolution (a missing path is an error).
         let set = ProtectedSet::resolve(args.protect)?;
@@ -2060,7 +2129,16 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
     } else {
         // Policy-driven: explicit --policy, else --profile, else a Bulwark.toml
         // in the cwd, else the built-in default profile.
-        let policy = load_policy(args.profile, args.policy_path)?;
+        // WO-117: a file-backed policy is the snapshot's parsed bytes, the same
+        // bytes the integrity record below digests; --profile loads no file.
+        let profile_policy;
+        let policy: &Policy = match &snapshot {
+            Some(s) => &s.policy,
+            None => {
+                profile_policy = load_policy(args.profile, args.policy_path)?;
+                &profile_policy
+            }
+        };
         let concrete = policy.concrete_protected_paths(&home);
         if !policy.protected_globs(&home).is_empty() {
             eprintln!(
@@ -2088,10 +2166,14 @@ fn cmd_run(args: RunArgs) -> Result<i32> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(integrity::DEFAULT_STATE_PATH));
     let objects = protected_object_ids(&mark_paths);
-    let run_ctx = integrity::RunContext {
-        policy_epoch: POLICY_EPOCH,
-        objects,
-    };
+    // WO-117: the one place the policy digest is computed (run, launch and ssh
+    // all arrive here). A Bulwark.toml an in-tree agent rewrote is caught on the
+    // next launch as PolicyChanged. `bulwark allow`, `bulwark deny` and
+    // deny-forever persistence deliberately do NOT refresh this record: an
+    // in-tree agent can invoke them too, so the next run taints once and the
+    // operator acknowledges the edit with `bulwark reset`.
+    let policy = snapshot.as_ref().map(|s| s.record.clone());
+    let run_ctx = integrity::RunContext { policy, objects };
     let mut store = integrity::Store::load(&state_path);
     let verdict = integrity::evaluate(store.prior(), &run_ctx);
     if let integrity::Integrity::Tainted(reason) = &verdict {
@@ -2297,6 +2379,8 @@ fn cmd_run_remote(
 
 /// Append deny-forever paths to the policy file as protected entries. Best
 /// effort: a persistence failure must not change the exit code of the run.
+// WO-117: this rewrite is not reflected into the integrity record on purpose;
+// the next run taints once as PolicyChanged and the operator runs `bulwark reset`.
 fn persist_deny_forever(paths: &[String], policy_path: Option<&Path>) {
     if paths.is_empty() {
         return;
@@ -2757,6 +2841,49 @@ fn load_policy(profile: Option<&str>, policy_path: Option<&Path>) -> Result<Poli
     Ok(Policy::default_profile())
 }
 
+// WO-117 (R1): a policy and the integrity record that describes it, taken from
+// ONE open handle: identity from the handle's metadata, bytes read from that
+// handle, then parse and sha256 of those same bytes. No second open or read can
+// observe a different file than the one enforced.
+struct PolicySnapshot {
+    policy: Policy,
+    record: integrity::PolicyRecord,
+}
+
+// WO-117: how `cmd_run` obtains the policy it digests: nothing (--protect or
+// --profile load no file an in-tree agent could rewrite), a source to snapshot
+// once, or the snapshot `launch` already took from the same file its plan used.
+enum PolicyInput {
+    None,
+    Resolve(integrity::PolicySource),
+    Ready(Box<PolicySnapshot>),
+}
+
+// WO-117 (R1): the single read path for a file-backed policy. Error texts match
+// Policy::load so operators see the same diagnostics as before.
+fn snapshot_policy(source: &integrity::PolicySource) -> Result<PolicySnapshot> {
+    use std::io::Read;
+    let Some(path) = source.path() else {
+        // WO-117 (R3): nothing on disk; the built-in profile lives in the binary.
+        return Ok(PolicySnapshot {
+            policy: Policy::default_profile(),
+            record: integrity::PolicyRecord::builtin(source)?,
+        });
+    };
+    let unreadable = || format!("cannot read policy {}", path.display());
+    let mut file = std::fs::File::open(path).with_context(unreadable)?;
+    let meta = file.metadata().with_context(unreadable)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).with_context(unreadable)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(unreadable)?;
+    let policy: Policy =
+        toml::from_str(text).with_context(|| format!("invalid policy {}", path.display()))?;
+    let record = integrity::PolicyRecord::from_file(source, &meta, &bytes)?;
+    Ok(PolicySnapshot { policy, record })
+}
+
 enum Mutate {
     Allow,
     Deny,
@@ -2764,6 +2891,10 @@ enum Mutate {
 
 /// `bulwark allow|deny <glob>` — mutate the policy file, creating it from the
 /// default profile if it does not exist.
+// WO-117: deliberately does not update the integrity policy digest. An in-tree
+// agent can run this command too, so a self-updating digest would launder its
+// edit; instead the next run taints once and the operator acknowledges it with
+// `bulwark reset` after reviewing the change.
 fn cmd_mutate(glob: &str, policy_path: Option<&Path>, which: Mutate) -> Result<()> {
     // Explicit --policy wins; otherwise mutate an existing Bulwark.toml/
     // bulwark.toml in the cwd, or create the canonical Bulwark.toml.
@@ -2792,6 +2923,60 @@ fn cmd_mutate(glob: &str, policy_path: Option<&Path>, which: Mutate) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // WO-117 (R1): one open, one read: the parsed policy and the recorded digest
+    // come from the same bytes, and the identity from the same handle.
+    #[test]
+    fn policy_snapshot_digests_the_parsed_bytes() {
+        let dir = std::env::temp_dir().join(format!("bulwark-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Bulwark.toml");
+        let mut policy = Policy::default_profile();
+        assert!(policy.add_protected("/wo117/guarded"));
+        let text = policy.to_toml().unwrap();
+        std::fs::write(&file, &text).unwrap();
+
+        let snapshot = snapshot_policy(&integrity::PolicySource::Explicit(file.clone())).unwrap();
+        assert_eq!(
+            snapshot.record.digest,
+            integrity::sha256_hex(text.as_bytes())
+        );
+        assert!(snapshot
+            .policy
+            .protected
+            .prompt
+            .iter()
+            .any(|p| p == "/wo117/guarded"));
+        assert_eq!(
+            snapshot.record.key,
+            std::fs::canonicalize(&file).unwrap().display().to_string()
+        );
+        assert_ne!(snapshot.record.ino, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-117 (R1): the snapshot keeps Policy::load's error texts.
+    #[test]
+    fn policy_snapshot_errors_match_policy_load() {
+        let dir = std::env::temp_dir().join(format!("bulwark-snaperr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.toml");
+        let err = snapshot_policy(&integrity::PolicySource::Explicit(missing.clone()))
+            .err()
+            .expect("a missing policy file must fail")
+            .to_string();
+        assert_eq!(err, format!("cannot read policy {}", missing.display()));
+        let broken = dir.join("broken.toml");
+        std::fs::write(&broken, b"this = [is not toml\n").unwrap();
+        let err = snapshot_policy(&integrity::PolicySource::Explicit(broken.clone()))
+            .err()
+            .expect("an unparsable policy file must fail")
+            .to_string();
+        assert_eq!(err, format!("invalid policy {}", broken.display()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn json_escape_handles_quotes_and_controls() {

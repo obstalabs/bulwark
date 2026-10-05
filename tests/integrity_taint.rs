@@ -198,3 +198,99 @@ fn taint_receipt_is_recorded() {
         "receipts must contain an integrity taint record; got:\n{body}"
     );
 }
+
+// WO-117: an agent inside the gated tree rewrites the policy file; the next
+// launch of that same policy must report PolicyChanged, and `bulwark reset`
+// must clear it. Every invocation must succeed, so a gate that never started
+// cannot satisfy a "not tainted" check by printing nothing.
+#[test]
+#[ignore = "needs root (fanotify); run under sudo on Linux"]
+fn in_tree_policy_rewrite_taints_next_run() {
+    let dir = scratch("policy");
+    let secret = dir.join("secret.env");
+    let state = dir.join("state.toml");
+    let policy = dir.join("Bulwark.toml");
+    fs::write(&secret, "SECRET=1\n").unwrap();
+
+    let seeded = Command::new(bin())
+        .arg("deny")
+        .arg(&secret)
+        .arg("--policy")
+        .arg(&policy)
+        .output()
+        .expect("spawn deny");
+    assert!(
+        seeded.status.success(),
+        "seeding the policy failed ({}); stderr:\n{}",
+        seeded.status,
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    // WO-117: run the gate under the policy file and require a successful exit;
+    // the gate exits with the child's status and every child here succeeds.
+    let run_policy = |cmd: &[&str]| -> String {
+        let out = Command::new(bin())
+            .args(["run", "--allow-root", "--policy"])
+            .arg(&policy)
+            .arg("--state")
+            .arg(&state)
+            .arg("--")
+            .args(cmd)
+            .output()
+            .expect("spawn gate");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "gate run {cmd:?} failed ({}); stderr:\n{stderr}",
+            out.status
+        );
+        stderr
+    };
+
+    let first = run_policy(&["true"]);
+    assert!(
+        !first.contains(TAINT_MARK),
+        "first run must be clean; stderr:\n{first}"
+    );
+
+    // The supervised child rewrites the policy it is running under.
+    let mutate = format!(
+        "{} allow '/tmp/wo117-agent-chosen/**' --policy {}",
+        bin().display(),
+        policy.display()
+    );
+    let second = run_policy(&["bash", "-c", &mutate]);
+    assert!(
+        !second.contains(TAINT_MARK),
+        "the rewriting run loaded the old policy and must be clean; stderr:\n{second}"
+    );
+    let rewritten = fs::read_to_string(&policy).expect("Bulwark.toml missing after rewrite");
+    assert!(
+        rewritten.contains("wo117-agent-chosen"),
+        "the in-tree rewrite did not land; policy:\n{rewritten}"
+    );
+
+    let third = run_policy(&["true"]);
+    assert!(
+        third.contains(TAINT_MARK) && third.contains("policy changed"),
+        "the rewritten policy must taint as PolicyChanged; stderr:\n{third}"
+    );
+
+    let reset = Command::new(bin())
+        .args(["reset", "--state"])
+        .arg(&state)
+        .output()
+        .expect("spawn reset");
+    let reset_out = String::from_utf8_lossy(&reset.stdout);
+    assert!(
+        reset.status.success() && reset_out.contains("taint cleared"),
+        "reset must succeed and report cleared ({}); stdout:\n{reset_out}",
+        reset.status
+    );
+
+    let fourth = run_policy(&["true"]);
+    assert!(
+        !fourth.contains(TAINT_MARK),
+        "after reset the run must be clean; stderr:\n{fourth}"
+    );
+}

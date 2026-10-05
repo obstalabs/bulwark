@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+<!-- WO-117: the silent fail-open across launches, in user language. -->
+- A policy file that changed between runs is no longer honored silently. Each
+  run now records a digest of the `Bulwark.toml` it loaded, keyed by the policy
+  path (or the directory searched), alongside the existing integrity state. If
+  the file for the same project has different contents on the next launch, for
+  example because an agent running under the gate rewrote it, that run starts
+  tainted with a `policy changed` reason in the audit receipt, exactly like
+  inode drift, until an operator reviews the change and runs `bulwark reset`.
+  Byte-identical rewrites, first runs, and alternating between projects stay
+  clean. `bulwark allow` and `bulwark deny` taint the next run once by design.
+
 ### Fixed
 <!-- WO-120: the silent-ignore is the bug; name the refusal. -->
 - `bulwark ssh --hardened` now refuses `--hivebus-architect-pub` and
