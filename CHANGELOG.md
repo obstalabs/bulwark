@@ -24,6 +24,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absent path is skipped; a protected path that cannot be stat'ed for any other
   reason (permission denied through its parent, an I/O error) refuses the run
   before launch, naming the path and the OS error.
+<!-- WO-133@v3: --allow was silently ignored on the deny-list path; the stub error did not say nothing ran. -->
+- `bulwark run --allow <glob>` without `--hardened` or `--deny-all` now refuses
+  before anything is spawned, naming the two modes that take an allow-list; it
+  used to ignore the grant and run the default deny-list. On a platform without
+  Landlock, `--hardened` now says to run without it to use the Endpoint
+  Security gate and ends with "nothing was run".
 <!-- WO-135@v2: the 0.9.1 x86_64 gnu binary required glibc 2.39. -->
 - The static musl build is now the documented Linux install, and the glibc
   (`-gnu`) builds are cross-compiled against glibc 2.31 with a check in both

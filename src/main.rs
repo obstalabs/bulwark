@@ -575,6 +575,18 @@ fn main() -> Result<()> {
             state,
             command,
         } => {
+            // WO-133@v3: --allow is consumed only by --hardened (the Linux
+            // Landlock floor) and --deny-all (allow-list mode). On the default
+            // deny-list path it was silently ignored, so the operator got a
+            // different gate than the one they named. Refuse here, on the `run`
+            // surface, before cmd_run, any root or state check, and any spawn.
+            // `launch` resolves a profile's allow list on its own terms
+            // (resolve_launch_plan) and does not pass through this arm.
+            if !allow.is_empty() && !hardened && !deny_all {
+                anyhow::bail!(
+                    "allow-lists apply only with --hardened (Linux) or --deny-all; nothing was run"
+                );
+            }
             let code = cmd_run(RunArgs {
                 protect: &protect,
                 profile: profile.as_deref(),
