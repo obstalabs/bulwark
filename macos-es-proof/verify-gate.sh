@@ -27,7 +27,7 @@ set -uo pipefail
 
 fail() { echo "!! $*"; exit 2; }
 
-# WO-127: TEST 6 helpers. Pure (no sudo, no cd, no side effects) so their
+# WO-127@v4: TEST 6 helpers. Pure (no sudo, no cd, no side effects) so their
 # rejections can be exercised without root: `VERIFY_GATE_LIB_ONLY=1 . ./verify-gate.sh`
 # defines them and returns before anything below the marker runs.
 REPS="${REPS:-5}"
@@ -39,6 +39,7 @@ MAX_REPS=1000
 
 # validate_reps <value>: a positive integer within MAX_REPS and nothing else.
 # REPS=invalid used to run zero shapes and still seal; a huge REPS used to wrap.
+# WO-127@v4: a bad REPS must refuse before any test, never seal zero runs.
 validate_reps() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
   [ "${#1}" -le "${#MAX_REPS}" ] || return 1
@@ -61,6 +62,7 @@ validate_reps() {
 # match; when grep itself failed it sets EVIDENCE_REASON and returns 1. Without
 # a file argument the subject is the here-string in EVIDENCE_TEXT. It is called
 # directly, never in a command substitution, so the globals reach the caller.
+# WO-127@v4: a grep that cannot read the evidence must fail the shape, not pass it.
 evidence_grep() {
   local what="$1" pattern="$2" rc
   EVIDENCE_HIT=0
@@ -77,6 +79,7 @@ evidence_grep() {
   esac
 }
 
+# WO-127@v4: one fail-closed verdict per shape run, from stdout, stderr and receipts.
 shape_verdict() {
   local out="$1" err="$2" rcpt="$3" ino="$4" body
   EVIDENCE_TEXT="$out"
@@ -98,7 +101,7 @@ shape_verdict() {
 if [ -n "${VERIFY_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ---- executable-only setup from here on (not run when sourced as a library) ----
-# WO-127: refuse a bad REPS before any test runs, so a typo cannot seal nothing.
+# WO-127@v4: refuse a bad REPS before any test runs, so a typo cannot seal nothing.
 validate_reps "$REPS" || fail "REPS must be a positive integer no greater than $MAX_REPS (got '$REPS')"
 
 cd "$(dirname "$0")" || fail "cannot enter the harness directory"
@@ -214,6 +217,7 @@ echo "   opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ]
 # every repetition; the receipts are root-owned, so they are read with sudo.
 # ---------------------------------------------------------------------------
 echo
+# WO-127@v4: user-owned /private/tmp fixture for the direct-exec seal shapes.
 USER_FIX_DIR="/private/tmp/bulwark-gate-user.$$"
 USER_FIX="$USER_FIX_DIR/guarded.txt"
 mkdir -p "$USER_FIX_DIR"
@@ -225,6 +229,7 @@ DIRECT_OK=1; BASHC_OK=1; SLEEP_OK=1; SHAPE_RUNS=0
 # shape_denied <tag> <ok-var-name> <command...>: run once, keep stderr in a
 # per-run file, and judge it with shape_verdict (content, edge death, integrity
 # or edge-error records, static receipt bound to the fixture inode).
+# WO-127@v4: run one shape under the gate and judge it with shape_verdict.
 shape_denied() {
   local tag="$1" var="$2"; shift 2
   local rcpt="$WORK/$tag.jsonl" err="$WORK/$tag.stderr" out reason
@@ -237,7 +242,7 @@ shape_denied() {
     sed 's/^/     stderr: /' "$err" | tail -5
   fi
 }
-# WO-127: enumerate once and fail loudly if that fails, instead of letting an
+# WO-127@v4: enumerate once and fail loudly if that fails, instead of letting an
 # empty expansion silently run zero shapes.
 REP_LIST=$(seq 1 "$REPS") || fail "cannot enumerate REPS=$REPS"
 for i in $REP_LIST; do
@@ -245,7 +250,7 @@ for i in $REP_LIST; do
   shape_denied "bashc.$i"  BASHC_OK  /bin/bash -c "cat '$USER_FIX'"
   shape_denied "sleep.$i"  SLEEP_OK  /bin/sh -c "sleep 1; exec cat '$USER_FIX'"
 done
-# WO-127: the seal requires every planned run to have happened, not just the
+# WO-127@v4: the seal requires every planned run to have happened, not just the
 # ones that did run to have passed.
 [ "$SHAPE_RUNS" -eq $((3 * REPS)) ] && RUNS_OK=1 || RUNS_OK=0
 echo "   direct=$DIRECT_OK bash_c=$BASHC_OK sleep_exec=$SLEEP_OK runs=$SHAPE_RUNS/$((3 * REPS)) (1 = denied with a static receipt for ino $USER_FIX_INO on every run)"
@@ -267,7 +272,7 @@ echo
   echo "test4_deny_hardlink:  $([ "$DENY_HARD_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test2_unsupervised:   $([ "$UNSUP_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test5_throughput:     $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL) (${LOAD_N:-0} opens)"
-  # WO-127: the direct-exec shapes are part of the seal, not an extra.
+  # WO-127@v4: the direct-exec shapes are part of the seal, not an extra.
   echo "test6_direct_exec:    $([ "$DIRECT_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_bash_c:         $([ "$BASHC_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_sleep_exec:     $([ "$SLEEP_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"

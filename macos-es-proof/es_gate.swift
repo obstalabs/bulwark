@@ -168,7 +168,7 @@ func pidFromAuditToken(_ token: audit_token_t) -> pid_t {
 
 func inodeKey(_ file: UnsafePointer<es_file_t>) -> InodeKey {
     let st = file.pointee.stat
-    // WO-127: dev_t is Int32 on Darwin and devfs reports a negative value
+    // WO-127@v4: dev_t is Int32 on Darwin and devfs reports a negative value
     // (/dev/dtracehelper, opened by every process at startup on macOS 27).
     // A plain UInt64 conversion trapped on it and killed the client, which the
     // kernel treats as allow. Sign-extend through Int64 instead: it cannot trap
@@ -197,7 +197,7 @@ func parentPid(_ pid: pid_t) -> pid_t? {
     if size <= 0 {
         return nil
     }
-    // WO-127: no kernel-provided value may trap the handler; pids fit in pid_t.
+    // WO-127@v4: no kernel-provided value may trap the handler; pids fit in pid_t.
     return pid_t(truncatingIfNeeded: info.pbi_ppid)
 }
 
@@ -227,7 +227,7 @@ func ancestry(_ pid: pid_t, maxDepth: Int = 16) -> String {
     return parts.joined(separator: " <- ")
 }
 
-// WO-127: outcome of walking a pid's parent chain. `unknown` means a parent
+// WO-127@v4: outcome of walking a pid's parent chain. `unknown` means a parent
 // could not be read or the walk hit maxDepth; it is not proof the process is
 // outside the supervised tree, so a protected open must not be allowed on it.
 enum TreeAncestry {
@@ -236,6 +236,7 @@ enum TreeAncestry {
     case unknown
 }
 
+// WO-127@v4: tri-state parent walk; a failed lookup or the depth limit is unknown.
 func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
     if pid == root {
         return .inTree
@@ -258,6 +259,7 @@ func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
     return .outside
 }
 
+// WO-127@v4: FORK/EXEC membership keeps its old meaning; only inTree counts.
 func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
     ancestryOf(pid, root: root, maxDepth: maxDepth) == .inTree
 }
@@ -439,7 +441,7 @@ func appendReceipt(_ line: String) {
     }
 }
 
-// WO-127: wait for every queued receipt write before the edge exits. Receipts
+// WO-127@v4: wait for every queued receipt write before the edge exits. Receipts
 // are written asynchronously after the kernel response, so exiting without this
 // drops the last decisions of a run, often the protected open itself. The queue
 // is serial, so an empty sync block runs only after all earlier writes.
@@ -447,7 +449,7 @@ func flushReceipts() {
     receiptQueue.sync {}
 }
 
-// WO-127: AUTH_OPEN handlers for the supervised tree (or unknown ancestry) still
+// WO-127@v4: AUTH_OPEN handlers for the supervised tree (or unknown ancestry) still
 // running. The kernel response goes out before the receipt is built and
 // enqueued, so a shutdown that only drained the receipt queue could exit in
 // between and lose the final receipt. Only tree-relevant opens are counted: the
@@ -462,6 +464,7 @@ let shutdownWait: DispatchTimeInterval = .milliseconds(400)
 // non-zero edge exit).
 let exitReceiptsIncomplete: Int32 = 71
 
+// WO-127@v4: drain in-flight tree decisions, then the receipt queue; false on timeout.
 func flushForExit() -> Bool {
     let drained = authInFlight.wait(timeout: .now() + shutdownWait) == .success
     flushReceipts()
@@ -528,7 +531,7 @@ let drainGrace: DispatchTimeInterval = .milliseconds(100)
 func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {
-            // WO-127: this is how a normal run ends; the final receipts must
+            // WO-127@v4: this is how a normal run ends; the final receipts must
             // reach the log, and a flush that timed out must not exit clean.
             exit(flushForExit() ? 0 : exitReceiptsIncomplete)
         }
@@ -587,7 +590,7 @@ let res = es_new_client(&client) { clientPtr, message in
         if treeHit {
             treeInsert(eventPid)
         }
-        // WO-127: count tree-relevant decisions until their receipt is enqueued;
+        // WO-127@v4: count tree-relevant decisions until their receipt is enqueued;
         // see authInFlight and flushForExit().
         let tracked = membership != .outside
         if tracked {
@@ -608,7 +611,7 @@ let res = es_new_client(&client) { clientPtr, message in
         case .denylist:
             let protectedHit = config.protected.contains(key)
             if !treeHit && protectedHit && membership == .unknown {
-                // WO-127: a failed parent lookup is not proof the opener is
+                // WO-127@v4: a failed parent lookup is not proof the opener is
                 // outside the supervised tree; a protected open fails closed.
                 allow = false
                 source = "edge-error"
@@ -685,7 +688,7 @@ let res = es_new_client(&client) { clientPtr, message in
         }
         if rr != ES_RESPOND_RESULT_SUCCESS {
             FileHandle.standardError.write("[bulwark-es] FATAL respond_flags_result=\(rr.rawValue)\n".data(using: .utf8)!)
-            // WO-127: the kernel never got this answer, so the open is left to its
+            // WO-127@v4: the kernel never got this answer, so the open is left to its
             // deadline. Record it, flush, and exit non-zero: the supervisor treats
             // a non-zero edge exit as abnormal, kills a live child and fails the run.
             appendReceipt(receiptLine(
@@ -772,7 +775,7 @@ guard sub == ES_RETURN_SUCCESS else {
 
 FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
 
-// WO-127: a normal run ends through the drain exit above; the Rust supervisor
+// WO-127@v4: a normal run ends through the drain exit above; the Rust supervisor
 // sends SIGTERM only when startup fails (terminate_edge), and an operator may
 // send SIGINT. Handle both on a dispatch queue instead of in a C signal handler,
 // which may only call async-signal-safe functions, so in-flight decisions and
