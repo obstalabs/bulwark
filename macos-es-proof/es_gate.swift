@@ -236,48 +236,27 @@ enum TreeAncestry {
     case unknown
 }
 
-// WO-128@v2: how one parent walk ended. The allow-list retry applies to a failed
-// proc_pidinfo lookup only, never to the depth limit (a chain that is too deep
-// will not get shorter on a second try).
-enum ParentWalk {
-    case resolved(TreeAncestry)
-    case lookupFailed
-    case depthExhausted
-}
-
-// WO-128@v2: the WO-127 walk itself, factored so a caller can tell a failed
-// lookup from depth exhaustion. The steps, the depth accounting and the root
-// comparison are unchanged; ancestryOf keeps its exact meaning on top of it.
-func walkParents(_ pid: pid_t, root: pid_t, maxDepth: Int) -> ParentWalk {
+// WO-127@v4: tri-state parent walk; a failed lookup or the depth limit is unknown.
+func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
     if pid == root {
-        return .resolved(.inTree)
+        return .inTree
     }
     var current = pid
     var depth = 0
     while current > 1 {
         if depth >= maxDepth {
-            return .depthExhausted
+            return .unknown
         }
         guard let parent = parentPid(current) else {
-            return .lookupFailed
+            return .unknown
         }
         if parent == root {
-            return .resolved(.inTree)
+            return .inTree
         }
         current = parent
         depth += 1
     }
-    return .resolved(.outside)
-}
-
-// WO-127@v4: tri-state parent walk; a failed lookup or the depth limit is unknown.
-func ancestryOf(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> TreeAncestry {
-    switch walkParents(pid, root: root, maxDepth: maxDepth) {
-    case .resolved(let membership):
-        return membership
-    case .lookupFailed, .depthExhausted:
-        return .unknown
-    }
+    return .outside
 }
 
 // WO-127@v4: FORK/EXEC membership keeps its old meaning; only inTree counts.
@@ -541,45 +520,6 @@ var treeLock = os_unfair_lock()
     return supervisedPids.isEmpty
 }
 
-// WO-128@v2: allow-list AUTH_OPEN membership for a pid not yet in the set. The
-// first hop comes from facts the kernel attached to the message, not from a
-// proc_pidinfo lookup that can race the parent's exit (every unknown in the
-// 10-minute measurement was a failed lookup in a short-lived process, none hit
-// the depth limit). Message version 4 carries the parent's audit token, whose
-// pidversion guards against a recycled pid; older messages fall back to
-// es_process_t.ppid. original_ppid is the parent before any reparent to
-// launchd, so a reparented process is walked from the parent it was born to.
-// A walk that stopped on a failed lookup is retried once from the same start;
-// what is still unknown after that is denied by the allow-list branch. Used in
-// allow-list mode only: the deny-list path keeps the WO-127 walk unchanged, so
-// none of its decisions move.
-func allowlistAncestry(
-    _ process: UnsafePointer<es_process_t>,
-    version: UInt32,
-    root: pid_t,
-    maxDepth: Int = 16
-) -> TreeAncestry {
-    let proc = process.pointee
-    let parent: pid_t = version >= 4
-        ? pidFromAuditToken(proc.parent_audit_token)
-        : proc.ppid
-    let original: pid_t = proc.original_ppid
-    if parent == root || original == root || treeContains(parent) || treeContains(original) {
-        return .inTree
-    }
-    let start = original != parent ? original : parent
-    var walk = walkParents(start, root: root, maxDepth: maxDepth)
-    if case .lookupFailed = walk {
-        walk = walkParents(start, root: root, maxDepth: maxDepth)
-    }
-    switch walk {
-    case .resolved(let membership):
-        return membership
-    case .lookupFailed, .depthExhausted:
-        return .unknown
-    }
-}
-
 // Serializes drain-exit handling. The ES handler may be invoked concurrently, so
 // a NOTIFY_EXIT that empties the set could, in principle, be processed before a
 // causally-prior NOTIFY_FORK of an orphan. We never exit on the first empty
@@ -643,14 +583,9 @@ let res = es_new_client(&client) { clientPtr, message in
         // Membership-set first (reparent-proof), ancestry walk only as an
         // additive fallback for a pid we have not yet seen fork (e.g. the very
         // first opens before its NOTIFY_FORK is processed).
-        // WO-128@v2: in allow-list mode the fallback resolves its first hop from
-        // the message and retries a failed lookup once (allowlistAncestry);
-        // deny-list mode keeps the WO-127 walk so its decisions are unchanged.
         let membership: TreeAncestry = treeContains(eventPid)
             ? .inTree
-            : config.mode == .allowlist
-                ? allowlistAncestry(msg.process, version: msg.version, root: config.rootPid)
-                : ancestryOf(eventPid, root: config.rootPid)
+            : ancestryOf(eventPid, root: config.rootPid)
         let treeHit = membership == .inTree
         if treeHit {
             treeInsert(eventPid)
@@ -720,19 +655,18 @@ let res = es_new_client(&client) { clientPtr, message in
             // FILE reads; directory opens are allowed so traversal works. The
             // protected files themselves are still gated by their own inode.
             let isDirectory = (file.pointee.stat.st_mode & S_IFMT) == S_IFDIR
-            if !treeHit && membership == .unknown {
-                // WO-128@v2: default-deny only holds if "outside the tree" is
-                // proven. After the message first hop and one retry this
-                // process could not be placed, so it is not allowed anything;
-                // the receipt below carries its pid and ancestry chain.
-                allow = false
-                source = "edge-error"
-                reason = "ancestry could not be established (denied, allow-list mode)"
-                cacheKernelAllow = false
-            } else if !treeHit {
+            if !treeHit {
                 allow = true
                 source = "outside-tree"
-                reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
+                // WO-128@v1: measurement instrument, decision unchanged. An outside
+                // open whose ancestry walk failed or hit maxDepth is named in the
+                // receipt so a desktop run can count how often option (a) would
+                // have denied an unrelated process; the rule is chosen from that count.
+                if membership == .unknown {
+                    reason = "ancestry could not be established (treated as outside)"
+                } else {
+                    reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
+                }
                 cacheKernelAllow = false
             } else if allowedByPolicy {
                 allow = true
