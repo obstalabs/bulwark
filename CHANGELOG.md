@@ -37,12 +37,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   newer, or needs a loader feature the floor cannot vouch for; the 0.9.1 x86_64 gnu
   archive required glibc 2.39 and did not load cleanly on Debian 12 or Ubuntu
   22.04.
-
-### Changed
-<!-- WO-128@v1: measurement instrument; the allow/deny decision is unchanged. -->
-- macOS allow-list receipts now say when an open outside the supervised tree came
-  from a process whose ancestry could not be established, instead of reporting it
-  as an ordinary outside open. Decisions are unchanged.
+<!-- WO-128@v2: allow-list mode allowed any open from a process whose ancestry could not be read. -->
+- The macOS allow-list mode (`--deny-all --allow`) no longer treats a process
+  whose parent chain cannot be read as outside the supervised tree. The parent
+  is taken from the Endpoint Security message first, a failed lookup is retried
+  once, and an open whose ancestry is still unknown is denied with an
+  `edge-error` receipt naming the pid and ancestry. Deny-list mode is unchanged.
 
 ## [0.9.1] - 2026-10-05
 

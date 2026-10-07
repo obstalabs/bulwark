@@ -277,3 +277,77 @@ fn macos_socket_consent_keeps_peer_pid_and_process_tree_checks() {
         assert!(proctree.contains(needle), "proctree.rs missing {needle}");
     }
 }
+
+// WO-128@v2: allow-list mode must not treat an unknown ancestry as outside the
+// tree. The first hop comes from the ES message (parent_audit_token when the
+// message version is >= 4, else ppid; original_ppid for a reparented process)
+// before any proc_pidinfo walk, a walk that stopped on a failed lookup is
+// retried once, and what is still unknown is DENIED with source edge-error.
+// Deny-list mode keeps the WO-127 walk, so its decisions do not move.
+#[test]
+fn swift_edge_allowlist_denies_unknown_ancestry_after_message_first_hop() {
+    let source = repo_file("macos-es-proof/es_gate.swift");
+    // (b) the allow-list unknown branch denies; the WO-128@v1 instrument is gone.
+    let allowlist = between(&source, "case .allowlist:", "// WO-23: AUTH_OPEN requires");
+    assert!(
+        !allowlist.contains("treated as outside"),
+        "the measurement instrument must be replaced by the deny"
+    );
+    let unknown = between(allowlist, "membership == .unknown", "} else if");
+    assert!(
+        unknown.contains("allow = false"),
+        "allow-list unknown ancestry must DENY; got: {unknown}"
+    );
+    assert!(unknown.contains(r#"source = "edge-error""#));
+    assert!(unknown.contains("ancestry could not be established (denied, allow-list mode)"));
+    assert!(unknown.contains("cacheKernelAllow = false"));
+    // The outside branch keeps its reasons.
+    assert!(allowlist.contains(
+        r#"reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree""#
+    ));
+    // (a) the first hop comes from the message, version check included, before
+    // any proc_pidinfo walk; the resolver itself never calls proc_pidinfo.
+    let resolver = between(&source, "func allowlistAncestry(", "\n}\n");
+    let walk = resolver
+        .find("walkParents(")
+        .expect("the resolver must use the WO-127 walk");
+    for needle in [
+        "parent_audit_token",
+        "version >= 4",
+        ".ppid",
+        "original_ppid",
+    ] {
+        let at = resolver
+            .find(needle)
+            .unwrap_or_else(|| panic!("first hop must read {needle}"));
+        assert!(at < walk, "{needle} must be read before the walk");
+    }
+    assert!(
+        !resolver.contains("proc_pidinfo"),
+        "the resolver must not look a pid up itself; only the walk does"
+    );
+    // AUTH_OPEN hands the message (process + version) to the resolver in
+    // allow-list mode only; deny-list membership is the unchanged WO-127 walk.
+    let auth_open = between(&source, "case ES_EVENT_TYPE_AUTH_OPEN:", "default:");
+    assert!(
+        auth_open
+            .contains("allowlistAncestry(msg.process, version: msg.version, root: config.rootPid)"),
+        "allow-list AUTH_OPEN must resolve from the message"
+    );
+    assert!(
+        auth_open.contains(": ancestryOf(eventPid, root: config.rootPid)"),
+        "deny-list membership must keep the WO-127 walk"
+    );
+    // (c) exactly one retry, and only for a failed lookup, never for depth.
+    assert_eq!(
+        resolver.matches("walkParents(start").count(),
+        2,
+        "the walk from the first hop must be retried exactly once"
+    );
+    assert!(
+        resolver.contains("if case .lookupFailed = walk"),
+        "the retry applies to a failed lookup, not to the depth limit"
+    );
+    // FORK/EXEC membership keeps its meaning: only inTree counts.
+    assert!(source.contains("ancestryOf(pid, root: root, maxDepth: maxDepth) == .inTree"));
+}

@@ -43,10 +43,17 @@ a run is active, a process outside the run whose ancestry cannot be read (for
 example a backup tool that is exiting) is also denied the protected file; this is
 deliberate fail-closed behaviour, not a bug.
 
-Known gap, not yet fixed: the default-deny allow-list mode (`--deny-all --allow`)
-still treats a process whose ancestry cannot be read as outside the supervised
-tree, so such a process is not held to the allow-list. Deny-list mode (the
-default, `--protect`) does not have this gap.
+<!-- WO-128@v2: the allow-list unknown-ancestry rule (option b). -->
+In the default-deny allow-list mode (`--deny-all --allow`) an open by a process
+outside the supervised tree is allowed, so the gate has to be sure a process
+really is outside. The first hop of that answer now comes from the Endpoint
+Security message itself (the parent's audit token, or `ppid` on older message
+versions, and `original_ppid` for a process that was reparented to launchd)
+instead of a parent lookup that can race the parent's exit; the rest of the
+parent walk is retried once if a lookup fails. A process whose ancestry is still
+unknown after that is denied, with an `edge-error` receipt that carries the pid
+and the ancestry chain so a false deny can be diagnosed. Deny-list mode (the
+default, `--protect`) keeps its own rule from the previous section.
 
 ## Crash posture (honest limitation)
 
