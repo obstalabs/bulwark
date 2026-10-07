@@ -247,6 +247,36 @@ impl AllowList {
             if prefix.is_empty() {
                 continue;
             }
+            // WO-137@v1 (F1): the symlink check must see the real final
+            // component. `link/.` and `link/` both lstat as the target because
+            // the kernel resolves the link to reach `.` or the trailing slash,
+            // so the check runs on the lexically normalized prefix. Only the
+            // check uses it: traversal and glob matching keep the prefix as
+            // written, so `real/./**` snapshots exactly what `real/**` does.
+            let Some(anchor) = prefix_anchor(prefix) else {
+                eprintln!(
+                    "[bulwark] grant {g} skipped: its prefix ends in '..'; grant the \
+                     resolved path instead"
+                );
+                continue;
+            };
+            match fs::symlink_metadata(&anchor) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    // WO-137@v1 (F3): say why the grant is empty and what to
+                    // grant instead. On macOS /tmp, /var and /etc are symlinks,
+                    // so `--allow /tmp/**` would otherwise fail silently.
+                    // canonicalize is a read-only realpath for the message.
+                    let rest = &g[prefix.len()..];
+                    let hint = match fs::canonicalize(&anchor) {
+                        Ok(real) => format!("grant {}{rest} to allow that tree", real.display()),
+                        Err(_) => "grant its real path to allow that tree".to_string(),
+                    };
+                    eprintln!("[bulwark] grant {g} skipped: its prefix is a symlink; {hint}");
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
+            }
             self.snapshot_one(g, Path::new(prefix), 0);
         }
         if self.grant_capped {
@@ -433,6 +463,31 @@ fn concrete_prefix(g: &str) -> &str {
     }
 }
 
+/// WO-137@v1 (F1): the path whose final component the symlink check must
+/// lstat, derived lexically from a concrete prefix: trailing `/` and `.`
+/// components are dropped (`link/.` and `link/` both anchor on `link`), and a
+/// prefix whose final component is `..` yields `None` because `..` can step
+/// across a symlink before the check ever sees it. Intermediate components are
+/// left alone: a deeper grant under macOS's `/tmp -> /private/tmp` must still
+/// work, only the final component decides. Nothing is touched on disk.
+fn prefix_anchor(prefix: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut anchor = std::path::PathBuf::new();
+    let mut last_is_parent = false;
+    for c in Path::new(prefix).components() {
+        // `Path::components` already elides interior `.` and the trailing slash.
+        last_is_parent = matches!(c, Component::ParentDir);
+        anchor.push(c.as_os_str());
+    }
+    if last_is_parent {
+        return None;
+    }
+    if anchor.as_os_str().is_empty() {
+        anchor.push(".");
+    }
+    Some(anchor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +590,22 @@ mod inode_tests {
         assert_eq!(concrete_prefix("/etc/foo.conf"), "/etc/foo.conf");
         assert_eq!(concrete_prefix("/data/**/*.log"), "/data");
         assert_eq!(concrete_prefix("/*"), "/");
+    }
+
+    // WO-137@v1 (F1): lexical anchor for the symlink check.
+    #[test]
+    fn prefix_anchor_cases() {
+        let p = |s: &str| prefix_anchor(s).map(|a| a.to_string_lossy().into_owned());
+        assert_eq!(p("/tmp/."), Some("/tmp".into()));
+        assert_eq!(p("/tmp/"), Some("/tmp".into()));
+        assert_eq!(p("/tmp/./."), Some("/tmp".into()));
+        assert_eq!(p("/tmp/sub/.."), None);
+        assert_eq!(p("/"), Some("/".into()));
+        assert_eq!(p("."), Some(".".into()));
+        assert_eq!(p("./rel/."), Some("./rel".into()));
+        // Intermediate `..` is left for the kernel to resolve; only the final
+        // component decides.
+        assert_eq!(p("/a/../b"), Some("/a/../b".into()));
     }
 
     /// A grant file present at launch is allowed by inode.
@@ -647,6 +718,56 @@ mod inode_tests {
             by_file_link.grant_inodes.is_empty(),
             "a concrete grant on a symlink must contribute nothing; got {:?}",
             by_file_link.grant_inodes
+        );
+    }
+
+    // WO-137@v1 (F1): the symlink check must see the real final component.
+    // `link/./**` has the concrete prefix `link/.` and `link/**` written with a
+    // trailing slash has `link/`; lstat resolves `link` for both, so the target
+    // tree was snapshotted through the back door. A `..`-terminated prefix is
+    // refused outright (it can cross a symlink lexically), while `real/./**`
+    // must keep snapshotting exactly what `real/**` does.
+    #[test]
+    fn symlink_prefix_check_sees_through_trailing_dot_slash_and_dotdot() {
+        let real = scratch("norm-real");
+        fs::write(real.join("a.log"), b"a").unwrap();
+        fs::create_dir(real.join("sub")).unwrap();
+        fs::write(real.join("sub").join("b.log"), b"b").unwrap();
+        let link = scratch("norm-link").join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let snapshot = |g: String| {
+            let mut al = AllowList::new(vec![g]).without_base();
+            al.snapshot_grants();
+            al.grant_inodes
+        };
+        let via_dot = snapshot(format!("{}/./**", link.display()));
+        assert!(
+            via_dot.is_empty(),
+            "link/./** must contribute nothing; got {via_dot:?}"
+        );
+        let via_slash = snapshot(format!("{}/**", link.display()).replace("/**", "//**"));
+        assert!(
+            via_slash.is_empty(),
+            "link//** (trailing slash on the prefix) must contribute nothing; got {via_slash:?}"
+        );
+        let plain = snapshot(format!("{}/**", real.display()));
+        for f in [real.join("a.log"), real.join("sub").join("b.log")] {
+            assert!(
+                plain.iter().any(|(k, _)| *k == key_of(&f)),
+                "real/** must snapshot {}",
+                f.display()
+            );
+        }
+        let dotted = snapshot(format!("{}/./**", real.display()));
+        assert_eq!(
+            dotted, plain,
+            "real/./** must snapshot exactly what real/** does"
+        );
+        let dotdot = snapshot(format!("{}/sub/../**", real.display()));
+        assert!(
+            dotdot.is_empty(),
+            "a ..-terminated prefix must contribute nothing; got {dotdot:?}"
         );
     }
 

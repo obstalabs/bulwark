@@ -34,6 +34,8 @@ set -uo pipefail
 # "err" when grep could not inspect the file (exit 2), so a read error is never
 # read as "not found" and never passes. The subject is always a file argument,
 # never a producer pipe (SIGPIPE under pipefail would turn a match into a miss).
+# Used for the supervised shell's stdout/stderr markers only; receipts are
+# parsed as JSON records by receipt_tally, never matched by substring.
 evidence_grep() {
   grep -q -- "$1" "$2"
   case "$?" in
@@ -43,14 +45,36 @@ evidence_grep() {
   esac
 }
 
+# receipt_tally <receipts-file> <ino>: parses every receipt line as a JSON record
+# with jq and prints three counts, "<unparsable> <allow-for-ino> <allowlist-deny-for-ino>",
+# or nothing when jq itself could not inspect the file (its exit status is the
+# caller's tri-state signal). A line that is not a complete JSON object counts
+# as unparsable; the allow and deny counts run over complete records only, and
+# the deny counts only a record whose .ino, .decision and .source all match.
+# WO-137@v1 (F2): a receipt truncated right after `"source":"allowlist"` used to
+# satisfy a substring grep; the edge ignores short writes, so truncation is a
+# real failure mode and the evidence must be a parsed record, not a substring.
+# The file is passed as an argument, never piped in (SIGPIPE under pipefail).
+receipt_tally() {
+  jq -r -R -s --argjson ino "$2" '
+    split("\n") | map(select(length > 0))
+    | map(try (fromjson | if type == "object" then . else {"_bad": true} end) catch {"_bad": true})
+    | [ (map(select(._bad == true)) | length),
+        (map(select(._bad != true and .ino == $ino and .decision == "allow")) | length),
+        (map(select(._bad != true and .ino == $ino and .decision == "deny" and .source == "allowlist")) | length) ]
+    | map(tostring) | join(" ")' "$1" 2>/dev/null
+}
+
 # test4_verdict <stdout-file> <stderr-file> <receipts-file> <foreign-ino> <linked-after-launch>
 # prints the first reason the foreign-hardlink check FAILS, nothing when it is a
 # clean deny. It is a deny only if the link was created after the supervised
 # tree was already running, the foreign content stayed hidden, the supervised
-# shell reported the read denied, the edge did not die, no allow receipt names
-# the foreign inode and an allow-list deny receipt does. Missing evidence fails.
+# shell reported the read denied, the edge did not die, every receipt line is a
+# complete JSON record, no complete record allows the foreign inode and one
+# complete record denies it with source "allowlist". Missing evidence fails, and
+# so does any receipt line that does not parse.
 test4_verdict() {
-  local out="$1" err="$2" rcpt="$3" ino="$4" linked="$5" hit
+  local out="$1" err="$2" rcpt="$3" ino="$4" linked="$5" hit tally rc bad allowed denied
   [ "$linked" = 1 ] || { echo "link was not created after launch (RUN_STARTED never seen)"; return; }
   [ -r "$out" ] || { echo "stdout file missing or unreadable: $out"; return; }
   hit=$(evidence_grep "foreign-secret" "$out")
@@ -61,10 +85,14 @@ test4_verdict() {
   hit=$(evidence_grep "ES edge exited" "$err")
   [ "$hit" = 0 ] || { echo "abnormal edge exit reported (grep: $hit)"; return; }
   [ -r "$rcpt" ] || { echo "receipts file missing or unreadable: $rcpt"; return; }
-  hit=$(evidence_grep "\"ino\":$ino,\"decision\":\"allow\"" "$rcpt")
-  [ "$hit" = 0 ] || { echo "an allow receipt names the foreign inode $ino (grep: $hit)"; return; }
-  hit=$(evidence_grep "\"ino\":$ino,\"decision\":\"deny\",\"source\":\"allowlist\"" "$rcpt")
-  [ "$hit" = 1 ] || { echo "no allow-list deny receipt for the foreign inode $ino (grep: $hit)"; return; }
+  [[ "$ino" =~ ^[0-9]+$ ]] || { echo "foreign inode is not a number: '$ino'"; return; }
+  command -v jq >/dev/null 2>&1 || { echo "jq not available; receipts cannot be parsed"; return; }
+  tally=$(receipt_tally "$rcpt" "$ino"); rc=$?
+  [ "$rc" = 0 ] && [[ "$tally" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] || { echo "receipt inspection failed (jq $rc: '$tally')"; return; }
+  read -r bad allowed denied <<<"$tally"
+  [ "$bad" = 0 ] || { echo "$bad receipt line(s) are not complete JSON records"; return; }
+  [ "$allowed" = 0 ] || { echo "$allowed complete receipt(s) allow the foreign inode $ino"; return; }
+  [ "$denied" != 0 ] || { echo "no complete allow-list deny receipt for the foreign inode $ino"; return; }
 }
 
 if [ -n "${VERIFY_ALLOWLIST_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi

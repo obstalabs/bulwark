@@ -15,7 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   folder recorded its target's inode, so a link to a file outside the grant made
   that file readable to the supervised tree, through the link and by its own
   path. Symlinks inside a grant are now skipped and a grant whose path ends in a
-  symlink contributes nothing; grant the target's real path if you want it read.
+  symlink contributes nothing, however the path is spelled (a trailing `/` or
+  `/.` does not get around the check, and a path ending in `..` grants nothing);
+  a stderr note names the real path to grant instead, which matters on macOS
+  where `/tmp`, `/var` and `/etc` are symlinks.
   Hardlinks keep their inode semantics: a hardlink of a granted file is that
   file, and a foreign file hardlinked into a grant after launch is denied.
 
