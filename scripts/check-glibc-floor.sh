@@ -32,7 +32,8 @@ if [[ ! "$floor" =~ $numeric ]]; then
   exit 64
 fi
 
-# version_gt A B: true when A is newer than B, comparing each dot component.
+# WO-135@v2: version_gt A B: true when A is newer than B, comparing each dot
+# component (a string compare would put 2.10 below 2.9).
 version_gt() {
   local IFS=.
   local -a a=($1) b=($2)
