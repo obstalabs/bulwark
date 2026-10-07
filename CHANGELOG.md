@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-07
+
 ### Fixed
 <!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
 - Tests no longer name their scratch directories or images by process id alone,
