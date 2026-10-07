@@ -658,7 +658,7 @@ let res = es_new_client(&client) { clientPtr, message in
             if !treeHit {
                 allow = true
                 source = "outside-tree"
-                // WO-128@v1: measurement instrument, decision unchanged. An outside
+                // WO-128@v2: measurement instrument, decision unchanged. An outside
                 // open whose ancestry walk failed or hit maxDepth is named in the
                 // receipt so a desktop run can count how often option (a) would
                 // have denied an unrelated process; the rule is chosen from that count.
