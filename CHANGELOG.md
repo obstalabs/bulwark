@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.2] - 2026-10-07
 
+### Security
+<!-- WO-137@v1: the allow-list grant snapshot followed symlinks; found by the macOS allow-list seal. -->
+- Allow-list mode (`--deny-all --allow <glob>`) no longer follows symlinks when
+  it snapshots a grant at launch. In 0.9.0 and 0.9.1 a symlink inside a granted
+  folder recorded its target's inode, so a link to a file outside the grant made
+  that file readable to the supervised tree, through the link and by its own
+  path. Symlinks inside a grant are now skipped and a grant whose path ends in a
+  symlink contributes nothing; grant the target's real path if you want it read.
+  Hardlinks keep their inode semantics: a hardlink of a granted file is that
+  file, and a foreign file hardlinked into a grant after launch is denied.
+
 ### Fixed
 <!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
 - Tests no longer name their scratch directories or images by process id alone,

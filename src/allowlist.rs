@@ -236,7 +236,10 @@ impl AllowList {
     /// every inode under the glob's directory prefix — so a non-granted file
     /// sharing the prefix (e.g. `secret.env` beside an `--allow '<dir>/*.log'`)
     /// is never snapshotted and therefore cannot be reached by hardlinking it to
-    /// a granted name. Idempotent; call at launch before supervising.
+    /// a granted name. Symlinks are never followed: a link inside a grant does
+    /// not record its target's inode, and a grant whose prefix ends in a symlink
+    /// contributes nothing (grant the target's real path instead). Idempotent;
+    /// call at launch before supervising.
     pub fn snapshot_grants(&mut self) {
         let grants = self.grants.clone();
         for g in &grants {
@@ -262,9 +265,12 @@ impl AllowList {
             self.grant_capped = true;
             return;
         }
-        let meta = match fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return,
+        // WO-137@v1: measure the prefix without following its final component.
+        // A symlinked prefix contributes nothing, as hardened mode refuses one
+        // (WO-81); following it would snapshot files under some other tree.
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) if !m.file_type().is_symlink() => m,
+            _ => return,
         };
         let path_str = path.to_string_lossy();
         if glob::matches(g, &path_str) {
@@ -284,7 +290,14 @@ impl AllowList {
             let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_real_dir {
                 self.snapshot_one(g, &entry.path(), depth + 1);
-            } else if let Ok(m) = fs::metadata(entry.path()) {
+            } else if let Ok(m) = fs::symlink_metadata(entry.path()) {
+                // WO-137@v1: a symlink entry is skipped, never measured through.
+                // fs::metadata followed it and recorded the TARGET's inode, so a
+                // link in the grant to an outside file granted that file for
+                // every open by the tree, by its own path too (0.9.0, 0.9.1).
+                if m.file_type().is_symlink() {
+                    continue;
+                }
                 if self.grant_inodes.len() >= MAX_GRANT_ENTRIES {
                     self.grant_capped = true;
                     return;
@@ -579,6 +592,62 @@ mod inode_tests {
         // hardlinking it to a *.log name still fails the inode gate.
         let aliased = format!("{}/x.log", dir.display());
         assert!(!a.allows_open(&aliased, &key_of(&env), gen_of(&env)));
+    }
+
+    // WO-137@v1: a symlink inside a grant must never put its TARGET's inode in
+    // the snapshot. 0.9.0 and 0.9.1 measured non-directory entries with
+    // fs::metadata, which follows links, so `allowed/link -> ../sibling/secret`
+    // granted secret's inode and the agent could read it by its own path. A
+    // grant whose prefix's final component is a symlink contributes nothing;
+    // the operator who wants the target grants the target's real path.
+    #[test]
+    fn symlink_in_grant_does_not_snapshot_its_target() {
+        let dir = scratch("symlink");
+        let outside = scratch("symlink-target");
+        let real = dir.join("app.log");
+        let secret = outside.join("secret");
+        fs::write(&real, b"a").unwrap();
+        fs::write(&secret, b"s").unwrap();
+        let link = dir.join("link.log");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let glob = format!("{}/**", dir.display());
+        let mut al = AllowList::new(vec![glob]).without_base();
+        al.snapshot_grants();
+
+        let recorded = |p: &Path| al.grant_inodes.iter().any(|(k, _)| *k == key_of(p));
+        assert!(
+            recorded(&real),
+            "the regular file's inode must be snapshotted"
+        );
+        assert!(
+            !recorded(&secret),
+            "the symlink target's inode must NOT be snapshotted"
+        );
+        // The link's path matches the glob, but the inode it opens is the
+        // target's, which the snapshot never recorded: denied through the link.
+        assert!(!al.allows_open(&link.to_string_lossy(), &key_of(&secret), gen_of(&secret)));
+
+        // A grant whose prefix is a symlink to a real directory adds nothing.
+        let via_link = scratch("symlink-prefix").join("granted");
+        std::os::unix::fs::symlink(&dir, &via_link).unwrap();
+        let mut by_dir_link =
+            AllowList::new(vec![format!("{}/**", via_link.display())]).without_base();
+        by_dir_link.snapshot_grants();
+        assert!(
+            by_dir_link.grant_inodes.is_empty(),
+            "a symlinked grant prefix must contribute nothing; got {:?}",
+            by_dir_link.grant_inodes
+        );
+        // Same for a concrete grant that names the file symlink itself.
+        let mut by_file_link =
+            AllowList::new(vec![link.to_string_lossy().into_owned()]).without_base();
+        by_file_link.snapshot_grants();
+        assert!(
+            by_file_link.grant_inodes.is_empty(),
+            "a concrete grant on a symlink must contribute nothing; got {:?}",
+            by_file_link.grant_inodes
+        );
     }
 
     /// Base-set paths are allowed by path regardless of inode (documented read

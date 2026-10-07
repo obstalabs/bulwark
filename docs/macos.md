@@ -180,3 +180,13 @@ Only the grant plus the printed macOS runtime base set are readable:
 ```sh
 ../target/debug/bulwark base-set
 ```
+
+<!-- WO-137@v1: symlinks are not followed by the grant snapshot; hardlinks are inode grants. -->
+Symlinks inside a grant are not followed: a link to a file outside the granted
+folder does not make that file readable (grant the target's real path instead),
+and a grant whose own path ends in a symlink grants nothing.
+A grant is a set of inodes taken at launch, so a hardlink of a granted file is
+readable under any name, a foreign file hardlinked into the grant *after* launch
+is denied, and a foreign hardlink already placed inside the grant *before* launch
+is snapshotted and allowed: inode identity cannot tell it from a legitimately
+multi-linked file (tracked as WO-138).
