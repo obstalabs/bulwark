@@ -221,4 +221,16 @@ fn launch_with_starter_profile_is_not_refused_by_the_allow_check() {
         !stderr.contains("allow-lists apply only with"),
         "launch must not be refused by the run-surface --allow check; got: {stderr}"
     );
+    // WO-133@v3: positive evidence that launch got past plan resolution into
+    // cmd_run. The first thing cmd_run does with a plan's protect list is the
+    // strict ProtectedSet::resolve (its only caller), whose error reads
+    // "cannot stat protected path <p>"; nothing before it in cmd_run prints for
+    // a non-root run (the worker drop is silent below uid 0). The starter
+    // profile's protect list reaches it as written ("~/.ssh", "**/.env"), so
+    // that line is the earliest stable one until the launch-profile WO changes
+    // how launch resolves protect strings, at which point this pin moves.
+    assert!(
+        stderr.contains("cannot stat protected path"),
+        "launch must reach cmd_run's strict protect resolution; got: {stderr}"
+    );
 }
