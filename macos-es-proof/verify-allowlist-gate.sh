@@ -56,6 +56,7 @@ evidence_grep() {
 # real failure mode and the evidence must be a parsed record, not a substring.
 # The file is passed as an argument, never piped in (SIGPIPE under pipefail).
 receipt_tally() {
+  # WO-137@v1: receipts are evidence only as complete parsed records.
   jq -r -R -s --argjson ino "$2" '
     split("\n") | map(select(length > 0))
     | map(try (fromjson | if type == "object" then . else {"_bad": true} end) catch {"_bad": true})
@@ -74,6 +75,7 @@ receipt_tally() {
 # complete record denies it with source "allowlist". Missing evidence fails, and
 # so does any receipt line that does not parse.
 test4_verdict() {
+  # WO-137@v1: the TEST 4b verdict; any missing or malformed evidence fails.
   local out="$1" err="$2" rcpt="$3" ino="$4" linked="$5" hit tally rc bad allowed denied
   [ "$linked" = 1 ] || { echo "link was not created after launch (RUN_STARTED never seen)"; return; }
   [ -r "$out" ] || { echo "stdout file missing or unreadable: $out"; return; }
@@ -180,6 +182,7 @@ echo "==> sudo needed (ES gate runs as root); authorize now:"
 sudo -v || fail "sudo auth failed"
 
 echo
+# WO-137@v1: TEST 4a joins the first supervised run (see the 4a note below).
 echo "==> TEST 1/2/3/4a/5 (allow-list supervised tree): expect allow dir readable, sibling and symlink denied, granted-inode hardlink readable"
 SUP_OUT="$WORK/supervised.out"
 SUP_ERR="$WORK/supervised.err"
@@ -207,6 +210,7 @@ DENY_SYMLINK_OK=$(grep -q "^SYMLINK_ESCAPE_DENIED$" "$SUP_OUT" && echo 1 || echo
 # WO-137 operator ruling; the escape that matters runs the other way (TEST 4b).
 HARDLINK_OUTSIDE_OK=$(grep -q "^HARDLINK_OUTSIDE_READABLE$" "$SUP_OUT" && echo 1 || echo 0)
 grep -qi "allow this read" "$SUP_OUT" "$SUP_ERR" && NO_PROMPT_OK=0 || NO_PROMPT_OK=1
+# WO-137@v1: report the 4a result beside the other first-run checks.
 echo "   status=$SUP_STATUS allow_file=$ALLOW_FILE_OK outside_deny=$DENY_OUTSIDE_OK symlink_deny=$DENY_SYMLINK_OK granted_hardlink_allow=$HARDLINK_OUTSIDE_OK no_prompt=$NO_PROMPT_OK"
 while IFS= read -r line; do echo "     $line"; done < "$SUP_OUT"
 if [ "$SUP_STATUS" -ne 0 ]; then
