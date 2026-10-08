@@ -182,8 +182,9 @@ mod tests {
 
     #[test]
     fn architect_key_rejects_wrong_size() {
-        let dir = std::env::temp_dir();
-        let p = dir.join(format!("bw-arch-test-{}.pub", std::process::id()));
+        // WO-132@v1: a fresh scratch dir instead of a pid-named file in temp_dir.
+        let dir = crate::test_scratch_dir("arch");
+        let p = dir.join("bw-arch-test.pub");
         // 16 bytes base64 — too short for ed25519.
         std::fs::write(
             &p,

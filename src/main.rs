@@ -575,6 +575,18 @@ fn main() -> Result<()> {
             state,
             command,
         } => {
+            // WO-133@v3: --allow is consumed only by --hardened (the Linux
+            // Landlock floor) and --deny-all (allow-list mode). On the default
+            // deny-list path it was silently ignored, so the operator got a
+            // different gate than the one they named. Refuse here, on the `run`
+            // surface, before cmd_run, any root or state check, and any spawn.
+            // `launch` resolves a profile's allow list on its own terms
+            // (resolve_launch_plan) and does not pass through this arm.
+            if !allow.is_empty() && !hardened && !deny_all {
+                anyhow::bail!(
+                    "allow-lists apply only with --hardened (Linux) or --deny-all; nothing was run"
+                );
+            }
             let code = cmd_run(RunArgs {
                 protect: &protect,
                 profile: profile.as_deref(),
@@ -2147,14 +2159,29 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 policy.protected_globs(&home).len()
             );
         }
-        let (set, skipped) = ProtectedSet::resolve_lenient(&concrete);
-        if skipped > 0 {
+        // WO-131@v1: a stat failure that does not prove the path absent (EACCES,
+        // EIO, ...) refuses the run here, before any launch or state write,
+        // naming the path and the OS error. Only absent paths are skipped.
+        let resolved = ProtectedSet::resolve_lenient(&concrete)?;
+        if !resolved.skipped.is_empty() {
+            let names = resolved
+                .skipped
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             eprintln!(
-                "[bulwark] note: {skipped} protected path(s) not present on this host, skipped"
+                "[bulwark] note: {} protected path(s) not present on this host, skipped: {names}",
+                resolved.skipped.len()
             );
         }
-        let marks: Vec<PathBuf> = concrete.iter().map(PathBuf::from).collect();
-        (set, marks)
+        // WO-131@v1: mark only the paths that resolved. Marking every requested
+        // path handed the skipped, absent ones to fanotify_mark too, which failed
+        // with ENOENT and aborted the run (seen on the CI runner for ~/.ssh). A
+        // path that stats but cannot be marked still refuses the run in the gate;
+        // a path that cannot be stat'ed at all was refused above, never skipped.
+        let marks = resolved.present.clone();
+        (resolved.set, marks)
     };
 
     // Integrity circuit-breaker (WO-13): evaluate whether this run is tainted by
@@ -2920,6 +2947,27 @@ fn cmd_mutate(glob: &str, policy_path: Option<&Path>, which: Mutate) -> Result<(
     Ok(())
 }
 
+// WO-132@v1: test scratch directories were named by pid alone, so a leftover
+// directory of the same name owned by another user (a root CI step, say)
+// survived the ignored cleanup and the next test's write failed with EACCES.
+// Name each one by pid, nanos and a per-process counter, and refuse to adopt an
+// existing directory, so setup fails loudly instead of the test body.
+#[cfg(test)]
+pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bulwark-{tag}-{pid}-{nanos}-{n}"));
+    std::fs::create_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot create fresh test dir {}: {e}", dir.display()));
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2928,9 +2976,8 @@ mod tests {
     // come from the same bytes, and the identity from the same handle.
     #[test]
     fn policy_snapshot_digests_the_parsed_bytes() {
-        let dir = std::env::temp_dir().join(format!("bulwark-snap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = test_scratch_dir("snap");
         let file = dir.join("Bulwark.toml");
         let mut policy = Policy::default_profile();
         assert!(policy.add_protected("/wo117/guarded"));
@@ -2959,9 +3006,8 @@ mod tests {
     // WO-117 (R1): the snapshot keeps Policy::load's error texts.
     #[test]
     fn policy_snapshot_errors_match_policy_load() {
-        let dir = std::env::temp_dir().join(format!("bulwark-snaperr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = test_scratch_dir("snaperr");
         let missing = dir.join("missing.toml");
         let err = snapshot_policy(&integrity::PolicySource::Explicit(missing.clone()))
             .err()

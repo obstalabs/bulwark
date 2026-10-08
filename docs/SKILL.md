@@ -22,12 +22,14 @@ read — see "What this does NOT do" for the one rule that makes that safe.
 
 ## Install
 
-On Linux:
+On Linux (the static musl build runs on any distribution):
 
 ```bash
-curl -fsSL https://github.com/obstalabs/bulwark/releases/latest/download/bulwark-<version>-<arch>-unknown-linux-gnu.tar.gz | tar xz
+curl -fsSL https://github.com/obstalabs/bulwark/releases/latest/download/bulwark-<version>-<arch>-unknown-linux-musl.tar.gz | tar xz
 sudo install -m 0755 bulwark /usr/local/bin/bulwark
 ```
+
+The `-unknown-linux-gnu` archive is the alternative for hosts with glibc 2.31 or newer.
 
 Browse releases at https://github.com/obstalabs/bulwark/releases/latest.
 For macOS, see [macOS Quickstart](macos.md) for ES setup and preflight.

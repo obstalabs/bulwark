@@ -11,7 +11,10 @@
 #   1. an allowed folder is readable by the supervised tree
 #   2. a sibling folder is denied by default, with no prompt
 #   3. a symlink escape from the allowed folder to the sibling is denied
-#   4. a hardlink alias outside the allowed folder is denied
+#   4. hardlinks follow inode identity (WO-68/72): a hardlink OF THE GRANTED
+#      file placed outside the folder is allowed (same inode, same content), and
+#      a FOREIGN file hardlinked INTO the folder after launch is denied with a
+#      receipt (its inode was never in the launch snapshot)
 #   5. /bin/bash + /bin/cat launch through the macOS runtime base set
 #   6. >=1000 opens complete without a gate death (no deadline misses / SIGKILL)
 #
@@ -21,6 +24,82 @@
 #   - BULWARK_MACOS_ES_GATE exported to the edge binary inside the bundle
 #   - the calling terminal has Full Disk Access
 set -uo pipefail
+
+# WO-137@v1: TEST 4 helpers. Pure (no sudo, no cd, no side effects) so the
+# verdict can be exercised against fixture evidence without root:
+# `VERIFY_ALLOWLIST_LIB_ONLY=1 . ./verify-allowlist-gate.sh` defines them and
+# returns before anything below the marker runs.
+#
+# evidence_grep <pattern> <file>: prints 1 on a match, 0 on no match, and
+# "err" when grep could not inspect the file (exit 2), so a read error is never
+# read as "not found" and never passes. The subject is always a file argument,
+# never a producer pipe (SIGPIPE under pipefail would turn a match into a miss).
+# Used for the supervised shell's stdout/stderr markers only; receipts are
+# parsed as JSON records by receipt_tally, never matched by substring.
+evidence_grep() {
+  grep -q -- "$1" "$2"
+  case "$?" in
+    0) echo 1 ;;
+    1) echo 0 ;;
+    *) echo err ;;
+  esac
+}
+
+# receipt_tally <receipts-file> <ino>: parses every receipt line as a JSON record
+# with jq and prints three counts, "<unparsable> <allow-for-ino> <allowlist-deny-for-ino>",
+# or nothing when jq itself could not inspect the file (its exit status is the
+# caller's tri-state signal). A line that is not a complete JSON object counts
+# as unparsable; the allow and deny counts run over complete records only, and
+# the deny counts only a record whose .ino, .decision and .source all match.
+# WO-137@v1 (F2): a receipt truncated right after `"source":"allowlist"` used to
+# satisfy a substring grep; the edge ignores short writes, so truncation is a
+# real failure mode and the evidence must be a parsed record, not a substring.
+# The file is passed as an argument, never piped in (SIGPIPE under pipefail).
+receipt_tally() {
+  # WO-137@v1: receipts are evidence only as complete parsed records.
+  jq -r -R -s --argjson ino "$2" '
+    split("\n") | map(select(length > 0))
+    | map(try (fromjson | if type == "object" then . else {"_bad": true} end) catch {"_bad": true})
+    | [ (map(select(._bad == true)) | length),
+        (map(select(._bad != true and .ino == $ino and .decision == "allow")) | length),
+        (map(select(._bad != true and .ino == $ino and .decision == "deny" and .source == "allowlist")) | length) ]
+    | map(tostring) | join(" ")' "$1" 2>/dev/null
+}
+
+# test4_verdict <stdout-file> <stderr-file> <receipts-file> <foreign-ino> <linked-after-launch>
+# prints the first reason the foreign-hardlink check FAILS, nothing when it is a
+# clean deny. It is a deny only if the link was created after the supervised
+# tree was already running, the foreign content stayed hidden, the supervised
+# shell reported the read denied, the edge did not die, every receipt line is a
+# complete JSON record, no complete record allows the foreign inode and one
+# complete record denies it with source "allowlist". Missing evidence fails, and
+# so does any receipt line that does not parse.
+test4_verdict() {
+  # WO-137@v1: the TEST 4b verdict; any missing or malformed evidence fails.
+  local out="$1" err="$2" rcpt="$3" ino="$4" linked="$5" hit tally rc bad allowed denied
+  [ "$linked" = 1 ] || { echo "link was not created after launch (RUN_STARTED never seen)"; return; }
+  [ -r "$out" ] || { echo "stdout file missing or unreadable: $out"; return; }
+  hit=$(evidence_grep "foreign-secret" "$out")
+  [ "$hit" = 0 ] || { echo "foreign content reached the supervised shell (grep: $hit)"; return; }
+  hit=$(evidence_grep "^HARDLINK_IN_DENIED$" "$out")
+  [ "$hit" = 1 ] || { echo "supervised read of the planted link was not reported denied (grep: $hit)"; return; }
+  [ -r "$err" ] || { echo "stderr file missing or unreadable: $err"; return; }
+  hit=$(evidence_grep "ES edge exited" "$err")
+  [ "$hit" = 0 ] || { echo "abnormal edge exit reported (grep: $hit)"; return; }
+  [ -r "$rcpt" ] || { echo "receipts file missing or unreadable: $rcpt"; return; }
+  [[ "$ino" =~ ^[0-9]+$ ]] || { echo "foreign inode is not a number: '$ino'"; return; }
+  command -v jq >/dev/null 2>&1 || { echo "jq not available; receipts cannot be parsed"; return; }
+  tally=$(receipt_tally "$rcpt" "$ino"); rc=$?
+  [ "$rc" = 0 ] && [[ "$tally" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] || { echo "receipt inspection failed (jq $rc: '$tally')"; return; }
+  read -r bad allowed denied <<<"$tally"
+  [ "$bad" = 0 ] || { echo "$bad receipt line(s) are not complete JSON records"; return; }
+  [ "$allowed" = 0 ] || { echo "$allowed complete receipt(s) allow the foreign inode $ino"; return; }
+  [ "$denied" != 0 ] || { echo "no complete allow-list deny receipt for the foreign inode $ino"; return; }
+}
+
+if [ -n "${VERIFY_ALLOWLIST_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
+# ---- executable-only setup from here on (not run when sourced as a library) ----
 cd "$(dirname "$0")"
 
 BULWARK="${BULWARK:-./bulwark}"
@@ -82,11 +161,18 @@ ALLOW_FILE="$ALLOW_DIR/allowed.txt"
 DENY_FILE="$DENY_DIR/secret.txt"
 SYMLINK_ESCAPE="$ALLOW_DIR/symlink_escape.txt"
 HARDLINK_OUTSIDE="$DENY_DIR/hardlink_to_allowed.txt"
-mkdir -p "$ALLOW_DIR" "$DENY_DIR"
+# WO-137@v1: a foreign file that is hardlinked INTO the granted folder only
+# after the run has started (TEST 4), so its inode is not in the launch snapshot.
+FOREIGN_DIR="$WORK/foreign"
+FOREIGN_FILE="$FOREIGN_DIR/planted.txt"
+FOREIGN_IN_GRANT="$ALLOW_DIR/planted_link.txt"
+mkdir -p "$ALLOW_DIR" "$DENY_DIR" "$FOREIGN_DIR"
 echo "allowed-ok" > "$ALLOW_FILE"
 echo "outside-secret" > "$DENY_FILE"
+echo "foreign-secret" > "$FOREIGN_FILE"
 ln -s "$DENY_FILE" "$SYMLINK_ESCAPE"
 ln "$ALLOW_FILE" "$HARDLINK_OUTSIDE"
+FOREIGN_INO=$(stat -f %i "$FOREIGN_FILE") || fail "cannot stat $FOREIGN_FILE"
 : > "$EVENT_RECEIPTS"
 
 cleanup() { sudo pkill -f bulwark_es_gate 2>/dev/null; rm -rf "$WORK"; }
@@ -96,7 +182,8 @@ echo "==> sudo needed (ES gate runs as root); authorize now:"
 sudo -v || fail "sudo auth failed"
 
 echo
-echo "==> TEST 1/2/3/4/5 (allow-list supervised tree): expect allow dir readable, sibling denied"
+# WO-137@v1: TEST 4a joins the first supervised run (see the 4a note below).
+echo "==> TEST 1/2/3/4a/5 (allow-list supervised tree): expect allow dir readable, sibling and symlink denied, granted-inode hardlink readable"
 SUP_OUT="$WORK/supervised.out"
 SUP_ERR="$WORK/supervised.err"
 sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
@@ -116,13 +203,63 @@ cp "$SUP_ERR" "$SUP_ERR_KEEP"
 ALLOW_FILE_OK=$(grep -q "^ALLOW_FILE_OK:allowed-ok$" "$SUP_OUT" && echo 1 || echo 0)
 DENY_OUTSIDE_OK=$(grep -q "^OUTSIDE_DENIED$" "$SUP_OUT" && echo 1 || echo 0)
 DENY_SYMLINK_OK=$(grep -q "^SYMLINK_ESCAPE_DENIED$" "$SUP_OUT" && echo 1 || echo 0)
-DENY_HARDLINK_OK=$(grep -q "^HARDLINK_OUTSIDE_DENIED$" "$SUP_OUT" && echo 1 || echo 0)
+# WO-137@v1 (TEST 4a): grants are inode identities (WO-68/72), so a hardlink of
+# the GRANTED file placed outside the folder is the granted content under another
+# name and is ALLOWED; reading it discloses nothing the grant did not already
+# allow. The pre-2026-06-24 path-scoped expectation (denied) was replaced per the
+# WO-137 operator ruling; the escape that matters runs the other way (TEST 4b).
+HARDLINK_OUTSIDE_OK=$(grep -q "^HARDLINK_OUTSIDE_READABLE$" "$SUP_OUT" && echo 1 || echo 0)
 grep -qi "allow this read" "$SUP_OUT" "$SUP_ERR" && NO_PROMPT_OK=0 || NO_PROMPT_OK=1
-echo "   status=$SUP_STATUS allow_file=$ALLOW_FILE_OK outside_deny=$DENY_OUTSIDE_OK symlink_deny=$DENY_SYMLINK_OK hardlink_deny=$DENY_HARDLINK_OK no_prompt=$NO_PROMPT_OK"
+# WO-137@v1: report the 4a result beside the other first-run checks.
+echo "   status=$SUP_STATUS allow_file=$ALLOW_FILE_OK outside_deny=$DENY_OUTSIDE_OK symlink_deny=$DENY_SYMLINK_OK granted_hardlink_allow=$HARDLINK_OUTSIDE_OK no_prompt=$NO_PROMPT_OK"
 while IFS= read -r line; do echo "     $line"; done < "$SUP_OUT"
 if [ "$SUP_STATUS" -ne 0 ]; then
   echo "   bulwark run exited $SUP_STATUS; stderr saved to $PWD/$SUP_ERR_KEEP"
   while IFS= read -r line; do echo "     stderr: $line"; done < "$SUP_ERR"
+fi
+
+# WO-137@v1: TEST 4b. The grant snapshot is taken before the agent is spawned,
+# so a file hardlinked into the granted folder once the supervised shell is
+# running presents an inode the snapshot never recorded; the edge must deny it
+# and write an allow-list deny receipt for that inode. The supervised shell
+# announces RUN_STARTED (its stdout is an inherited fd, so no open is gated),
+# THIS unsupervised shell then creates the link, and the supervised shell polls
+# for it with stat (not an open) before trying the read. Pre-launch planting is
+# out of scope by design: a foreign hardlink already inside the grant at launch
+# is snapshotted like any multi-linked file (documented limitation, WO-138).
+echo
+echo "==> TEST 4b (foreign file hardlinked into the granted folder AFTER launch, ino=$FOREIGN_INO): expect DENIED with an allow-list receipt"
+T4_OUT="$WORK/hardlink_in.out"
+T4_ERR="$WORK/hardlink_in.err"
+: > "$T4_OUT"
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+  --deny-all \
+  --allow "$ALLOW_DIR/**" \
+  --receipts "$PWD/$EVENT_RECEIPTS" \
+  -- /bin/bash -c "
+    echo RUN_STARTED
+    for i in \$(seq 1 200); do [ -e '$FOREIGN_IN_GRANT' ] && break; /bin/sleep 0.1; done
+    if [ ! -e '$FOREIGN_IN_GRANT' ]; then echo LINK_NEVER_APPEARED; exit 3; fi
+    if out=\$(/bin/cat '$FOREIGN_IN_GRANT' 2>&1); then echo \"HARDLINK_IN_READABLE:\$out\"; else echo \"HARDLINK_IN_DENIED\"; fi
+  " > "$T4_OUT" 2> "$T4_ERR" &
+T4_PID=$!
+LINKED_AFTER_LAUNCH=0
+for i in $(seq 1 300); do
+  if grep -q "^RUN_STARTED$" "$T4_OUT" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+if grep -q "^RUN_STARTED$" "$T4_OUT" 2>/dev/null; then
+  ln "$FOREIGN_FILE" "$FOREIGN_IN_GRANT" && LINKED_AFTER_LAUNCH=1
+fi
+wait "$T4_PID"
+T4_STATUS=$?
+T4_REASON=$(test4_verdict "$T4_OUT" "$T4_ERR" "$EVENT_RECEIPTS" "$FOREIGN_INO" "$LINKED_AFTER_LAUNCH")
+[ "$T4_STATUS" = 0 ] && [ -z "$T4_REASON" ] && T4_FOREIGN_OK=1 || T4_FOREIGN_OK=0
+echo "   status=$T4_STATUS linked_after_launch=$LINKED_AFTER_LAUNCH foreign_hardlink_deny=$T4_FOREIGN_OK${T4_REASON:+ ($T4_REASON)}"
+while IFS= read -r line; do echo "     $line"; done < "$T4_OUT"
+if [ "$T4_STATUS" -ne 0 ]; then
+  echo "   bulwark run exited $T4_STATUS"
+  while IFS= read -r line; do echo "     stderr: $line"; done < "$T4_ERR"
 fi
 
 echo
@@ -162,7 +299,8 @@ echo
   echo "test2_deny_sibling:    $([ "$DENY_OUTSIDE_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test2_no_prompt:       $([ "$NO_PROMPT_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test3_deny_symlink:    $([ "$DENY_SYMLINK_OK" = 1 ] && echo PASS || echo FAIL)"
-  echo "test4_deny_hardlink:   $([ "$DENY_HARDLINK_OK" = 1 ] && echo PASS || echo FAIL)"
+  echo "test4a_granted_hardlink: $([ "$HARDLINK_OUTSIDE_OK" = 1 ] && echo PASS || echo FAIL) (hardlink of the granted inode outside the folder: allowed, same content)"
+  echo "test4b_foreign_hardlink: $([ "$T4_FOREIGN_OK" = 1 ] && echo PASS || echo "FAIL (${T4_REASON:-run status $T4_STATUS})") (foreign ino $FOREIGN_INO linked into the folder after launch: denied, receipt)"
   echo "test5_base_set_launch: $([ "$ALLOW_FILE_OK" = 1 ] && echo PASS || echo FAIL) (/bin/bash + /bin/cat ran)"
   echo "test6_run_status:      $([ "$LOAD_STATUS" = 0 ] && echo PASS || echo "FAIL ($LOAD_STATUS)")"
   echo "test6_throughput:      $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL) (${LOAD_N:-0} opens)"
@@ -172,16 +310,17 @@ echo
   echo "load_stdout:           $PWD/$LOAD_OUT_KEEP"
   echo "load_stderr:           $PWD/$LOAD_ERR_KEEP"
   if [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$EDGE_ALLOWLIST_OK" = 1 ] && \
-     [ "$SUP_STATUS" = 0 ] && [ "$LOAD_STATUS" = 0 ] && \
+     [ "$SUP_STATUS" = 0 ] && [ "$T4_STATUS" = 0 ] && [ "$LOAD_STATUS" = 0 ] && \
      [ "$ALLOW_FILE_OK" = 1 ] && [ "$DENY_OUTSIDE_OK" = 1 ] && \
-     [ "$NO_PROMPT_OK" = 1 ] && [ "$DENY_SYMLINK_OK" = 1 ] && [ "$DENY_HARDLINK_OK" = 1 ] && \
+     [ "$NO_PROMPT_OK" = 1 ] && [ "$DENY_SYMLINK_OK" = 1 ] && \
+     [ "$HARDLINK_OUTSIDE_OK" = 1 ] && [ "$T4_FOREIGN_OK" = 1 ] && \
      [ "$LOAD_OK" = 1 ]; then
-    echo "verdict:               SEALED - allow-list mode allowed the grant, denied sibling/symlink/hardlink escapes, launched through the macOS base set, and survived 1000+ opens on a real Mac."
+    echo "verdict:               SEALED - allow-list mode allowed the grant (by path and by hardlink of the granted inode), denied the sibling, the symlink escape and a foreign file hardlinked into the grant after launch with a receipt, launched through the macOS base set, and survived 1000+ opens on a real Mac."
   elif [ "${BUNDLE_VALID:-0}" != 1 ]; then
     echo "verdict:               NOT SEALED - gate bundle not validated (sign/notarize/staple/spctl)."
   elif [ "$EDGE_ALLOWLIST_OK" != 1 ]; then
     echo "verdict:               NOT SEALED - gate edge does not contain allow-list support; rebuild and copy a fresh bulwark_es_gate.app."
-  elif [ "$SUP_STATUS" != 0 ] || [ "$LOAD_STATUS" != 0 ]; then
+  elif [ "$SUP_STATUS" != 0 ] || [ "$T4_STATUS" != 0 ] || [ "$LOAD_STATUS" != 0 ]; then
     echo "verdict:               NOT SEALED - bulwark run failed; inspect preserved stderr files."
   else
     echo "verdict:               NOT SEALED - see failing test(s) above."

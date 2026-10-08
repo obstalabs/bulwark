@@ -24,7 +24,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-          targets: x86_64-apple-darwin, x86_64-unknown-linux-musl
+          # WO-135@v2: aarch64 gnu is cross-built below for the glibc floor check.
+          targets: x86_64-apple-darwin, x86_64-unknown-linux-musl, aarch64-unknown-linux-gnu
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -75,6 +76,25 @@ jobs:
             cat ldd.out
             exit 1
           fi
+
+      # WO-135@v2: the release gnu binaries are built with cross so they link
+      # against an older glibc than ubuntu-latest's 2.39 (0.9.1 shipped an x86_64
+      # binary that needed 2.39). Build BOTH gnu targets the same way here and
+      # run the shared floor guard (scripts/check-glibc-floor.sh, the same one
+      # release.yml runs) on each, so a regression is caught before a tag.
+      # readelf reads the aarch64 ELF on this x86_64 runner; nothing is executed.
+      - name: Install cross (gnu floor check)
+        run: cargo install cross --locked
+
+      - name: Build gnu targets via cross (release shape)
+        run: |
+          cross build --release --target x86_64-unknown-linux-gnu
+          cross build --release --target aarch64-unknown-linux-gnu
+
+      - name: Assert glibc floor (gnu, cross builds)
+        run: |
+          scripts/check-glibc-floor.sh target/x86_64-unknown-linux-gnu/release/bulwark
+          scripts/check-glibc-floor.sh target/aarch64-unknown-linux-gnu/release/bulwark
 
       - name: Unit tests
         run: cargo test --verbose

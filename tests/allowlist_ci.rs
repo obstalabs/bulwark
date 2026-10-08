@@ -101,8 +101,12 @@ fn triage_agent_denied_etc_shadow() {
 #[ignore = "requires Linux + root + an ext4 loopback mount"]
 fn reused_inode_in_grant_is_denied() {
     // Mount a tiny ext4 image (few inodes -> reuse happens immediately).
-    let img = std::env::temp_dir().join(format!("bw-reuse-{}.img", std::process::id()));
-    let mnt = std::env::temp_dir().join(format!("bw-reuse-{}", std::process::id()));
+    // WO-132@v1: the image and mount point used to be named by pid alone; a
+    // leftover from an earlier run (image or busy mount) made this fail or
+    // mount over the wrong directory. Both now live in a fresh pid+nanos dir.
+    let base = scratch("reuse");
+    let img = base.join("fs.img");
+    let mnt = base.join("mnt");
     fs::create_dir_all(&mnt).unwrap();
     let dd = Command::new("dd")
         .args(["if=/dev/zero"])

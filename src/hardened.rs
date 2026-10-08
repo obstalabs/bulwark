@@ -170,16 +170,39 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
             eprintln!("[bulwark] hardened: skip allow {concrete} (not present or symlink in path)");
             continue;
         }
+        // WO-134@v1: the kernel rejects a path_beneath rule that grants the
+        // directory-only right READ_DIR on a non-directory (EINVAL), so one mask
+        // for every path silently dropped each regular file and char device in
+        // the base set (/dev/null, /etc/passwd, ld.so.cache, ...) and every
+        // file-level operator grant. Ask the fd what it is and grant READ_DIR
+        // only to directories. A failed fstat skips the rule: fail closed.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(parent_fd, &mut st) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(parent_fd);
+            }
+            eprintln!("[bulwark] hardened: skip allow {concrete} (cannot stat: {err})");
+            continue;
+        }
+        let allowed_access = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+            LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+        } else {
+            LANDLOCK_ACCESS_FS_READ_FILE
+        };
         let rule = PathBeneathAttr {
-            allowed_access: LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+            allowed_access,
             parent_fd,
         };
         let rc = add_rule(ruleset_fd, &rule);
+        // WO-134@v1: read errno before close() can overwrite it; the OS error is
+        // what makes the next dropped rule diagnosable from the stderr line.
+        let add_err = std::io::Error::last_os_error();
         unsafe {
             libc::close(parent_fd);
         }
         if rc != 0 {
-            eprintln!("[bulwark] hardened: could not add allow rule for {concrete}");
+            eprintln!("[bulwark] hardened: could not add allow rule for {concrete}: {add_err}");
         } else {
             allowed += 1;
         }

@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-07
+
+### Security
+<!-- WO-137@v1: the allow-list grant snapshot followed symlinks; found by the macOS allow-list seal. -->
+- Allow-list mode (`--deny-all --allow <glob>`) no longer follows symlinks when
+  it snapshots a grant at launch. In 0.9.0 and 0.9.1 a symlink inside a granted
+  folder recorded its target's inode, so a link to a file outside the grant made
+  that file readable to the supervised tree, through the link and by its own
+  path. Symlinks inside a grant are now skipped and a grant whose path ends in a
+  symlink contributes nothing, however the path is spelled (a trailing `/` or
+  `/.` does not get around the check, and a path ending in `..` grants nothing);
+  a stderr note names the real path to grant instead, which matters on macOS
+  where `/tmp`, `/var` and `/etc` are symlinks.
+  Hardlinks keep their inode semantics: a hardlink of a granted file is that
+  file, and a foreign file hardlinked into a grant after launch is denied.
+
+### Fixed
+<!-- WO-132@v1: the CI flake on the 0.9.1 merge; test-only, but user-visible as red CI. -->
+- Tests no longer name their scratch directories or images by process id alone,
+  so a leftover from another user or a root step cannot make them fail.
+<!-- WO-134@v1: file-level Landlock rules were dropped; hardened mode could not read /dev/null. -->
+- `--hardened` now grants read access to regular files and devices on the allow
+  list, not only directories. Landlock rejected the directory right on a file, so
+  `/dev/null`, `/etc/passwd`, `/etc/resolv.conf` and every other file in the
+  runtime base set or a file-level `--allow` were silently left unreadable; the
+  stderr line for a dropped rule now includes the OS error.
+<!-- WO-131@v1: skipped-as-absent paths were still handed to fanotify_mark. -->
+- A policy that names a protected path absent on this host (the default
+  profile's `~/.ssh` on a fresh runner, for example) no longer aborts the run
+  with `fanotify_mark ... No such file or directory`: only the paths that
+  resolved are marked, and the skip note now names the absent paths. Only an
+  absent path is skipped; a protected path that cannot be stat'ed for any other
+  reason (permission denied through its parent, an I/O error) refuses the run
+  before launch, naming the path and the OS error.
+<!-- WO-133@v3: --allow was silently ignored on the deny-list path; the stub error did not say nothing ran. -->
+- `bulwark run --allow <glob>` without `--hardened` or `--deny-all` now refuses
+  before anything is spawned, naming the two modes that take an allow-list; it
+  used to ignore the grant and run the default deny-list. On a platform without
+  Landlock, `--hardened` now says to run without it to use the Endpoint
+  Security gate and ends with "nothing was run".
+<!-- WO-135@v2: the 0.9.1 x86_64 gnu binary required glibc 2.39. -->
+- The static musl build is now the documented Linux install, and the glibc
+  (`-gnu`) builds are cross-compiled against glibc 2.31 with a check in both
+  the release and PR workflows that fails if either gnu binary needs anything
+  newer, or needs a loader feature the floor cannot vouch for; the 0.9.1 x86_64 gnu
+  archive required glibc 2.39 and did not load cleanly on Debian 12 or Ubuntu
+  22.04.
+
+### Changed
+<!-- WO-128@v1: measurement instrument; the allow/deny decision is unchanged. -->
+- macOS allow-list receipts now say when an open outside the supervised tree came
+  from a process whose ancestry could not be established, instead of reporting it
+  as an ordinary outside open. Decisions are unchanged.
+
 ## [0.9.1] - 2026-10-05
 
 ### Security

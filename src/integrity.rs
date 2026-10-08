@@ -466,9 +466,8 @@ mod tests {
 
     // WO-117: a fresh state file per test so the keyed history starts empty.
     fn scratch_state(tag: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("bulwark-it-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // WO-132@v1: collision-free scratch dir instead of the tag+pid name.
+        let dir = crate::test_scratch_dir(&format!("it-{tag}"));
         (dir.clone(), dir.join("state.toml"))
     }
 
@@ -592,9 +591,9 @@ mod tests {
 
     #[test]
     fn store_round_trip_begin_then_clean_is_clean_next() {
-        let dir = std::env::temp_dir().join(format!("bulwark-it-{}", std::process::id()));
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = crate::test_scratch_dir("it");
         let path = dir.join("state.toml");
-        let _ = std::fs::remove_dir_all(&dir);
 
         let c = ctx(1, vec![obj("/s", 1, 10)]);
 
@@ -615,9 +614,9 @@ mod tests {
 
     #[test]
     fn store_unclean_then_persist_then_clear() {
-        let dir = std::env::temp_dir().join(format!("bulwark-it2-{}", std::process::id()));
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = crate::test_scratch_dir("it2");
         let path = dir.join("state.toml");
-        let _ = std::fs::remove_dir_all(&dir);
 
         let c = ctx(1, vec![obj("/s", 1, 10)]);
 
@@ -655,9 +654,9 @@ mod tests {
 
     #[test]
     fn clear_then_redrift_retaints() {
-        let dir = std::env::temp_dir().join(format!("bulwark-it3-{}", std::process::id()));
+        // WO-132@v1: collision-free scratch dir instead of the pid-only name.
+        let dir = crate::test_scratch_dir("it3");
         let path = dir.join("state.toml");
-        let _ = std::fs::remove_dir_all(&dir);
 
         let c1 = ctx(1, vec![obj("/s", 1, 10)]);
         let mut s1 = Store::load(&path);

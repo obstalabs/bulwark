@@ -21,8 +21,12 @@ pub fn abi_version() -> Option<i32> {
 /// installs a Landlock ruleset; with no Landlock on this platform we refuse so
 /// the caller never believes a floor was applied when none was.
 pub fn apply_read_floor(_allow_paths: &[String]) -> Result<()> {
+    // WO-133@v3: say that nothing ran. In a pasted multi-line demo the lines
+    // after this error otherwise read as if they ran under bulwark; they ran in
+    // the operator's own shell. The message ends on that sentence on purpose.
     bail!(
         "hardened mode (Landlock read floor) is not available on this platform — \
-         it requires Linux 5.13+. The macOS enforcement floor is tracked in bulwark/WO-26."
+         it requires Linux 5.13+ (the macOS enforcement floor is tracked in bulwark/WO-26); \
+         run without --hardened to use the Endpoint Security gate; nothing was run"
     )
 }

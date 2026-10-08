@@ -189,3 +189,100 @@ fn hardened_denies_intermediate_symlink_grant() {
         "a symlink in an intermediate grant component must not widen the floor; got: {out:?}"
     );
 }
+
+// WO-134@v1: regression for the dropped file-level rules. Landlock refuses a
+// path_beneath rule that grants READ_DIR on a non-directory, so every regular
+// file in the runtime base set (/dev/null among them) and every file-level
+// operator grant used to be skipped with only a stderr line: the floor applied,
+// the agent started, and could not read /dev/null or /etc/passwd. The floor must
+// grant READ_FILE to files and READ_FILE|READ_DIR to directories. Landlock needs
+// no root, so this test is not ignored. Where the kernel has no Landlock (a
+// developer Mac, an old kernel) it prints why and returns, because cargo has no
+// runtime skip; on the Linux CI runner Landlock is expected, so a failed probe
+// there is a broken test and FAILS instead of passing while testing nothing.
+#[test]
+fn hardened_floor_grants_files_and_directories_alike() {
+    let probe = Command::new(bin())
+        .arg("landlock-check")
+        .output()
+        .expect("spawn landlock-check");
+    if !probe.status.success() {
+        let probe_stderr = String::from_utf8_lossy(&probe.stderr);
+        if cfg!(target_os = "linux") && std::env::var_os("CI").is_some() {
+            panic!(
+                "Landlock expected on the Linux CI runner, but `bulwark landlock-check` failed \
+                 (status {}); this test would otherwise pass without testing anything. stderr: {}",
+                probe.status,
+                probe_stderr.trim()
+            );
+        }
+        eprintln!(
+            "SKIP hardened_floor_grants_files_and_directories_alike: no Landlock on this kernel \
+             (landlock-check status {}; {})",
+            probe.status,
+            probe_stderr.trim()
+        );
+        return;
+    }
+
+    // Canonical paths: the grant checks refuse a symlinked prefix.
+    let dir = fs::canonicalize(scratch("files")).unwrap();
+    let d = dir.join("d");
+    fs::create_dir_all(&d).unwrap();
+    let inner = d.join("inner.txt");
+    fs::write(&inner, "INNER_OK\n").unwrap();
+    let f = dir.join("f.txt");
+    fs::write(&f, "FILE_OK\n").unwrap();
+    let g = dir.join("g.txt");
+    fs::write(&g, "G_MUST_NOT_LEAK\n").unwrap();
+
+    // F is a file-level grant, D a directory grant, /dev/null comes from the
+    // runtime base set, G is a sibling on no list.
+    let script = format!(
+        "cat {f}; cat {inner}; cat /dev/null && echo NULL_OK; cat {g} 2>&1; exit 0",
+        f = f.display(),
+        inner = inner.display(),
+        g = g.display()
+    );
+    let out = Command::new(bin())
+        .args(["run", "--hardened", "--allow"])
+        .arg(format!("{}/**", d.display()))
+        .arg("--allow")
+        .arg(&f)
+        .args(["--", "/bin/sh", "-c", &script])
+        .output()
+        .expect("spawn bulwark");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains("kernel-enforced read floor applied"),
+        "the floor must apply; stderr: {stderr}"
+    );
+    for dropped in [f.display().to_string(), "/dev/null".to_string()] {
+        assert!(
+            !stderr.contains(&format!("could not add allow rule for {dropped}")),
+            "file-level rule for {dropped} must not be dropped; stderr: {stderr}"
+        );
+    }
+    assert!(
+        stdout.contains("FILE_OK"),
+        "a file-level grant must be readable; stdout: {stdout:?} stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("INNER_OK"),
+        "a file under a directory grant must be readable; stdout: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("NULL_OK"),
+        "/dev/null from the base set must open for read; stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("G_MUST_NOT_LEAK"),
+        "a sibling file on no list must stay denied; stdout: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Permission denied"),
+        "the denied sibling must fail with EACCES; stdout: {stdout:?}"
+    );
+}

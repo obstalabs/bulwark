@@ -123,3 +123,114 @@ fn audit_renders_and_counts_receipts() {
         "audit should summarize counts; got: {stdout}"
     );
 }
+
+// WO-133@v3: run `bulwark run <args> -- /bin/sh -c 'echo SPAWNED > <marker>'`
+// and return (output, marker). A marker that exists afterwards proves the
+// agent was spawned; these refusals must happen before that and need no root.
+fn run_with_spawn_marker(dir: &std::path::Path, args: &[&str]) -> (std::process::Output, PathBuf) {
+    let marker = dir.join("spawned");
+    let script = format!("echo SPAWNED > '{}'", marker.display());
+    let out = Command::new(bin())
+        .arg("run")
+        .args(args)
+        .args(["--", "/bin/sh", "-c", &script])
+        .output()
+        .unwrap();
+    (out, marker)
+}
+
+// WO-133@v3: --allow means nothing on the default deny-list path; running
+// anyway would give the operator a different gate than the one they named.
+#[test]
+fn allow_without_hardened_or_deny_all_refuses_before_spawn() {
+    let dir = scratch("allow-alone");
+    let glob = format!("{}/**", dir.display());
+    let (out, marker) = run_with_spawn_marker(&dir, &["--allow", &glob]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must refuse; stderr: {stderr}");
+    assert!(!marker.exists(), "agent was spawned despite the refusal");
+    assert!(
+        stderr.contains(
+            "allow-lists apply only with --hardened (Linux) or --deny-all; nothing was run"
+        ),
+        "refusal must name the modes that take --allow; got: {stderr}"
+    );
+}
+
+// WO-133@v3: where Landlock does not exist, --hardened must say that nothing
+// ran, so a pasted multi-line demo cannot read as if the agent was supervised.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn hardened_unsupported_refuses_before_spawn() {
+    let dir = scratch("hardened-stub");
+    // Canonical, so the symlink-widening check (/var -> /private/var on macOS)
+    // does not refuse the grant before the platform stub is reached.
+    let real = fs::canonicalize(&dir).unwrap();
+    let glob = format!("{}/**", real.display());
+    let (out, marker) = run_with_spawn_marker(&dir, &["--hardened", "--allow", &glob]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must refuse; stderr: {stderr}");
+    assert!(!marker.exists(), "agent was spawned despite the refusal");
+    assert!(
+        stderr.contains("not available on this platform"),
+        "refusal must say hardened mode is unavailable; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("run without --hardened to use the Endpoint Security gate"),
+        "refusal must name the alternative; got: {stderr}"
+    );
+    assert!(
+        stderr.trim_end().ends_with("; nothing was run"),
+        "refusal must end with '; nothing was run'; got: {stderr}"
+    );
+}
+
+// WO-133@v3: the refusal lives on the `run` surface only. `bulwark launch`
+// with the starter profile (protect AND allow, a deny-list launch) must keep
+// reaching its own path; the operator ruled its allow-list semantics a
+// separate WO. This pins that the new check never fires for launch.
+#[test]
+fn launch_with_starter_profile_is_not_refused_by_the_allow_check() {
+    let dir = scratch("launch-starter");
+    let policy = dir.join("Bulwark.toml");
+    let init = Command::new(bin())
+        .args(["launch", "--init", "probe", "--policy"])
+        .arg(&policy)
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "launch --init must write the starter profile; stderr: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let body = fs::read_to_string(&policy).unwrap();
+    assert!(
+        body.contains("[agents.probe]")
+            && body.contains("allow = [")
+            && body.contains("protect = ["),
+        "the starter profile must carry both protect and allow; got: {body}"
+    );
+    let out = Command::new(bin())
+        .args(["launch", "probe", "--policy"])
+        .arg(&policy)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("allow-lists apply only with"),
+        "launch must not be refused by the run-surface --allow check; got: {stderr}"
+    );
+    // WO-133@v3: positive evidence that launch got past plan resolution into
+    // cmd_run. The first thing cmd_run does with a plan's protect list is the
+    // strict ProtectedSet::resolve (its only caller), whose error reads
+    // "cannot stat protected path <p>"; nothing before it in cmd_run prints for
+    // a non-root run (the worker drop is silent below uid 0). The starter
+    // profile's protect list reaches it as written ("~/.ssh", "**/.env"), so
+    // that line is the earliest stable one until the launch-profile WO changes
+    // how launch resolves protect strings, at which point this pin moves.
+    assert!(
+        stderr.contains("cannot stat protected path"),
+        "launch must reach cmd_run's strict protect resolution; got: {stderr}"
+    );
+}

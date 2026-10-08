@@ -639,15 +639,10 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) -> Result<()> {
 mod allowlist_edge_tests {
     use super::*;
     use crate::allowlist::AllowList;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
+    // WO-132@v1: collision-free scratch dir (pid + nanos + counter, never reused).
     fn scratch(tag: &str) -> std::path::PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("bulwark-es-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch_dir(&format!("es-{tag}"))
     }
 
     /// B-B1 regression: macOS allow-list grants are emitted to the ES edge as
@@ -698,15 +693,10 @@ mod allowlist_edge_tests {
 mod supervise_tests {
     use super::*;
     use std::process::Stdio;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
+    // WO-132@v1: collision-free scratch dir (pid + nanos + counter, never reused).
     fn scratch(tag: &str) -> PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("bulwark-sup-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch_dir(&format!("sup-{tag}"))
     }
 
     // WO-127: a fake edge that signals readiness, then exits the way asked:

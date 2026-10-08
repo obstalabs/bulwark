@@ -236,13 +236,46 @@ impl AllowList {
     /// every inode under the glob's directory prefix — so a non-granted file
     /// sharing the prefix (e.g. `secret.env` beside an `--allow '<dir>/*.log'`)
     /// is never snapshotted and therefore cannot be reached by hardlinking it to
-    /// a granted name. Idempotent; call at launch before supervising.
+    /// a granted name. Symlinks are never followed: a link inside a grant does
+    /// not record its target's inode, and a grant whose prefix ends in a symlink
+    /// contributes nothing (grant the target's real path instead). Idempotent;
+    /// call at launch before supervising.
     pub fn snapshot_grants(&mut self) {
         let grants = self.grants.clone();
         for g in &grants {
             let prefix = concrete_prefix(g);
             if prefix.is_empty() {
                 continue;
+            }
+            // WO-137@v1 (F1): the symlink check must see the real final
+            // component. `link/.` and `link/` both lstat as the target because
+            // the kernel resolves the link to reach `.` or the trailing slash,
+            // so the check runs on the lexically normalized prefix. Only the
+            // check uses it: traversal and glob matching keep the prefix as
+            // written, so `real/./**` snapshots exactly what `real/**` does.
+            let Some(anchor) = prefix_anchor(prefix) else {
+                eprintln!(
+                    "[bulwark] grant {g} skipped: its prefix ends in '..'; grant the \
+                     resolved path instead"
+                );
+                continue;
+            };
+            match fs::symlink_metadata(&anchor) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    // WO-137@v1 (F3): say why the grant is empty and what to
+                    // grant instead. On macOS /tmp, /var and /etc are symlinks,
+                    // so `--allow /tmp/**` would otherwise fail silently.
+                    // canonicalize is a read-only realpath for the message.
+                    let rest = &g[prefix.len()..];
+                    let hint = match fs::canonicalize(&anchor) {
+                        Ok(real) => format!("grant {}{rest} to allow that tree", real.display()),
+                        Err(_) => "grant its real path to allow that tree".to_string(),
+                    };
+                    eprintln!("[bulwark] grant {g} skipped: its prefix is a symlink; {hint}");
+                    continue;
+                }
+                Ok(_) => {}
+                Err(_) => continue,
             }
             self.snapshot_one(g, Path::new(prefix), 0);
         }
@@ -262,9 +295,12 @@ impl AllowList {
             self.grant_capped = true;
             return;
         }
-        let meta = match fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return,
+        // WO-137@v1: measure the prefix without following its final component.
+        // A symlinked prefix contributes nothing, as hardened mode refuses one
+        // (WO-81); following it would snapshot files under some other tree.
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) if !m.file_type().is_symlink() => m,
+            _ => return,
         };
         let path_str = path.to_string_lossy();
         if glob::matches(g, &path_str) {
@@ -284,7 +320,14 @@ impl AllowList {
             let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_real_dir {
                 self.snapshot_one(g, &entry.path(), depth + 1);
-            } else if let Ok(m) = fs::metadata(entry.path()) {
+            } else if let Ok(m) = fs::symlink_metadata(entry.path()) {
+                // WO-137@v1: a symlink entry is skipped, never measured through.
+                // fs::metadata followed it and recorded the TARGET's inode, so a
+                // link in the grant to an outside file granted that file for
+                // every open by the tree, by its own path too (0.9.0, 0.9.1).
+                if m.file_type().is_symlink() {
+                    continue;
+                }
                 if self.grant_inodes.len() >= MAX_GRANT_ENTRIES {
                     self.grant_capped = true;
                     return;
@@ -420,6 +463,31 @@ fn concrete_prefix(g: &str) -> &str {
     }
 }
 
+/// WO-137@v1 (F1): the path whose final component the symlink check must
+/// lstat, derived lexically from a concrete prefix: trailing `/` and `.`
+/// components are dropped (`link/.` and `link/` both anchor on `link`), and a
+/// prefix whose final component is `..` yields `None` because `..` can step
+/// across a symlink before the check ever sees it. Intermediate components are
+/// left alone: a deeper grant under macOS's `/tmp -> /private/tmp` must still
+/// work, only the final component decides. Nothing is touched on disk.
+fn prefix_anchor(prefix: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut anchor = std::path::PathBuf::new();
+    let mut last_is_parent = false;
+    for c in Path::new(prefix).components() {
+        // `Path::components` already elides interior `.` and the trailing slash.
+        last_is_parent = matches!(c, Component::ParentDir);
+        anchor.push(c.as_os_str());
+    }
+    if last_is_parent {
+        return None;
+    }
+    if anchor.as_os_str().is_empty() {
+        anchor.push(".");
+    }
+    Some(anchor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,16 +568,10 @@ mod tests {
 #[cfg(test)]
 mod inode_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
+    // WO-132@v1: collision-free scratch dir (pid + nanos + counter, never reused).
     fn scratch(tag: &str) -> std::path::PathBuf {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d =
-            std::env::temp_dir().join(format!("bulwark-allow-{tag}-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+        crate::test_scratch_dir(&format!("allow-{tag}"))
     }
 
     fn key_of(p: &Path) -> InodeKey {
@@ -528,6 +590,22 @@ mod inode_tests {
         assert_eq!(concrete_prefix("/etc/foo.conf"), "/etc/foo.conf");
         assert_eq!(concrete_prefix("/data/**/*.log"), "/data");
         assert_eq!(concrete_prefix("/*"), "/");
+    }
+
+    // WO-137@v1 (F1): lexical anchor for the symlink check.
+    #[test]
+    fn prefix_anchor_cases() {
+        let p = |s: &str| prefix_anchor(s).map(|a| a.to_string_lossy().into_owned());
+        assert_eq!(p("/tmp/."), Some("/tmp".into()));
+        assert_eq!(p("/tmp/"), Some("/tmp".into()));
+        assert_eq!(p("/tmp/./."), Some("/tmp".into()));
+        assert_eq!(p("/tmp/sub/.."), None);
+        assert_eq!(p("/"), Some("/".into()));
+        assert_eq!(p("."), Some(".".into()));
+        assert_eq!(p("./rel/."), Some("./rel".into()));
+        // Intermediate `..` is left for the kernel to resolve; only the final
+        // component decides.
+        assert_eq!(p("/a/../b"), Some("/a/../b".into()));
     }
 
     /// A grant file present at launch is allowed by inode.
@@ -585,6 +663,119 @@ mod inode_tests {
         // hardlinking it to a *.log name still fails the inode gate.
         let aliased = format!("{}/x.log", dir.display());
         assert!(!a.allows_open(&aliased, &key_of(&env), gen_of(&env)));
+    }
+
+    // WO-137@v1: a symlink inside a grant must never put its TARGET's inode in
+    // the snapshot. 0.9.0 and 0.9.1 measured non-directory entries with
+    // fs::metadata, which follows links, so `allowed/link -> ../sibling/secret`
+    // granted secret's inode and the agent could read it by its own path. A
+    // grant whose prefix's final component is a symlink contributes nothing;
+    // the operator who wants the target grants the target's real path.
+    #[test]
+    fn symlink_in_grant_does_not_snapshot_its_target() {
+        let dir = scratch("symlink");
+        let outside = scratch("symlink-target");
+        let real = dir.join("app.log");
+        let secret = outside.join("secret");
+        fs::write(&real, b"a").unwrap();
+        fs::write(&secret, b"s").unwrap();
+        let link = dir.join("link.log");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let glob = format!("{}/**", dir.display());
+        let mut al = AllowList::new(vec![glob]).without_base();
+        al.snapshot_grants();
+
+        let recorded = |p: &Path| al.grant_inodes.iter().any(|(k, _)| *k == key_of(p));
+        assert!(
+            recorded(&real),
+            "the regular file's inode must be snapshotted"
+        );
+        assert!(
+            !recorded(&secret),
+            "the symlink target's inode must NOT be snapshotted"
+        );
+        // The link's path matches the glob, but the inode it opens is the
+        // target's, which the snapshot never recorded: denied through the link.
+        assert!(!al.allows_open(&link.to_string_lossy(), &key_of(&secret), gen_of(&secret)));
+
+        // A grant whose prefix is a symlink to a real directory adds nothing.
+        let via_link = scratch("symlink-prefix").join("granted");
+        std::os::unix::fs::symlink(&dir, &via_link).unwrap();
+        let mut by_dir_link =
+            AllowList::new(vec![format!("{}/**", via_link.display())]).without_base();
+        by_dir_link.snapshot_grants();
+        assert!(
+            by_dir_link.grant_inodes.is_empty(),
+            "a symlinked grant prefix must contribute nothing; got {:?}",
+            by_dir_link.grant_inodes
+        );
+        // Same for a concrete grant that names the file symlink itself.
+        let mut by_file_link =
+            AllowList::new(vec![link.to_string_lossy().into_owned()]).without_base();
+        by_file_link.snapshot_grants();
+        assert!(
+            by_file_link.grant_inodes.is_empty(),
+            "a concrete grant on a symlink must contribute nothing; got {:?}",
+            by_file_link.grant_inodes
+        );
+    }
+
+    // WO-137@v1 (F1): the symlink check must see the real final component.
+    // `link/./**` has the concrete prefix `link/.` and `link/**` written with a
+    // trailing slash has `link/`; lstat resolves `link` for both, so the target
+    // tree was snapshotted through the back door. A `..`-terminated prefix is
+    // refused outright (it can cross a symlink lexically), while `real/./**`
+    // must keep snapshotting exactly what `real/**` does.
+    #[test]
+    fn symlink_prefix_check_sees_through_trailing_dot_slash_and_dotdot() {
+        let real = scratch("norm-real");
+        fs::write(real.join("a.log"), b"a").unwrap();
+        fs::create_dir(real.join("sub")).unwrap();
+        fs::write(real.join("sub").join("b.log"), b"b").unwrap();
+        let link = scratch("norm-link").join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let snapshot = |g: String| {
+            let mut al = AllowList::new(vec![g]).without_base();
+            al.snapshot_grants();
+            al.grant_inodes
+        };
+        let via_dot = snapshot(format!("{}/./**", link.display()));
+        assert!(
+            via_dot.is_empty(),
+            "link/./** must contribute nothing; got {via_dot:?}"
+        );
+        let via_slash = snapshot(format!("{}/**", link.display()).replace("/**", "//**"));
+        assert!(
+            via_slash.is_empty(),
+            "link//** (trailing slash on the prefix) must contribute nothing; got {via_slash:?}"
+        );
+        // WO-137@v1: a concrete grant written `link/` is the form that leaked before
+        // the anchor (lstat of `link/` resolves the link); `link//**` never did.
+        let concrete_slash = snapshot(format!("{}/", link.display()));
+        assert!(
+            concrete_slash.is_empty(),
+            "a concrete link/ grant must contribute nothing; got {concrete_slash:?}"
+        );
+        let plain = snapshot(format!("{}/**", real.display()));
+        for f in [real.join("a.log"), real.join("sub").join("b.log")] {
+            assert!(
+                plain.iter().any(|(k, _)| *k == key_of(&f)),
+                "real/** must snapshot {}",
+                f.display()
+            );
+        }
+        let dotted = snapshot(format!("{}/./**", real.display()));
+        assert_eq!(
+            dotted, plain,
+            "real/./** must snapshot exactly what real/** does"
+        );
+        let dotdot = snapshot(format!("{}/sub/../**", real.display()));
+        assert!(
+            dotdot.is_empty(),
+            "a ..-terminated prefix must contribute nothing; got {dotdot:?}"
+        );
     }
 
     /// Base-set paths are allowed by path regardless of inode (documented read

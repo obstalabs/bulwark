@@ -180,3 +180,56 @@ fn renamed_protected_file_same_inode_still_denied() {
         "renamed file open should record a deny; receipts={recs:?}"
     );
 }
+
+// WO-131@v1: a policy naming a protected path that does not exist on this host
+// (the default profile's ~/.ssh on a fresh CI runner) must START, skipping the
+// absent path with a note that names it; it must never die in fanotify_mark
+// with ENOENT. Before the fix every requested path was marked, present or not.
+#[test]
+#[ignore = "requires Linux + root for fanotify"]
+fn policy_with_absent_protected_path_starts_and_names_the_skip() {
+    let dir = scratch("absent");
+    let ok = dir.join("notes.txt");
+    fs::write(&ok, "benign content\n").unwrap();
+    let secret = dir.join("secret.env");
+    fs::write(&secret, "TOPSECRET=abc\n").unwrap();
+    let absent = dir.join("no-such-dot-ssh");
+    let policy = dir.join("Bulwark.toml");
+    fs::write(
+        &policy,
+        format!(
+            "[protected]\nprompt = [{:?}, {:?}]\n",
+            secret.display().to_string(),
+            absent.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args(["run", "--allow-root", "--policy"])
+        .arg(&policy)
+        .args(["--", "cat"])
+        .arg(&ok)
+        .output()
+        .expect("failed to spawn bulwark");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !stderr.contains("fanotify_mark on"),
+        "an absent protected path must not reach fanotify_mark; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("not present on this host, skipped")
+            && stderr.contains(absent.to_str().unwrap()),
+        "the skip note must name the absent path; stderr={stderr}"
+    );
+    assert!(
+        out.status.success(),
+        "the run must start with the present paths; stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("benign content"),
+        "the agent must run under the gate; stdout={stdout:?}"
+    );
+}

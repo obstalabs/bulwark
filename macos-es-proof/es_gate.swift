@@ -658,7 +658,15 @@ let res = es_new_client(&client) { clientPtr, message in
             if !treeHit {
                 allow = true
                 source = "outside-tree"
-                reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
+                // WO-128@v2: measurement instrument, decision unchanged. An outside
+                // open whose ancestry walk failed or hit maxDepth is named in the
+                // receipt so a desktop run can count how often option (a) would
+                // have denied an unrelated process; the rule is chosen from that count.
+                if membership == .unknown {
+                    reason = "ancestry could not be established (treated as outside)"
+                } else {
+                    reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
+                }
                 cacheKernelAllow = false
             } else if allowedByPolicy {
                 allow = true
