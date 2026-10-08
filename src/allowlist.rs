@@ -751,6 +751,13 @@ mod inode_tests {
             via_slash.is_empty(),
             "link//** (trailing slash on the prefix) must contribute nothing; got {via_slash:?}"
         );
+        // WO-137@v1: a concrete grant written `link/` is the form that leaked before
+        // the anchor (lstat of `link/` resolves the link); `link//**` never did.
+        let concrete_slash = snapshot(format!("{}/", link.display()));
+        assert!(
+            concrete_slash.is_empty(),
+            "a concrete link/ grant must contribute nothing; got {concrete_slash:?}"
+        );
         let plain = snapshot(format!("{}/**", real.display()));
         for f in [real.join("a.log"), real.join("sub").join("b.log")] {
             assert!(
