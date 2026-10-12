@@ -64,9 +64,33 @@ want an operator prompt, the fanotify gate remains.
   not gate writes, execution, or the network.
 - **Requires Landlock** (Linux 5.13+, best on recent kernels). Hardened mode
   refuses to start if Landlock is unavailable rather than running unprotected.
+<!-- WO-144@v1: hardened mode used to exec the agent at the launching uid. -->
+- **The agent does not run as root.** Under `sudo`, the floor is applied and
+  the process then drops to the invoking user (`SUDO_UID`, or `--worker-uid`)
+  before it becomes the agent, the same drop the fanotify gate applies to its
+  child. Launched as real root with no sudo origin and no `--worker-uid`, it
+  refuses before anything runs; `--allow-root` keeps uid 0 on purpose. An
+  unprivileged launch has nothing to drop and works as before.
 - **No interactive consent and no per-decision receipts** in this mode — the
   kernel enforces silently. Use the fanotify gate when you need the audit trail
   or a human prompt.
+<!-- WO-142@v1: the floor used to cover all of /proc through two wildcard base entries. -->
+- **`ps` and per-process self-inspection do not work.** Landlock grants by
+  path, and the only exact paths under `/proc` in the floor are the
+  system-wide files tools size themselves from (`/proc/cpuinfo`, `/proc/stat`,
+  `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`). `/proc/self` is a
+  symlink the floor refuses, `/proc/<pid>` directories are per-process (the
+  agent's children get new pids, and a rule on any `/proc/<pid>` would also
+  cover other processes once the number is reused), so reads of
+  `/proc/self/status`, `/proc/<pid>/cmdline` and the like fail with EACCES:
+  `ps` reports that `/proc` is not mounted, Python's `open("/proc/self/status")`
+  raises, Node's `process.memoryUsage()` throws. Node's `os.cpus()` and
+  `os.totalmem()` work. Nothing under `/proc/net` is granted.
+- **`/proc/<pid>/fd` pathnames are not gated.** Landlock has no readlink right,
+  so a hardened agent can still `readlink`/`stat` the `/proc/<pid>/fd/N` entries
+  of a same-uid sibling and learn the *paths* of its open files (not their
+  contents — the floor still denies the open). This metadata leak is an accepted
+  residual of the Landlock ABI, not a file-content boundary.
 
 ## Example: crash-safe ClickHouse triage
 

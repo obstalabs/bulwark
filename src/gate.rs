@@ -15,7 +15,9 @@
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -23,7 +25,7 @@ use crate::allowlist::AllowList;
 use crate::consent::{ConsentRequest, Source, Verdict};
 use crate::proctree;
 use crate::protect::{InodeKey, ProtectedSet};
-use crate::receipt::{Decision, Receipt, ReceiptLog};
+use crate::receipt::{Decision, LogSink, Receipt, ReceiptLog};
 
 const ANCESTRY_MAX_DEPTH: usize = 16;
 
@@ -32,24 +34,65 @@ const ANCESTRY_MAX_DEPTH: usize = 16;
 /// these, deny everything else").
 pub enum GateMode<'a> {
     /// Deny-list: a protected inode opened by the tree is referred to consent.
-    DenyList {
-        protected: &'a ProtectedSet,
-        consent: &'a mut dyn ConsentDecider,
-    },
+    DenyList { protected: &'a ProtectedSet },
     /// Allow-list: an open by the tree is allowed iff its path matches the
     /// allowlist; everything else is denied with no prompt.
     AllowList { allow: &'a AllowList },
+}
+
+/// WO-154: a protected open handed to the consent worker. The event fd stays
+/// open (the kernel holds the open) until the worker writes its verdict. Owned
+/// strings (`req`) so the record outlives the loop iteration.
+pub(crate) struct DeferredConsent {
+    event_fd: RawFd,
+    req: ConsentRequest,
+    pid: i32,
+    key: InodeKey,
+    /// When the loop queued it, so a request that sat in the (bounded) queue for
+    /// the full consent timeout is denied on dequeue instead of re-prompting.
+    arrival: Instant,
+}
+
+/// WO-154: bounded capacity of the consent worker's queue. Past this many
+/// pending protected opens, later ones are denied immediately ("consent queue
+/// full") — the supervisor holds one event fd per pending request, and an
+/// unbounded queue would let a flood pin an unbounded number of open fds.
+const CONSENT_QUEUE_CAP: usize = 256;
+
+/// WO-147/155@v1 (fault-injection): test-only switches that disable one reaping
+/// layer so each can be proven independently. Compiled in ONLY under the
+/// `fault-injection` cargo feature — without it these symbols (and the reads
+/// below) do not exist, so a release binary cannot have its reaping layers
+/// disabled by a stray environment variable.
+#[cfg(feature = "fault-injection")]
+const SWITCH_NO_CGROUP_KILL: &str = "BULWARK_TEST_NO_CGROUP";
+#[cfg(feature = "fault-injection")]
+const SWITCH_NO_PDEATHSIG: &str = "BULWARK_TEST_NO_PDEATHSIG";
+
+/// Read a test-only switch. Present (regardless of value) = layer off. Feature-
+/// gated like its constants; the call sites use `#[cfg]` to hard-code the
+/// enabled answer when the feature is absent.
+#[cfg(feature = "fault-injection")]
+fn test_layer_disabled(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+/// Result of a supervised run: the child's exit code plus the deny-forever
+/// paths the operator chose this session (for the caller to persist).
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub deny_forever_paths: Vec<String>,
 }
 
 /// Set by the signal handler on SIGTERM/SIGINT/SIGHUP. The event loop polls it
 /// and, on a graceful shutdown, denies any outstanding permission events before
 /// exiting — so a graceful stop fails CLOSED.
 ///
-/// This is the trappable half of the fail-closed story. SIGKILL / hard crash /
-/// OOM / power loss cannot be intercepted, and the kernel releases an
-/// outstanding permission event as *allowed* when the fanotify fd closes
-/// (documented in fanotify(7)). That residual is inherent to the interface and
-/// is handled by a future kernel-enforced floor, not here.
+/// A hard death (SIGKILL / OOM / power loss) that cannot run this handler is
+/// covered by the crash watcher instead: it reaps the supervised cgroup so a
+/// dead gate never leaves a live unsupervised tree (see `spawn_watcher`). Where
+/// the host cannot reap, default mode refuses to start, and `--hardened` keeps
+/// its Landlock floor regardless.
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// True once a graceful-termination signal has been received. Other modules
@@ -58,6 +101,56 @@ pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(crate) fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::SeqCst)
 }
+
+/// WO-155@v1: true once the supervisor has begun tearing the run down, by any
+/// cause (a graceful signal, the foreground child exiting, or an error). While
+/// draining, the permission loop denies protected opens inline and the consent
+/// worker denies every deferred request — so, before the fanotify fd closes,
+/// every held open has been answered and the tree is confirmed dead, with no
+/// timer ever releasing enforcement.
+pub(crate) static DRAINING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn draining() -> bool {
+    DRAINING.load(Ordering::SeqCst)
+}
+
+fn begin_draining() {
+    DRAINING.store(true, Ordering::SeqCst);
+}
+
+/// WO-155@v1 (fault-injection): set by a SIGUSR2 handler to make the supervisor
+/// PANIC in the event loop, so a test can prove a panic-unwind drop of the
+/// watcher guard leaves the watcher REAPING (never releasing). Compiled in ONLY
+/// under the `fault-injection` feature — a release binary has no such trigger.
+#[cfg(feature = "fault-injection")]
+static TEST_PANIC: AtomicBool = AtomicBool::new(false);
+
+/// WO-155@v1 (fault-injection): async-signal-safe; the event loop does the actual
+/// panic, where unwinding is safe.
+#[cfg(feature = "fault-injection")]
+extern "C" fn on_test_panic(_sig: libc::c_int) {
+    TEST_PANIC.store(true, Ordering::SeqCst);
+}
+
+/// WO-155@v1: the number of protected opens the loop has deferred to the consent
+/// worker but that have not yet been answered. The worker decrements it after
+/// each answer, so `0` means every deferred consent has been answered — the gate
+/// on which the tree is reaped (never "the child exited", which an uncooperative
+/// child never does).
+pub(crate) static OUTSTANDING_DEFERRED: AtomicUsize = AtomicUsize::new(0);
+
+/// WO-155@v1: on a graceful stop, how long the supervisor keeps enforcing while
+/// it waits for an uncooperative foreground child to observe its forwarded
+/// SIGTERM before it escalates to a cgroup reap. Enforcement continues
+/// throughout; the timer only escalates (to SIGKILL), it never releases.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// WO-155@v1: after SIGTERM is forwarded to the child's process group, how long
+/// the supervisor keeps enforcing while a SIGTERM-cooperative child observes the
+/// signal and exits BEFORE the reap escalates to SIGKILL. The forward happens at
+/// `SHUTDOWN_GRACE`; the SIGKILL reap waits a further `SIGTERM_TO_KILL` — never
+/// in the same pass, so a cooperative child gets its SIGTERM grace.
+const SIGTERM_TO_KILL: Duration = Duration::from_secs(2);
 
 /// Async-signal-safe handler: only flips the atomic. The event loop does the
 /// actual deny-and-exit work, where it is safe to touch the fanotify fd.
@@ -77,6 +170,19 @@ fn install_shutdown_handlers() {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
     }
+    // WO-155@v1 (fault-injection): arm the supervisor-panic trigger (SIGUSR2),
+    // only when the test sets the switch — a stray SIGUSR2 never panics an
+    // unrelated fault-injection build.
+    #[cfg(feature = "fault-injection")]
+    if std::env::var_os("BULWARK_TEST_PANIC_AFTER_SPAWN").is_some() {
+        let mut paction: libc::sigaction = unsafe { std::mem::zeroed() };
+        paction.sa_sigaction = on_test_panic as extern "C" fn(libc::c_int) as usize;
+        paction.sa_flags = 0;
+        unsafe {
+            libc::sigemptyset(&mut paction.sa_mask);
+            libc::sigaction(libc::SIGUSR2, &paction, std::ptr::null_mut());
+        }
+    }
 }
 
 /// The gate's consent dependency: given a request for a protected open, return
@@ -85,12 +191,32 @@ fn install_shutdown_handlers() {
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
+    /// Decide with a caller-chosen deadline (shorter than the provider's
+    /// configured one), so a request that sat in the consent queue is bounded to
+    /// what remains of its own consent window. Default: `decide`.
+    fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
+        self.decide(req)
+    }
+
     /// Inform the decider of the supervised tree's cgroup scope (relative path),
     /// so an off-band consent channel can reject answerers that are members of
     /// the tree by the same reparent-proof primitive the gate uses — not just by
     /// ancestry, which a double-fork()'d orphan sheds. Default: no-op (modes with
     /// no off-band channel, or where no cgroup scope exists).
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
+
+    /// WO-147/154@v1: attach the gate's log sink so this decider's diagnostics
+    /// (e.g. a refused off-band peer) go through the bounded queue instead of a
+    /// synchronous stderr write that could stall the consent worker. Default:
+    /// no-op (the static-deny floor, and providers with no peer diagnostics).
+    fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
+
+    /// Paths the operator denied forever this session, for the caller to persist
+    /// as protected globs. Default: empty (providers without a standing-deny
+    /// cache). `run` returns the worker's result so the caller can persist them.
+    fn deny_forever_paths(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Run `command` under the gate.
@@ -101,34 +227,38 @@ pub trait ConsentDecider {
 /// policy profile — keeping the gate agnostic to policy. Returns the child's
 /// exit code.
 pub fn run(
-    mut mode: GateMode,
+    mode: GateMode,
+    consent: Option<Box<dyn ConsentDecider + Send>>,
+    consent_timeout: Duration,
     mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
     worker: Option<WorkerCreds>,
-) -> Result<i32> {
+) -> Result<RunOutcome> {
     if command.is_empty() {
         bail!("no command given");
     }
+    // Open the log before any output, so EVERY diagnostic — the startup banner
+    // included — flows through the bounded queue and can never block the event
+    // loop (or a post-mark open anywhere on the host) on a stalled reader.
+    let mut log = ReceiptLog::new(receipts)?;
     match &mode {
-        GateMode::DenyList { protected, .. } => {
+        GateMode::DenyList { protected } => {
             if protected.is_empty() {
                 bail!("no protected inodes resolved — nothing to guard");
             }
-            eprintln!(
-                "[bulwark] deny-list: guarding {} inode(s) for FAN_OPEN_PERM",
+            log.note(&format!(
+                "deny-list: guarding {} inode(s) for FAN_OPEN_PERM",
                 protected.len()
-            );
+            ));
         }
         GateMode::AllowList { allow } => {
-            eprintln!(
-                "[bulwark] allow-list (default-deny): {} allow rule(s) including runtime base set",
+            log.note(&format!(
+                "allow-list (default-deny): {} allow rule(s) including runtime base set",
                 allow.allowed_globs().len()
-            );
+            ));
         }
     }
-
-    let mut log = ReceiptLog::new(receipts)?;
 
     // Fail closed on graceful termination: a trapped SIGTERM/SIGINT/SIGHUP lets
     // the event loop deny any outstanding read before exiting.
@@ -152,10 +282,10 @@ pub fn run(
         match fan.mark_filesystem(m) {
             Ok(()) => marked += 1,
             Err(e) if tolerant => {
-                eprintln!(
-                    "[bulwark] note: could not mark {} ({e}); skipping",
+                log.note(&format!(
+                    "note: could not mark {} ({e}); skipping",
                     m.display()
-                );
+                ));
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("fanotify_mark on {}", m.display()));
@@ -168,25 +298,77 @@ pub fn run(
 
     // Create a dedicated cgroup-v2 scope for the supervised tree. Membership in
     // it is reparent-proof: a process that double-fork()s to escape the parent
-    // chain still carries the scope, so it stays attributed to the tree. Falls
-    // back to the ancestry walk where cgroup-v2 is unavailable.
+    // chain still carries the scope, so it stays attributed to the tree. Where
+    // no scope can be made, this gate refuses below rather than run unguarded.
     let scope = crate::cgroup::CgroupScope::create(std::process::id() as i32);
+    // WO-155@v1: this gate (the default, non-hardened path) has no kernel floor
+    // that survives gate death, so it MUST be able to reap
+    // the whole supervised tree. On a host with no writable cgroup-v2 scope, or
+    // with neither cgroup.kill nor the cgroup.freeze + per-pid SIGKILL fallback,
+    // a dead gate would leave a live unsupervised agent — refuse now rather than
+    // run with that hole. `--hardened` is a separate, Landlock-only launch that
+    // never reaches this gate, so it keeps working on such a host.
     match &scope {
-        Some(_) => eprintln!("[bulwark] tree attribution: cgroup-v2 membership (reparent-proof)"),
-        None => eprintln!(
-            "[bulwark] note: cgroup-v2 scope unavailable; tree attribution falls back to \
-             process-ancestry (a deliberately-orphaned descendant may escape — use --hardened)"
+        None => {
+            bail!(
+                "this host cannot reap the supervised tree: no writable cgroup-v2 \
+                 scope, so a dead gate would leave a live unsupervised agent. Use \
+                 --hardened (its Landlock floor survives gate death) or run on a \
+                 cgroup-v2 host"
+            );
+        }
+        Some(s) if !s.can_reap() => {
+            bail!(
+                "this host cannot reap the supervised tree: the kernel has neither \
+                 cgroup.kill (>= 5.14) nor cgroup.freeze (>= 5.2), so a dead gate \
+                 would leave a live unsupervised agent. Use --hardened (its Landlock \
+                 floor survives gate death) or a newer kernel"
+            );
+        }
+        Some(_) => {}
+    }
+    match &scope {
+        Some(_) => log.note("tree attribution: cgroup-v2 membership (reparent-proof)"),
+        None => log.note(
+            "note: cgroup-v2 scope unavailable; --hardened covers a deliberately-orphaned \
+             descendant with its per-process Landlock floor",
         ),
     }
 
-    // Hand the consent decider the tree's cgroup scope so the off-band channel
-    // rejects in-tree answerers by membership, not ancestry: a double-fork()'d
-    // orphan that sheds its parent chain still carries the scope and so cannot
-    // self-answer its own consent prompt. No-op for modes without an off-band
-    // channel, and when no cgroup scope exists (ancestry remains the only check).
-    if let GateMode::DenyList { consent, .. } = &mut mode {
-        consent.bind_scope(scope.as_ref().map(|s| s.rel()));
+    // Hand the consent decider the tree's cgroup scope, then move it onto its
+    // own worker thread so a pending prompt never blocks the permission loop
+    // (and thereby delays unrelated opens host-wide — WO-154).
+    let consent_tx: Option<mpsc::SyncSender<DeferredConsent>>;
+    let consent_worker: Option<std::thread::JoinHandle<Vec<String>>>;
+    match consent {
+        Some(mut decider) => {
+            decider.bind_scope(scope.as_ref().map(|s| s.rel()));
+            let (tx, rx) = mpsc::sync_channel::<DeferredConsent>(CONSENT_QUEUE_CAP);
+            let sink = log.sink();
+            // The decider's own diagnostics (a refused off-band peer, a socket
+            // error) go through the same queue, never a synchronous stderr write.
+            decider.attach_log(sink.clone());
+            let fan_fd = fan.fd;
+            consent_worker = Some(
+                std::thread::Builder::new()
+                    .name("bulwark-consent".into())
+                    .spawn(move || consent_thread(rx, fan_fd, decider, sink, consent_timeout))?,
+            );
+            consent_tx = Some(tx);
+        }
+        None => {
+            consent_tx = None;
+            consent_worker = None;
+        }
     }
+
+    // WO-155: a watcher that reaps the whole supervised cgroup if this process
+    // dies, for any reason, so a dead supervisor never leaves a live
+    // unsupervised tree. Held for the run's lifetime; released by positive proof
+    // of an empty scope before this function returns (see below). A panic or any
+    // early `?` return drops the guard, closing the write end (EOF) so the
+    // watcher REAPS instead of releasing.
+    let gate_watcher = spawn_watcher(scope.as_ref())?;
 
     // Fork + exec the supervised command. The supervisor (this process) stays
     // root and holds the fanotify fd; `worker` drops only the agent child. The
@@ -196,18 +378,65 @@ pub fn run(
     // drop banner) — so the auto-drop success path adds no extra noise, while the
     // uid in effect stays visible for every run.
     match worker {
-        Some(w) => eprintln!(
-            "[bulwark] supervising pid {child} (uid={} gid={}): {}",
+        Some(w) => log.note(&format!(
+            "supervising pid {child} (uid={} gid={}): {}",
             w.uid,
             w.gid,
             command.join(" ")
-        ),
-        None => eprintln!("[bulwark] supervising pid {child}: {}", command.join(" ")),
+        )),
+        None => log.note(&format!("supervising pid {child}: {}", command.join(" "))),
     }
 
-    // Event loop: answer permission events until the child exits.
-    let exit_code = event_loop(&fan, child, &mut log, mode, scope.as_ref())?;
-    Ok(exit_code)
+    // Event loop: answer permission events until the tree is being torn down
+    // (the child exits or a graceful signal arrives). The loop keeps enforcing —
+    // denying protected opens and reaping the scope — and returns only once the
+    // tree is confirmed dead, never on a timer.
+    let exit_code = match event_loop(
+        &fan,
+        child,
+        &mut log,
+        mode,
+        scope.as_ref(),
+        consent_tx.as_ref(),
+    ) {
+        Ok(code) => code,
+        Err(e) => {
+            // Error path: the fanotify fd may already be unusable, but the
+            // invariant still holds — deny every deferred consent and reap the
+            // tree before the fd closes.
+            begin_draining();
+            drop(consent_tx);
+            reap_tree(&scope, child);
+            if let Some(w) = consent_worker {
+                let _ = w.join();
+            }
+            // Only now that the scope is proven empty may the watcher be released.
+            if let Some(w) = gate_watcher {
+                w.release_proven_empty();
+            }
+            return Err(e);
+        }
+    };
+
+    // Normal/graceful teardown: the loop already reaped the tree. Deny any
+    // deferred consent (the worker denies them now that draining is set), then
+    // re-confirm the tree is empty before the fanotify fd closes on return.
+    begin_draining();
+    drop(consent_tx);
+    let deny_forever_paths = match consent_worker {
+        Some(w) => w.join().unwrap_or_default(),
+        None => Vec::new(),
+    };
+    reap_tree(&scope, child);
+    // Positive proof the scope is empty: release (not reap) the watcher.
+    if let Some(w) = gate_watcher {
+        w.release_proven_empty();
+    }
+
+    Ok(RunOutcome {
+        exit_code,
+        deny_forever_paths,
+    })
 }
 
 // ---- fanotify FFI wrapper ---------------------------------------------------
@@ -297,8 +526,10 @@ fn inode_of_fd(fd: RawFd) -> Option<(InodeKey, String)> {
     Some((key, path))
 }
 
-/// Reply to a permission event.
-fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool) {
+/// Write a `fanotify_response` to the gate's fanotify fd. This is a write to
+/// the fanotify group fd — the kernel queues the response, it never blocks on an
+/// external reader — so it may stay on both the loop and the consent worker.
+fn write_response(fan_fd: RawFd, event_fd: RawFd, allow: bool) -> std::io::Result<()> {
     let resp = libc::fanotify_response {
         fd: event_fd,
         response: if allow {
@@ -314,43 +545,150 @@ fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool) {
             std::mem::size_of::<libc::fanotify_response>(),
         )
     };
-    if n < 0 {
-        eprintln!(
-            "[bulwark] WARN failed to write fanotify response: {}",
-            std::io::Error::last_os_error()
-        );
+    if n == std::mem::size_of::<libc::fanotify_response>() as isize {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
-/// Core permission-event loop. Reads events, decides, responds, and returns
-/// the child's exit code once it terminates.
+/// Reply to a permission event from the loop. The failure warning is queued
+/// off-loop, so even a broken response path cannot block the loop on output.
+fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool, log: &mut ReceiptLog) {
+    if let Err(e) = write_response(fan_fd, event_fd, allow) {
+        log.warn(&format!("failed to write fanotify response: {e}"));
+    }
+}
+
+/// WO-154: the consent worker. Owns the decider, and for each deferred
+/// protected open decides (blocking — this is the whole point: the block is
+/// here, off the permission loop), answers it, closes its event fd, and records
+/// the receipt. On channel close it returns the decider's deny-forever paths
+/// for the caller to persist.
+fn consent_thread(
+    rx: mpsc::Receiver<DeferredConsent>,
+    fan_fd: RawFd,
+    mut decider: Box<dyn ConsentDecider + Send>,
+    log: LogSink,
+    timeout: Duration,
+) -> Vec<String> {
+    while let Ok(d) = rx.recv() {
+        // Deny promptly (a) on graceful shutdown — the loop is about to close the
+        // fanotify fd, so every deferred open must be answered first — or (b) if
+        // the request already sat in the queue past its consent deadline.
+        // Otherwise prompt for what REMAINS of the request's deadline (measured
+        // from its arrival), so a queue never extends past the consent timeout.
+        let remaining = timeout.saturating_sub(d.arrival.elapsed());
+        let (verdict, source) = if shutdown_requested() || draining() || remaining.is_zero() {
+            (Verdict::Deny, Source::Timeout)
+        } else {
+            decider.decide_deadline(&d.req, remaining)
+        };
+        answer_deferred(fan_fd, &log, d, verdict, source);
+        // Once the supervisor is draining (or a signal arrived), empty the rest
+        // of the queue non-blockingly so OUTSTANDING_DEFERRED reaches zero and the
+        // loop may reap — never left waiting for a cooperative child to exit.
+        if draining() || shutdown_requested() {
+            while let Ok(more) = rx.try_recv() {
+                answer_deferred(fan_fd, &log, more, Verdict::Deny, Source::Timeout);
+            }
+        }
+    }
+    // Drain anything still queued at channel close (deny it) before returning.
+    while let Ok(more) = rx.try_recv() {
+        answer_deferred(fan_fd, &log, more, Verdict::Deny, Source::Timeout);
+    }
+    decider.deny_forever_paths()
+}
+
+/// WO-154: answer (and close, and log) one deferred protected open, and release
+/// its outstanding-deferred slot so the loop knows it has been answered.
+fn answer_deferred(
+    fan_fd: RawFd,
+    log: &LogSink,
+    d: DeferredConsent,
+    verdict: Verdict,
+    source: Source,
+) {
+    let allow = verdict.allows();
+    if let Err(e) = write_response(fan_fd, d.event_fd, allow) {
+        log.warn(&format!("failed to write fanotify response: {e}"));
+    }
+    unsafe {
+        libc::close(d.event_fd);
+    }
+    log.record(&Receipt {
+        pid: d.pid,
+        dev: d.key.dev,
+        ino: d.key.ino,
+        decision: if allow {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        },
+        path: &d.req.path,
+        ancestry: &d.req.ancestry,
+        reason: verdict_reason(verdict),
+        source: source_str(source),
+    });
+    OUTSTANDING_DEFERRED.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// Core permission-event loop. Reads events, decides, responds, and returns the
+/// child's exit code once the supervised tree is confirmed dead.
+///
+/// WO-155@v1: on EVERY exit path (child done, graceful signal) the loop drains
+/// rather than returning at once — it keeps answering events (denying protected
+/// opens inline) while reaping the scope, and returns only once the tree is
+/// confirmed dead (cgroup.events `populated 0`, or the direct child reaped with
+/// no scope). No timer releases enforcement.
 fn event_loop(
     fan: &FanFd,
     child: libc::pid_t,
     log: &mut ReceiptLog,
     mut mode: GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
+    consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
 ) -> Result<i32> {
     const BUF_LEN: usize = 8192;
     let mut buf = [0u8; BUF_LEN];
 
     // Once the foreground child is reaped we record its code but keep enforcing
-    // until the cgroup scope drains (orphaned double-fork descendants). `None`
-    // until the foreground child exits; `Some(code)` while draining the rest.
+    // until the cgroup scope drains (orphaned double-fork descendants).
     let mut foreground_exit: Option<i32> = None;
+    // `Some(130)` once a graceful signal arrived; `foreground_exit` carries the
+    // child's code. The two combine into the run's exit code at the end.
+    let mut shutdown_code: Option<i32> = None;
+    // Whether the one-shot reap triggers have run for this teardown.
+    let mut reaped = false;
+    // When a graceful signal arrived (for the grace escalation), and whether we
+    // have forwarded SIGTERM to the child's process group yet.
+    let mut shutdown_started: Option<Instant> = None;
+    let mut sigterm_sent = false;
 
     loop {
-        // Graceful shutdown requested (SIGTERM/SIGINT/SIGHUP): deny every
-        // outstanding permission event before exiting, so the stop fails CLOSED
-        // rather than letting the kernel release held reads as allowed.
-        if SHUTDOWN.load(Ordering::SeqCst) {
-            let denied = drain_and_deny(fan, &mut buf, log);
-            eprintln!("[bulwark] shutdown: denied {denied} outstanding event(s), exiting");
-            return Ok(130); // 128 + SIGINT, conventional for signal termination
+        // WO-155@v1 (fault-injection): the SIGUSR2 handler set this; panic HERE
+        // (the main loop), so the unwind is safe but observable — the dropped
+        // watcher guard must leave the watcher reaping, and a still-held
+        // grandchild read must never be released as allowed.
+        #[cfg(feature = "fault-injection")]
+        if TEST_PANIC.load(Ordering::SeqCst) {
+            panic!("BULWARK_TEST_PANIC_AFTER_SPAWN");
         }
 
-        // Poll the fanotify fd with a timeout so we can reap the child even
-        // when no events are flowing.
+        // Graceful shutdown: deny every buffered permission event once, then
+        // drain (below) — fail closed, never let the kernel release a held read
+        // as allowed.
+        if SHUTDOWN.load(Ordering::SeqCst) && shutdown_code.is_none() {
+            let denied = drain_and_deny(fan, &mut buf, log);
+            log.note(&format!(
+                "shutdown: denied {denied} outstanding event(s), draining the tree"
+            ));
+            shutdown_code = Some(130);
+        }
+
+        // Poll and answer: a protected open is denied inline while draining, so
+        // the loop keeps enforcing and the drain never holds an open.
         let mut pfd = libc::pollfd {
             fd: fan.fd,
             events: libc::POLLIN,
@@ -374,29 +712,115 @@ fn event_loop(
                 }
                 return Err(anyhow!(err)).context("read fanotify");
             }
-            handle_events(fan, &buf[..n as usize], child, log, &mut mode, scope);
+            handle_events(
+                fan,
+                &buf[..n as usize],
+                child,
+                log,
+                &mut mode,
+                scope,
+                consent_tx,
+            );
         }
 
         // Reap the foreground child once (a second waitpid would return ECHILD).
-        // Its exit is not the end of the tree: a process that double-fork()s
-        // leaves an orphan (reparented to init) that may still read after its
-        // parent is gone. We keep the gate enforcing until the cgroup scope
-        // drains — otherwise the canonical double-fork attack wins by racing the
-        // supervisor's teardown.
         if foreground_exit.is_none() {
             if let Some(code) = try_wait(child)? {
                 foreground_exit = Some(code);
             }
         }
 
-        if let Some(code) = foreground_exit {
-            // Foreground gone. Exit only once no orphan remains in the scope.
-            // Without a cgroup scope we have no drain signal, so exit as before.
-            match scope {
-                Some(s) if s.is_populated() => { /* orphan alive: keep enforcing */ }
-                _ => return Ok(code),
+        // Exiting (signal arrived, or the foreground child is gone): keep
+        // enforcing while reaping, and return only once the tree is dead.
+        if shutdown_code.is_some() || foreground_exit.is_some() {
+            begin_draining();
+            // Reap only once every deferred consent has been answered DENY (so a
+            // held open is never released as allowed when the fd closes) AND the
+            // tree is ready to die — the child exited, or the grace elapsed and
+            // we escalate. Enforcement continues throughout; the grace only
+            // escalates to a reap, it never releases the tree to a later read.
+            let drained = OUTSTANDING_DEFERRED.load(Ordering::SeqCst) == 0;
+            let child_done = foreground_exit.is_some();
+            // Start the shutdown clock once the deferred are all answered DENY,
+            // so a cooperative child finishes its denied reads first.
+            if drained && shutdown_started.is_none() {
+                shutdown_started = Some(Instant::now());
+            }
+            let grace_elapsed = shutdown_started
+                .map(|t| Instant::now() >= t + SHUTDOWN_GRACE)
+                .unwrap_or(false);
+            // Forward SIGTERM to the child's process group once every deferred
+            // consent is answered DENY and the grace elapsed. A SIGTERM-
+            // cooperative child observes this and exits BEFORE any reap.
+            if shutdown_code.is_some() && drained && grace_elapsed && !sigterm_sent && !child_done {
+                sigterm_sent = true;
+                unsafe {
+                    libc::killpg(child, libc::SIGTERM);
+                }
+            }
+            // SIGKILL-reap only AFTER a further SIGTERM_TO_KILL (never in the
+            // same pass as the SIGTERM forward), or once the child has already
+            // exited. Enforcement continues throughout this window.
+            let kill_escalates = sigterm_sent
+                && shutdown_started
+                    .map(|t| Instant::now() >= t + SHUTDOWN_GRACE + SIGTERM_TO_KILL)
+                    .unwrap_or(false);
+            if drained && (child_done || kill_escalates) {
+                reap_step(scope, child, &mut reaped);
+            }
+            let dead = match scope {
+                Some(s) => !s.is_populated(),
+                None => foreground_exit.is_some(),
+            };
+            if dead {
+                return Ok(shutdown_code.or(foreground_exit).unwrap());
+            }
+            // else: loop again — answer more events, reap again. No timer.
+        }
+    }
+}
+
+/// WO-155@v1: one step of reaping the supervised tree, idempotent, called from
+/// the loop between answering events so enforcement never pauses. Prefers the
+/// one-shot `cgroup.kill`; where it is absent, freezes the scope (so no new
+/// member forks in) and SIGKILLs every pid in `cgroup.procs`. Without a scope,
+/// SIGKILLs the direct child's process group (a deliberately-orphaned descendant
+/// is then behind the Landlock floor in `--hardened`).
+fn reap_step(scope: Option<&crate::cgroup::CgroupScope>, child: libc::pid_t, reaped: &mut bool) {
+    match scope {
+        Some(s) => {
+            if !*reaped {
+                *reaped = true;
+                if !s.kill_all() {
+                    let _ = s.freeze();
+                }
+            }
+            for pid in s.procs() {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
             }
         }
+        None => unsafe {
+            libc::killpg(child, libc::SIGKILL);
+        },
+    }
+}
+
+/// WO-155@v1: blocking reap for the teardown paths that no longer answer events
+/// (e.g. after an error). Loops `reap_step` until the scope is empty — no timer.
+fn reap_tree(scope: &Option<crate::cgroup::CgroupScope>, child: libc::pid_t) {
+    let mut reaped = false;
+    loop {
+        reap_step(scope.as_ref(), child, &mut reaped);
+        let dead = match scope {
+            Some(s) => !s.is_populated(),
+            None => true,
+        };
+        if dead {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -449,7 +873,7 @@ fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
                         source: "shutdown",
                     });
                 }
-                respond(fan.fd, meta.fd, false);
+                respond(fan.fd, meta.fd, false, log);
                 denied += 1;
             }
             if meta.fd >= 0 {
@@ -471,6 +895,7 @@ fn handle_events(
     log: &mut ReceiptLog,
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
+    consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
 ) {
     let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut offset = 0usize;
@@ -487,9 +912,16 @@ fn handle_events(
         }
 
         if meta.mask & libc::FAN_OPEN_PERM != 0 && meta.fd >= 0 {
-            decide(fan, &meta, child, log, mode, scope);
-        }
-        if meta.fd >= 0 {
+            // `decide` returns true when it handed the event fd to the consent
+            // worker (deferred): then the worker, not this loop, owns and closes
+            // it. Otherwise the loop answers inline and closes the fd here.
+            let deferred = decide(fan, &meta, child, log, mode, scope, consent_tx);
+            if !deferred {
+                unsafe {
+                    libc::close(meta.fd);
+                }
+            }
+        } else if meta.fd >= 0 {
             unsafe {
                 libc::close(meta.fd);
             }
@@ -519,10 +951,12 @@ fn in_tree_open(inode_resolved: bool) -> InTreeOpen {
     }
 }
 
-/// Decide allow/deny for a single permission event and respond.
+/// Decide allow/deny for a single permission event. Returns `true` when the
+/// event was deferred to the consent worker (the fd is now the worker's to
+/// answer and close); `false` when it was answered inline.
 ///
 /// An open by the supervised tree of a protected inode is referred to the
-/// consent decider, which may allow (once/session), deny, or deny-forever —
+/// consent worker, which may allow (once/session), deny, or deny-forever —
 /// over an off-band channel the agent has no descriptor on. Opens that are not
 /// protected, or come from outside the supervised tree, are allowed without
 /// asking. The receipt records the verdict and how it was reached.
@@ -533,16 +967,17 @@ fn decide(
     log: &mut ReceiptLog,
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
-) {
+    consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
+) -> bool {
     let pid = meta.pid;
 
     // Tree membership decides whether this open is ours to judge — and it depends
     // only on the pid, not on the file's inode, so it is evaluated FIRST. Prefer
     // cgroup membership: it is reparent-proof, so a process that double-fork()s to
-    // orphan itself past the ancestry walk is still attributed to the tree. Where
-    // no cgroup scope exists, fall back to the ancestry walk. The two are OR'd so
-    // the cgroup result can only *add* members the walk would miss — a reparented
-    // orphan whose ppid chain no longer reaches the root.
+    // orphan itself past the ancestry walk is still attributed to the tree. The
+    // ancestry walk is OR'd on as a per-open fallback for a single unreadable pid
+    // (a process gone between lookup and decision); default mode never reaches the
+    // scope-less arm — it refuses to start without a reapable scope.
     let in_tree = match scope {
         Some(s) => s.contains(pid) || proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
         None => proctree::is_descendant_of(pid, child, ANCESTRY_MAX_DEPTH),
@@ -553,8 +988,8 @@ fn decide(
     // so an out-of-tree open whose fstat would fail is still allowed: it is not
     // ours to deny, and the inode is never consulted.
     if !in_tree {
-        respond(fan.fd, meta.fd, true);
-        return;
+        respond(fan.fd, meta.fd, true, log);
+        return false;
     }
 
     let chain = proctree::ancestry(pid, ANCESTRY_MAX_DEPTH);
@@ -583,17 +1018,15 @@ fn decide(
                 reason: "in-tree open denied: cannot stat event fd (inode unknown)",
                 source: "fstat-fail",
             });
-            respond(fan.fd, meta.fd, false);
-            return;
+            respond(fan.fd, meta.fd, false, log);
+            return false;
         }
     };
 
     match mode {
-        GateMode::DenyList { protected, consent } => {
-            decide_denylist(
-                fan, meta, pid, key, &path, &ancestry, protected, log, *consent,
-            );
-        }
+        GateMode::DenyList { protected } => decide_denylist(
+            fan, meta, pid, key, &path, &ancestry, protected, log, consent_tx,
+        ),
         GateMode::AllowList { allow } => {
             // Default-deny: allow iff the base set matches the path, OR a grant
             // glob matches the path AND the opened (inode, generation) is in the
@@ -620,13 +1053,15 @@ fn decide(
                 },
                 source: "allowlist",
             });
-            respond(fan.fd, meta.fd, allowed);
+            respond(fan.fd, meta.fd, allowed, log);
+            false
         }
     }
 }
 
-/// Deny-list decision: a protected inode opened by the tree is referred to the
-/// consent decider; everything else is allowed.
+/// Deny-list decision: a protected inode opened by the tree is deferred to the
+/// consent worker; everything else is allowed inline. Returns `true` when the
+/// event was deferred (the worker owns and will close the event fd).
 #[allow(clippy::too_many_arguments)]
 fn decide_denylist(
     fan: &FanFd,
@@ -637,8 +1072,8 @@ fn decide_denylist(
     ancestry: &str,
     protected: &ProtectedSet,
     log: &mut ReceiptLog,
-    consent: &mut dyn ConsentDecider,
-) {
+    consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
+) -> bool {
     // `protects` matches the inode against the launch snapshot AND, for files
     // not in it, against the inodes of protected ancestor directories — so a
     // nested or post-launch file under a protected directory is still denied.
@@ -653,34 +1088,92 @@ fn decide_denylist(
             reason: "not protected",
             source: "",
         });
-        respond(fan.fd, meta.fd, true);
-        return;
+        respond(fan.fd, meta.fd, true, log);
+        return false;
     }
 
-    let req = ConsentRequest {
+    // A protected inode opened by the supervised tree. While draining the tree
+    // there is no operator left to prompt and the consent worker is being torn
+    // down — answer DENY inline rather than defer (the loop keeps enforcing, so
+    // a held open is never released as allowed).
+    if draining() {
+        log.record(&Receipt {
+            pid,
+            dev: key.dev,
+            ino: key.ino,
+            decision: Decision::Deny,
+            path,
+            ancestry,
+            reason: "denied on supervisor teardown",
+            source: "shutdown",
+        });
+        respond(fan.fd, meta.fd, false, log);
+        return false;
+    }
+
+    // A protected inode opened by the supervised tree. Defer it: send the event
+    // (fd still open) to the consent worker and return, so no prompt blocks the
+    // loop — and therefore no prompt delays an unrelated open host-wide. The
+    // queue is bounded: when it is full the open is denied immediately instead
+    // of holding an unbounded number of event fds.
+    let d = DeferredConsent {
+        event_fd: meta.fd,
+        req: ConsentRequest {
+            pid,
+            key,
+            path: path.to_string(),
+            ancestry: ancestry.to_string(),
+            reason: "protected inode opened by supervised tree".to_string(),
+        },
         pid,
         key,
-        path: path.to_string(),
-        ancestry: ancestry.to_string(),
-        reason: "protected inode opened by supervised tree".to_string(),
+        arrival: Instant::now(),
     };
-    let (verdict, source) = consent.decide(&req);
-    let allow = verdict.allows();
-    log.record(&Receipt {
-        pid,
-        dev: key.dev,
-        ino: key.ino,
-        decision: if allow {
-            Decision::Allow
-        } else {
-            Decision::Deny
+    match consent_tx {
+        Some(tx) => match tx.try_send(d) {
+            Ok(()) => {
+                // Deferred: the worker owns and will close the fd. Count it so
+                // the loop can reap exactly when the last one is answered.
+                OUTSTANDING_DEFERRED.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                // Queue full (or the worker is gone): fail closed inline rather
+                // than queue an unboundedly growing number of open event fds.
+                let reason = match e {
+                    mpsc::TrySendError::Full(_) => "consent queue full",
+                    mpsc::TrySendError::Disconnected(_) => "consent worker unavailable",
+                };
+                log.record(&Receipt {
+                    pid,
+                    dev: key.dev,
+                    ino: key.ino,
+                    decision: Decision::Deny,
+                    path,
+                    ancestry,
+                    reason,
+                    source: Source::Static.as_str(),
+                });
+                respond(fan.fd, meta.fd, false, log);
+                false
+            }
         },
-        path,
-        ancestry,
-        reason: verdict_reason(verdict),
-        source: source_str(source),
-    });
-    respond(fan.fd, meta.fd, allow);
+        None => {
+            // No consent channel (defensive): fail closed inline.
+            log.record(&Receipt {
+                pid,
+                dev: key.dev,
+                ino: key.ino,
+                decision: Decision::Deny,
+                path,
+                ancestry,
+                reason: "consent worker unavailable",
+                source: Source::Static.as_str(),
+            });
+            respond(fan.fd, meta.fd, false, log);
+            false
+        }
+    }
 }
 
 /// Human-readable reason for a verdict, for the receipt.
@@ -778,6 +1271,15 @@ fn spawn(
     // The cgroup.procs path, resolved before fork so the child uses only the
     // pre-built CString (no allocation in the post-fork path).
     let procs = scope.map(|s| s.procs_path());
+    // The supervisor pid and the PDPDEATHSIG reaping layer are read BEFORE fork
+    // (only async-signal-safe values cross into the child). `no_pdeathsig` is
+    // hard-coded false in a default (non-fault-injection) build — the switch-
+    // reading path does not compile in at all there.
+    let supervisor_pid = unsafe { libc::getpid() };
+    #[cfg(feature = "fault-injection")]
+    let no_pdeathsig = test_layer_disabled(SWITCH_NO_PDEATHSIG);
+    #[cfg(not(feature = "fault-injection"))]
+    let no_pdeathsig = false;
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -789,6 +1291,11 @@ fn spawn(
         // write needs privilege, and membership must be established before exec
         // so the agent — and anything it later orphans — is already in the scope.
         unsafe {
+            // WO-155@v1: place the child in its OWN process group so the
+            // scope-less --hardened teardown can killpg(pid) the tree (its
+            // descendants that did not setsid) without hitting the supervisor's
+            // own group.
+            libc::setpgid(0, 0);
             if let Some(p) = procs {
                 if crate::cgroup::join_self(p).is_err() {
                     // Fail closed: if we cannot place the child in the scope, the
@@ -803,12 +1310,429 @@ fn spawn(
                     libc::_exit(126);
                 }
             }
+            // WO-155: PR_SET_PDEATHSIG is cleared by the kernel when euid/egid
+            // change, so it must be set AFTER the credential drop, immediately
+            // before exec. Then confirm the parent is still the supervisor — a
+            // reparent between fork and here means the supervisor already died,
+            // so refuse to run rather than exec under a dead one.
+            if !no_pdeathsig {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                if libc::getppid() != supervisor_pid {
+                    libc::_exit(125);
+                }
+            }
             libc::execvp(prog.as_ptr(), argv_ptr.as_ptr());
             // Only reached if execvp failed (command not found).
             libc::_exit(127);
         }
     }
     Ok(pid)
+}
+
+/// WO-155: owns the watcher pipe's write end and closes it on drop, so a
+/// hard supervisor death (SIGKILL is covered by the kernel closing the fd,
+/// whatever the cause) leaves the watcher reaping. A plain `Drop` closes only —
+/// closing the write end is an EOF, so the watcher reaps. A supervisor PANIC
+/// unwinds and drops this guard in the same way (EOF => reap), never releasing
+/// the scope unwatched. Only `release_proven_empty` (below) writes the graceful
+/// byte, and only the supervisor calls that AFTER `reap_tree` has proven the
+/// scope empty.
+struct WatcherGuard(RawFd);
+impl Drop for WatcherGuard {
+    fn drop(&mut self) {
+        // Close only: EOF => the watcher reaps. No graceful byte — that is
+        // reserved for release_proven_empty, and must never fire on an unwinding
+        // panic (which would release the tree unwatched).
+        if self.0 >= 0 {
+            unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+impl WatcherGuard {
+    /// Release the watcher WITH positive proof: write the graceful byte (the
+    /// watcher reads `1` and skips reaping — the scope is already gone), then
+    /// close. Call ONLY after `reap_tree` has proven the scope empty, on the
+    /// graceful path and the event-loop error path. Any other drop (an early
+    /// return or a panic) closes without the byte, so the watcher reaps instead.
+    fn release_proven_empty(mut self) {
+        let fd = self.0;
+        self.0 = -1; // Drop must not double-close.
+        unsafe {
+            let one = b"1";
+            let _ = libc::write(fd, one.as_ptr() as *const libc::c_void, 1);
+            libc::close(fd);
+        }
+    }
+}
+
+/// WO-155: fork a watcher that outlives the supervisor and reaps the run's
+/// cgroup when the supervisor dies — by any cause, including ones where the
+/// supervisor's own cleanup cannot run. The watcher blocks reading one end of a
+/// pipe while the supervisor holds the other; the kernel closes the supervisor's
+/// end on its death, the watcher's `read` returns EOF, and it reaps the scope:
+/// `cgroup.kill` where present, else `cgroup.freeze` + a per-pid SIGKILL sweep
+/// until `cgroup.events` reports `populated 0`. Returns the write end (guarded)
+/// for the supervisor to hold; `None` when there is no cgroup scope.
+fn spawn_watcher(scope: Option<&crate::cgroup::CgroupScope>) -> Result<Option<WatcherGuard>> {
+    // WO-147/155@v1 (fault-injection): a test-only switch disables the watcher so
+    // a test can prove the direct-child parent-death signal alone. Compiled in
+    // only under the `fault-injection` feature.
+    #[cfg(feature = "fault-injection")]
+    if test_layer_disabled(SWITCH_NO_CGROUP_KILL) {
+        return Ok(None);
+    }
+    let scope = match scope {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    // WO-155@v1 (fault-injection): read before fork so the watcher's raw-libc
+    // body needs no getenv. `kill_write_fails` makes the cgroup.kill write fail;
+    // `events_read_failures` fails the first N cgroup.events reads; `no_procs_events`
+    // makes the membership/status files unopenable (a refusal host). Together they
+    // force the fail-closed paths in a hard-SIGKILL test.
+    #[cfg(feature = "fault-injection")]
+    let kill_write_fails = std::env::var_os("BULWARK_TEST_KILL_WRITE_FAIL").is_some();
+    #[cfg(not(feature = "fault-injection"))]
+    let kill_write_fails = false;
+    #[cfg(feature = "fault-injection")]
+    let events_read_failures = std::env::var_os("BULWARK_TEST_EVENTS_READ_FAILS")
+        .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+        .unwrap_or(0);
+    #[cfg(not(feature = "fault-injection"))]
+    let events_read_failures = 0u32;
+    #[cfg(feature = "fault-injection")]
+    let procs_read_failures = std::env::var_os("BULWARK_TEST_PROCS_READ_FAILS")
+        .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+        .unwrap_or(0);
+    #[cfg(not(feature = "fault-injection"))]
+    let procs_read_failures = 0u32;
+    #[cfg(feature = "fault-injection")]
+    let events_populated_for = std::env::var_os("BULWARK_TEST_EVENTS_READ_POPULATED_FOR")
+        .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+        .unwrap_or(0);
+    #[cfg(not(feature = "fault-injection"))]
+    let events_populated_for = 0u32;
+    #[cfg(feature = "fault-injection")]
+    let no_procs_events = std::env::var_os("BULWARK_TEST_NO_PROCS_EVENTS").is_some();
+    #[cfg(not(feature = "fault-injection"))]
+    let no_procs_events = false;
+
+    // Open every reaping file BEFORE fork: after fork in this multithreaded
+    // supervisor only async-signal-safe syscalls may run, so the child must not
+    // open() pathnames itself. Each fd is CLOEXEC so the agent's exec drops
+    // them; the watcher child never execs, so it keeps its copies.
+    let kill_fd = {
+        // WO-155@v1 (fault-injection): the "no cgroup.kill" switch applies to the
+        // watcher too — on a host without cgroup.kill the watcher must use the
+        // freeze + SIGKILL sweep, not silently fail.
+        #[cfg(feature = "fault-injection")]
+        let no_kill = std::env::var_os("BULWARK_TEST_NO_CGROUP_KILL").is_some();
+        #[cfg(not(feature = "fault-injection"))]
+        let no_kill = false;
+        if no_kill {
+            -1
+        } else {
+            open_cgroup_writer(&scope.kill_path())
+        }
+    };
+    let freeze_fd = open_cgroup_writer(&scope.freeze_path());
+    let procs_fd = if no_procs_events {
+        -1
+    } else {
+        unsafe {
+            libc::open(
+                scope.procs_path().as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC,
+            )
+        }
+    };
+    let events_fd = if no_procs_events {
+        -1
+    } else {
+        open_cgroup_reader(&scope.events_path())
+    };
+
+    // The watcher can only prove the tree is dead by reading cgroup.procs (to
+    // sweep pids) and cgroup.events (to confirm `populated 0`). If either cannot
+    // be opened, a dead gate could never confirm a reaped tree — refuse rather
+    // than run with that hole (`--hardened` is the Landlock-only path and never
+    // reaches this gate).
+    if procs_fd < 0 || events_fd < 0 {
+        unsafe {
+            libc::close(kill_fd);
+            libc::close(freeze_fd);
+            libc::close(procs_fd);
+            libc::close(events_fd);
+        }
+        return Err(anyhow!(
+            "this host cannot reap the supervised tree: the cgroup exposes no readable \
+             cgroup.procs/cgroup.events, so a dead gate cannot confirm the tree is reaped. \
+             Use --hardened (its Landlock floor survives gate death) or a cgroup-v2 host \
+             that exposes both files"
+        ));
+    }
+
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        unsafe {
+            libc::close(kill_fd);
+            libc::close(freeze_fd);
+            libc::close(procs_fd);
+            libc::close(events_fd);
+        }
+        return Err(anyhow!(std::io::Error::last_os_error())).context("pipe for gate watcher");
+    }
+    let (read_end, write_end) = (fds[0], fds[1]);
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        unsafe {
+            libc::close(read_end);
+            libc::close(write_end);
+            libc::close(kill_fd);
+            libc::close(freeze_fd);
+            libc::close(procs_fd);
+            libc::close(events_fd);
+        }
+        return Err(anyhow!(std::io::Error::last_os_error())).context("fork gate watcher");
+    }
+    if pid == 0 {
+        // Watcher child: raw libc only (no allocation, no panics after fork).
+        // Block until the supervisor is gone (graceful byte) or dies (EOF).
+        unsafe {
+            libc::close(write_end);
+            let mut byte = [0u8; 1];
+            // 0 (EOF) = the supervisor DIED -> reap the scope. 1 = a graceful-
+            // exit byte the WatcherGuard wrote -> the scope is already reaped and
+            // removed; release without reaping (reaping a removed scope's stale
+            // fds would only fail forever).
+            let n = libc::read(read_end, byte.as_mut_ptr() as *mut libc::c_void, 1);
+            if n != 1 {
+                watcher_reap(
+                    kill_fd,
+                    freeze_fd,
+                    procs_fd,
+                    events_fd,
+                    WatcherFaults {
+                        kill_write_fails,
+                        events_read_failures,
+                        procs_read_failures,
+                        events_populated_for,
+                    },
+                );
+            }
+            libc::_exit(0);
+        }
+    }
+    // Supervisor: keep only the write end; the child owns the reaping fds.
+    unsafe {
+        libc::close(read_end);
+        libc::close(kill_fd);
+        libc::close(freeze_fd);
+        libc::close(procs_fd);
+        libc::close(events_fd);
+    }
+    Ok(Some(WatcherGuard(write_end)))
+}
+
+/// Open a cgroup trigger file for writing (best-effort: -1 when absent).
+fn open_cgroup_writer(path: &Path) -> RawFd {
+    use std::os::unix::ffi::OsStrExt;
+    let c = match CString::new(path.as_os_str().as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return -1,
+    };
+    unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) }
+}
+
+/// Open a cgroup status file for reading (best-effort: -1 when absent).
+fn open_cgroup_reader(path: &Path) -> RawFd {
+    use std::os::unix::ffi::OsStrExt;
+    let c = match CString::new(path.as_os_str().as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return -1,
+    };
+    unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) }
+}
+
+/// How long the crash watcher sleeps between reap attempts while it has not yet
+/// positively proven the scope is empty. A raw `timespec` so the post-fork body
+/// can use it with no allocation.
+const WATCHER_RETRY: libc::timespec = libc::timespec {
+    tv_sec: 0,
+    tv_nsec: 10_000_000, // 10 ms
+};
+
+/// The crash watcher's post-fork body. Raw libc only — stack buffers and
+/// pread/write/kill/nanosleep — because this process inherited a multithreaded
+/// supervisor's memory (no allocation, no locks, no panic paths). It keeps its
+/// inherited fanotify fd open until it exits: a permission event held when the
+/// supervisor died must stay unanswered (not released as allowed) while the tree
+/// is reaped, and that fd only closes on the final `_exit`. It exits ONLY on
+/// positive proof the scope is empty; on any doubt it sleeps and retries, so it
+/// may stay alive indefinitely — a frozen tree is the fail-closed outcome.
+/// WO-155@v1 (fault-injection): the injected faults the crash watcher honors,
+/// read before fork and passed in by value — the post-fork body takes no env
+/// reads, and bundling them keeps the argument list to the four fds.
+#[derive(Clone, Copy)]
+struct WatcherFaults {
+    kill_write_fails: bool,
+    events_read_failures: u32,
+    procs_read_failures: u32,
+    events_populated_for: u32,
+}
+
+unsafe fn watcher_reap(
+    kill_fd: RawFd,
+    freeze_fd: RawFd,
+    procs_fd: RawFd,
+    events_fd: RawFd,
+    mut faults: WatcherFaults,
+) {
+    // Try the one-shot cgroup.kill. A successful write only QUEUES the SIGKILLs;
+    // it does not prove the scope is empty yet, so we still poll cgroup.events
+    // below for positive proof. A failed write (kernel refused, or the injected
+    // fault) falls through to the freeze + per-pid SIGKILL sweep.
+    let mut killed = false;
+    if kill_fd >= 0 {
+        let one = b"1";
+        if faults.kill_write_fails {
+            // Injected fault: fall through to the freeze + sweep.
+        } else {
+            let n = libc::write(kill_fd, one.as_ptr() as *const libc::c_void, 1);
+            if n == 1 {
+                killed = true;
+            } else if scope_removed() {
+                // The scope was already removed (the dying supervisor's own
+                // teardown emptied and rmdir'd it): provably reaped — exit.
+                return;
+            }
+        }
+    }
+    if !killed {
+        // Freeze so no new member can fork in under the sweep.
+        if freeze_fd >= 0 {
+            let one = b"1";
+            let _ = libc::write(freeze_fd, one.as_ptr() as *const libc::c_void, 1);
+        }
+    }
+    loop {
+        // SIGKILL every pid currently listed in cgroup.procs, and record whether
+        // the read succeeded (`procs_ok`) and whether the list was empty — a
+        // successfully-read empty list is a positive "scope is empty" signal.
+        let mut procs_ok = false;
+        let mut procs_empty = false;
+        if !killed && procs_fd >= 0 {
+            let mut buf = [0u8; 8192];
+            let mut real = true;
+            let n = if faults.procs_read_failures > 0 {
+                faults.procs_read_failures -= 1;
+                real = false;
+                -1
+            } else {
+                libc::pread(
+                    procs_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    0,
+                )
+            };
+            if n < 0 && real && scope_removed() {
+                return;
+            }
+            if n > 0 {
+                procs_ok = true;
+                procs_empty = true;
+                let bytes = &buf[..n as usize];
+                let mut i = 0;
+                while i < bytes.len() {
+                    let mut pid: libc::pid_t = 0;
+                    let mut digits = false;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        if bytes[i] >= b'0' && bytes[i] <= b'9' {
+                            pid = pid
+                                .wrapping_mul(10)
+                                .wrapping_add((bytes[i] - b'0') as libc::pid_t);
+                            digits = true;
+                        }
+                        i += 1;
+                    }
+                    while i < bytes.len() && bytes[i] == b'\n' {
+                        i += 1;
+                    }
+                    if digits && pid > 1 {
+                        procs_empty = false;
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        // Exit ONLY on positive proof: cgroup.events read successfully and shows
+        // `populated 0`, or (events unreadable) cgroup.procs read successfully and
+        // empty. Any read failure — n <= 0, a missing fd, or the injected fault —
+        // is never proof of empty: back off and retry.
+        let mut events_proves_empty = false;
+        if events_fd >= 0 {
+            let mut ebuf = [0u8; 128];
+            let mut real = true;
+            let n = if faults.events_read_failures > 0 {
+                faults.events_read_failures -= 1;
+                real = false;
+                -1
+            } else if faults.events_populated_for > 0 {
+                // Injected fault: report a still-populated scope for N reads even
+                // though the kernel may already be empty — the watcher must stay
+                // alive and keep polling, not trust an earlier read.
+                real = false;
+                faults.events_populated_for -= 1;
+                let fake = b"populated 1\n";
+                let len = fake.len().min(ebuf.len());
+                ebuf[..len].copy_from_slice(&fake[..len]);
+                len as isize
+            } else {
+                libc::pread(
+                    events_fd,
+                    ebuf.as_mut_ptr() as *mut libc::c_void,
+                    ebuf.len(),
+                    0,
+                )
+            };
+            if n < 0 && real && scope_removed() {
+                return;
+            }
+            if n > 0 {
+                events_proves_empty = populated_zero(&ebuf[..n as usize]);
+            }
+        }
+        if events_proves_empty || (!killed && events_fd < 0 && procs_ok && procs_empty) {
+            return;
+        }
+        libc::nanosleep(&WATCHER_RETRY, std::ptr::null_mut());
+    }
+}
+
+/// Does `events` contain the literal byte sequence "populated 0"? No allocation.
+fn populated_zero(events: &[u8]) -> bool {
+    let pat = b"populated 0";
+    let mut i = 0;
+    while i + pat.len() <= events.len() {
+        if &events[i..i + pat.len()] == pat {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Did the last CGROUP fd op fail because the scope was removed underneath us?
+/// A cgroup-v2 directory is removable only while empty, so a removed scope is
+/// provably reaped — the watcher may exit instead of re-reading a deleted scope's
+/// fds forever. Raw-libc and async-signal-safe (post-fork). Only meaningful
+/// right after a real (non-injected) libc descriptor op.
+unsafe fn scope_removed() -> bool {
+    let e = *libc::__errno_location();
+    e == libc::ENODEV || e == libc::ENOENT
 }
 
 /// Non-blocking reap. Returns Some(exit_code) once the child has terminated.

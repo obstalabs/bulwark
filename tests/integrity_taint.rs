@@ -297,3 +297,58 @@ fn in_tree_policy_rewrite_taints_next_run() {
         "after reset the run must be clean; stderr:\n{fourth}"
     );
 }
+
+// WO-130@v1: the swap (dev, ino) cannot see. Deleting the protected file and
+// creating a new one at the same path routinely gets the freed inode number
+// back on ext4, so the record looked unchanged and no drift was reported (the
+// first CI run of this suite failed exactly so). The inode generation now
+// tells the two apart. The precondition is asserted, not assumed: the
+// recreated file must carry the OLD inode number, otherwise the test would
+// pass on the number alone. Needs an ext4-style filesystem under the scratch
+// directory: tmpfs never reuses a number and reports no generation, so on a
+// host whose temp dir is tmpfs point TMPDIR at a disk filesystem.
+#[test]
+#[ignore = "needs root (fanotify); run under sudo on Linux"]
+fn object_identity_drift_after_delete_and_recreate_reusing_the_inode() {
+    let dir = scratch("reuse");
+    let secret = dir.join("secret.env");
+    let state = dir.join("state.toml");
+    fs::write(&secret, "SECRET=1\n").unwrap();
+
+    let first = run_gate(&secret, &state, &["true"]);
+    assert!(
+        !first.contains(TAINT_MARK),
+        "first run clean; stderr:\n{first}"
+    );
+
+    // Delete and recreate until the filesystem hands the number back (ext4 does
+    // so on the first try as a rule; a few retries cover a concurrent allocation).
+    let old_ino = fs::metadata(&secret).unwrap().ino();
+    let mut new_ino = 0;
+    for _ in 0..50 {
+        fs::remove_file(&secret).unwrap();
+        fs::write(&secret, "SECRET=2\n").unwrap();
+        new_ino = fs::metadata(&secret).unwrap().ino();
+        if new_ino == old_ino {
+            break;
+        }
+    }
+    assert_eq!(
+        old_ino, new_ino,
+        "precondition: the recreated file must reuse the inode number; this filesystem \
+         did not in 50 attempts (tmpfs never does: set TMPDIR to a disk filesystem)"
+    );
+
+    // Same path, same device, same inode number: only the generation moved.
+    let drifted = run_gate(&secret, &state, &["true"]);
+    assert!(
+        drifted.contains(TAINT_MARK) && drifted.contains("drift"),
+        "a delete-and-recreate that reuses the inode number must taint as object drift; \
+         stderr:\n{drifted}"
+    );
+    assert!(
+        drifted.contains(&format!(":{old_ino}:")),
+        "the drift line must show the unchanged inode number with its generations; \
+         stderr:\n{drifted}"
+    );
+}

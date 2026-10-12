@@ -99,6 +99,21 @@ jobs:
       - name: Unit tests
         run: cargo test --verbose
 
+      # WO-155@v1: `fault-injection` is debug-only (it lets a test disable a
+      # reaping layer). A release build that enables it must NOT compile — assert
+      # the build fails; a success here means the test switches shipped.
+      - name: Fault-injection must not compile in release
+        run: |
+          # It must fail, AND fail with THIS exact compile_error! diagnostic — a
+          # success, or a failure for any other reason, is a regression.
+          err=$(cargo build --release --all-features 2>&1) || true
+          if printf '%s\n' "$err" | grep -qF 'the `fault-injection` feature is debug-only; do not enable it in a release build'; then
+            exit 0
+          fi
+          echo "::error::release --all-features must fail with the fault-injection compile_error! diagnostic (it succeeded or failed for another reason)"
+          printf '%s\n' "$err"
+          exit 1
+
       # WO-36: the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
       # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
       # This works on both a passwordless-sudo runner and a runner that runs as
@@ -136,6 +151,15 @@ jobs:
 
       - name: Integrity taint integration tests (policy digest, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test integrity_taint -- --ignored --test-threads=1
+
+      # WO-155@v1: the reaping-layer tests. Default build (the fault-injection
+      # switches are compiled out — a default build must ignore them) and a debug
+      # build with the fault-injection feature (each reaping layer provable).
+      - name: Supervisor reaping tests (default build, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_supervisor -- --ignored --test-threads=1
+
+      - name: Supervisor reaping tests (fault-injection, root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_supervisor --features fault-injection -- --ignored --test-threads=1
 
   supply-chain:
     name: supply-chain (cargo-deny)

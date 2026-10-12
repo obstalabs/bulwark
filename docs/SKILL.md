@@ -220,11 +220,13 @@ consent socket of a running `bulwark run --consent socket`.
 
 ## Failure Modes
 
-- **fanotify fails open on hard supervisor death.** If `bulwark run` is `SIGKILL`ed
-  or crashes while a read is held, the kernel releases that held read as *allowed*
-  (documented kernel behavior). A graceful `SIGTERM` fails closed. Distrust:
-  "nothing leaked" after an unclean kill. Use `--hardened` (Landlock) where this
-  matters — it removes the supervisor from the critical path.
+- **The tree is reaped on hard supervisor death.** If `bulwark run` is `SIGKILL`ed
+  or crashes, a watcher process kills the run's cgroup (`cgroup.kill`, or a
+  `cgroup.freeze` + per-process `SIGKILL` sweep where `cgroup.kill` is absent) so
+  the agent cannot outlive the gate; the native mode refuses to start on a host
+  that cannot do this. Still distrust "nothing leaked" after an unclean kill, and
+  use `--hardened` (Landlock) where this matters — it removes the supervisor from
+  the critical path entirely.
 - **Unclean restart / object drift → tainted mode.** After an unclean exit or a
   protected file changing identity, the next run denies protected reads until an
   operator runs `bulwark reset`. Distrust a run that printed `INTEGRITY TAINTED`

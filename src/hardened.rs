@@ -150,6 +150,21 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
         // glob like `/lib/**` is reduced to its concrete prefix `/lib` — a
         // path_beneath rule already means "this path and everything below it".
         let concrete = crate::glob::landlock_prefix(p);
+        // WO-142@v1: that reduction is only exact for a concrete path or a
+        // trailing `/**` subtree. Any other wildcard widens the rule to the
+        // whole prefix: the base set's `/proc/*/stat` and `/proc/*/status`
+        // floored all of `/proc`, so the agent could read `cmdline`, `stat`
+        // and `status` of every process on the host. Operator grants are
+        // refused for this at launch; the base set reached the floor
+        // unchecked. Every glob is checked here, where the rule is added,
+        // and an unfaithful one adds no rule (fail closed) with a note.
+        if !crate::glob::is_landlock_faithful(p) {
+            eprintln!(
+                "[bulwark] hardened: skip allow {p} (a path rule would widen it to {concrete}; \
+                 only a concrete path or a trailing '/**' subtree is floored)"
+            );
+            continue;
+        }
         let cpath = match CString::new(concrete.as_bytes()) {
             Ok(c) => c,
             Err(_) => continue,
@@ -223,5 +238,33 @@ pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
         libc::close(ruleset_fd);
     }
     eprintln!("[bulwark] hardened: kernel-enforced read floor applied ({allowed} allow path(s))");
+    Ok(())
+}
+
+/// WO-144@v1: drop the current process to `uid`/`gid`, permanently, after the
+/// Landlock floor is in place and before the agent is exec'd. The floor is a
+/// property of the process and survives the credential change; the rule fds
+/// were opened by root before this and are already closed, and Landlock rules
+/// name paths, not credentials, so nothing about the floor depends on the uid.
+/// Order is the same as the forking gate's drop: supplementary groups, then
+/// gid, then uid, each of which needs the privilege the next one gives up.
+/// `PR_SET_NO_NEW_PRIVS` is already set by [`apply_read_floor`], so a setuid
+/// binary cannot undo the drop on a later exec. After the drop, `setuid(0)`
+/// must fail; if it does not, the caller must not exec.
+pub fn drop_to_worker(uid: u32, gid: u32) -> Result<()> {
+    let groups = [gid as libc::gid_t];
+    if unsafe { libc::setgroups(1, groups.as_ptr()) } != 0 {
+        return Err(anyhow!(std::io::Error::last_os_error())).context("setgroups");
+    }
+    if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+        return Err(anyhow!(std::io::Error::last_os_error())).context("setgid");
+    }
+    if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+        return Err(anyhow!(std::io::Error::last_os_error())).context("setuid");
+    }
+    if unsafe { libc::setuid(0) } == 0 {
+        bail!("privilege drop did not take: setuid(0) still succeeds after dropping to uid {uid}");
+    }
+    eprintln!("[bulwark] hardened: agent dropped to uid {uid} gid {gid}");
     Ok(())
 }

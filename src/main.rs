@@ -7,6 +7,13 @@
 // backends land, so scope the dead-code allowance away from Linux only.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+// WO-155@v1: the `fault-injection` feature exists for DEBUG-only tests (it lets
+// a test disable a reaping layer). It must never compile into a release binary —
+// a stray environment variable there would turn the reaping layers off. This
+// makes `cargo build --release --all-features` fail on purpose.
+#[cfg(all(feature = "fault-injection", not(debug_assertions)))]
+compile_error!("the `fault-injection` feature is debug-only; do not enable it in a release build");
+
 mod allowlist;
 mod audit;
 mod consent;
@@ -62,7 +69,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use allowlist::AllowList;
 use consent::{CachingProvider, StaticDeny, Verdict};
 use gate::GateMode;
-use policy::{AgentDecision, Policy};
+use policy::{AgentDecision, Policy, Protected};
 use protect::ProtectedSet;
 use receipt::{Decision, Receipt, ReceiptLog};
 use socket::SocketProvider;
@@ -267,7 +274,8 @@ enum Cmd {
         /// runs. The supervisor (the gate) stays root and keeps the fanotify fd,
         /// so an unprivileged agent cannot `SIGKILL` it and force the kernel's
         /// fail-open-on-death residual. The account must already exist. Refused
-        /// for uid 0 and when not run as root.
+        /// for uid 0 and when not run as root. WO-144@v1: with `--hardened` the
+        /// drop happens in-process, after the Landlock floor and before the exec.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
 
@@ -282,8 +290,9 @@ enum Cmd {
         /// and evade the deny-list/allow-list read gate, so by default Bulwark
         /// auto-drops a would-be-root agent to the invoking user (`SUDO_UID`) when
         /// it can. Pass `--allow-root` to opt out and keep uid 0 — only safe for a
-        /// trusted agent. `--hardened` does not need this (Landlock binds the
-        /// process regardless of uid).
+        /// trusted agent. WO-144@v1: `--hardened` drops the same way after the
+        /// Landlock floor is applied, and with no `SUDO_UID` or `--worker-uid` it
+        /// refuses to run a root agent unless this flag is given.
         #[arg(long = "allow-root")]
         allow_root: bool,
 
@@ -589,6 +598,7 @@ fn main() -> Result<()> {
             }
             let code = cmd_run(RunArgs {
                 protect: &protect,
+                launch_protect: &[],
                 profile: profile.as_deref(),
                 policy_path: policy.as_deref(),
                 // WO-117: `run` resolves a source here and snapshots it once inside cmd_run.
@@ -719,9 +729,25 @@ fn main() -> Result<()> {
     }
 }
 
-/// Default consent socket path: `$XDG_RUNTIME_DIR/bulwark-consent.sock`, else
+/// WO-147@v3: the root-owned runtime consent socket path, shared by the
+/// root gate default and the non-root client's preference check.
+fn runtime_consent_socket() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/run/bulwark/consent.sock")
+    } else {
+        PathBuf::from("/run/bulwark/consent.sock")
+    }
+}
+
+/// Default consent socket path. Root (euid 0) always uses the root-owned runtime
+/// dir — `/run/bulwark/consent.sock` (macOS `/var/run/bulwark/consent.sock`) —
+/// REGARDLESS of `$XDG_RUNTIME_DIR`, so `ensure_root_parent` actually governs the
+/// root default. Non-root keeps `$XDG_RUNTIME_DIR/bulwark-consent.sock`, else
 /// `/tmp/bulwark-consent.sock`.
 fn default_consent_socket() -> PathBuf {
+    if unsafe { libc::geteuid() } == 0 {
+        return runtime_consent_socket();
+    }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir).join("bulwark-consent.sock");
@@ -730,9 +756,23 @@ fn default_consent_socket() -> PathBuf {
     PathBuf::from("/tmp/bulwark-consent.sock")
 }
 
+/// WO-147@v3: the `bulwark consent` client default. A non-root operator
+/// answering a root gate (`sudo bulwark run`) must reach the same root-owned
+/// runtime socket, so prefer it when its node exists; otherwise keep the
+/// per-user default.
+fn client_consent_socket() -> PathBuf {
+    if unsafe { libc::geteuid() } != 0 {
+        let runtime = runtime_consent_socket();
+        if socket::bound_path(&runtime).exists() {
+            return runtime;
+        }
+    }
+    default_consent_socket()
+}
+
 /// `bulwark consent` — operator side: answer one pending request.
 fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
-    let sock = socket.unwrap_or_else(default_consent_socket);
+    let sock = socket.unwrap_or_else(client_consent_socket);
     let v = match verdict {
         Some(s) => Some(Verdict::parse(s).with_context(|| format!("unrecognized verdict '{s}'"))?),
         None => None,
@@ -742,9 +782,59 @@ fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the user's home directory (for `~/` expansion in policy globs).
+/// Resolve the user's home directory from `$HOME`. WO-145@v3 (G2): protect
+/// expansion no longer uses this (it uses the host home set); retained for any
+/// caller that wants one user's home.
+#[allow(dead_code)]
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
+}
+
+/// WO-145@v3 (G1): the enumerated homes owned by `uid`.
+fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {
+    use std::os::unix::fs::MetadataExt;
+    homes
+        .iter()
+        .filter(|h| {
+            std::fs::metadata(h)
+                .map(|m| m.uid() == uid)
+                .unwrap_or(false)
+        })
+        .map(|s| s.as_str())
+        .collect()
+}
+
+/// WO-145@v3 (G3): the enumerated home `path` was expanded from, if any — the
+/// longest home that equals `path` or is a directory ancestor of it.
+fn origin_home<'a>(path: &str, homes: &'a [String]) -> Option<&'a str> {
+    homes
+        .iter()
+        .filter(|h| **h == path || path.starts_with(&format!("{h}/")))
+        .max_by_key(|h| h.len())
+        .map(|s| s.as_str())
+}
+
+/// WO-145@v3 (G3): the two stat errors that prove a protect path is absent
+/// (NotFound, and ENOTDIR when a component is a regular file) — the same rule
+/// the lenient resolver applies, so the pre-flight stat agrees with it.
+fn protect_stat_is_absent(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
+}
+
+/// WO-145@v3 (G3): the refusal message for an expanded protect path whose stat
+/// failed with something other than "absent". Naming the origin home (and that
+/// it belongs to a different user) and pointing at absolute --protect turns a
+/// bare EACCES/EIO into a diagnosable failure.
+fn describe_g3_stat_error(path: &str, origin: &str, other: bool, err: &std::io::Error) -> String {
+    let other_clause = if other {
+        " (that home belongs to a different user)"
+    } else {
+        ""
+    };
+    format!(
+        "cannot stat protected path {path} (expanded from home {origin}){other_clause}: {err}; \
+         pass absolute --protect paths for that user's protected files; nothing was run"
+    )
 }
 
 /// `bulwark ssh user@host --protect <paths> -- <agent>` — the local launcher.
@@ -1629,11 +1719,27 @@ fn cmd_internal_memfd_exec(_command: &[String]) -> Result<()> {
 /// `command`. The Bulwark process is replaced by the agent, which now carries a
 /// kernel-enforced restriction for its whole life — crash-safe, no supervisor.
 /// Only returns on error (a successful `execvp` never returns).
-fn run_hardened(allow_globs: &[String], command: &[String]) -> Result<i32> {
+fn run_hardened(
+    allow_globs: &[String],
+    command: &[String],
+    worker: Option<gate::WorkerCreds>,
+) -> Result<i32> {
     if command.is_empty() {
         anyhow::bail!("no command given");
     }
     hardened::apply_read_floor(allow_globs)?;
+    // WO-144@v1: the floor is applied as root (it needs nothing from root, but
+    // that is who launched us) and then the process drops to the worker before
+    // it becomes the agent. Until now this mode exec'd at uid 0 under sudo: the
+    // floor confined reads by path, and root still owned every surface the
+    // floor let through. A failed drop never execs. Linux only, like the floor
+    // itself: off Linux `apply_read_floor` has already refused above.
+    #[cfg(target_os = "linux")]
+    if let Some(w) = worker {
+        hardened::drop_to_worker(w.uid, w.gid)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = worker;
 
     let prog = std::ffi::CString::new(command[0].as_bytes())?;
     let argv: Vec<std::ffi::CString> = command
@@ -1716,6 +1822,8 @@ fn real_mount_points() -> Vec<PathBuf> {
 /// Arguments for a `run` invocation.
 struct RunArgs<'a> {
     protect: &'a [PathBuf],
+    // WO-141@v1: a launch profile's protect entries, resolved like [protected].
+    launch_protect: &'a [String],
     profile: Option<&'a str>,
     policy_path: Option<&'a Path>,
     // WO-117: how `cmd_run` obtains the policy it digests: nothing (--protect or
@@ -1748,12 +1856,17 @@ struct RunArgs<'a> {
 /// the existing run path.
 #[derive(Debug)]
 struct LaunchPlan {
-    protect: Vec<PathBuf>, // WO-27: protected paths for deny-list launches
-    allow: Vec<String>,    // WO-27: allow grants for default-deny launches
-    consent: ConsentMode,  // WO-27: configured static/socket decision channel
-    deny_all: bool,        // WO-27: route allow-only profiles into allow-list mode
-    audit: bool,           // WO-27: profile-controlled default receipt logging
-    command: Vec<String>,  // WO-27: resolved command vector
+    // WO-141@v1: the profile's protect entries as written (`~/.ssh`,
+    // `**/.env`); cmd_run expands and resolves them exactly like a policy
+    // file's [protected] section. They used to be handed over as PathBufs to
+    // the strict `--protect` resolver, which stat'ed them literally, so the
+    // starter profile never launched.
+    protect: Vec<String>,
+    allow: Vec<String>,   // WO-27: allow grants for default-deny launches
+    consent: ConsentMode, // WO-27: configured static/socket decision channel
+    deny_all: bool,       // WO-27: route allow-only profiles into allow-list mode
+    audit: bool,          // WO-27: profile-controlled default receipt logging
+    command: Vec<String>, // WO-27: resolved command vector
 }
 
 fn launch_policy_path(agent: &str, policy_path: Option<&Path>) -> Result<PathBuf> {
@@ -1811,8 +1924,20 @@ fn cmd_launch(
     } else {
         None
     };
+    // WO-141@v1: an allow list in a deny-list launch profile is still dropped
+    // (its meaning is bulwark/WO-136's decision); say so once, by name, so the
+    // starter profile's allow entries are not silently a promise the run does
+    // not keep.
+    if !plan.protect.is_empty() && !plan.allow.is_empty() {
+        eprintln!(
+            "[bulwark] note: [agents.{agent}] allow list ({}) is not applied in a deny-list \
+             launch (protect is set); what allow means here is undecided (bulwark/WO-136)",
+            plan.allow.join(", ")
+        );
+    }
     cmd_run(RunArgs {
-        protect: &plan.protect,
+        protect: &[],
+        launch_protect: &plan.protect,
         profile: None,
         policy_path: None,
         policy_input: PolicyInput::Ready(Box::new(snapshot)),
@@ -1874,7 +1999,7 @@ fn resolve_launch_plan(agent: &str, policy: &Policy) -> Result<LaunchPlan> {
     }
     let deny_all = profile.protect.is_empty() && !profile.allow.is_empty();
     Ok(LaunchPlan {
-        protect: profile.protect.iter().map(PathBuf::from).collect(),
+        protect: profile.protect.clone(),
         allow: profile.allow.clone(),
         consent: consent_mode_for_agent_decision(profile.decision),
         deny_all,
@@ -1957,6 +2082,48 @@ fn root_default_worker() -> Result<Option<gate::WorkerCreds>> {
     Ok(None)
 }
 
+/// WO-144@v1: the uid the hardened agent runs as. An explicit `--worker-uid`
+/// wins (validated by [`resolve_worker_creds`]); an unprivileged launcher has
+/// nothing to drop; a root launcher drops to the sudo origin (`SUDO_UID`, gid
+/// from `SUDO_GID` or the uid), the same default the forking gate applies.
+/// Real root with no sudo origin and no `--worker-uid` is refused before
+/// anything runs, unless `--allow-root` keeps uid 0 on purpose: hardened mode
+/// has no supervisor for a root agent to be dangerous to, but it is the only
+/// mode whose agent would otherwise hold root behind a read floor.
+fn hardened_worker_creds(
+    worker_uid: Option<u32>,
+    worker_gid: Option<u32>,
+    allow_root: bool,
+) -> Result<Option<gate::WorkerCreds>> {
+    if let Some(w) = resolve_worker_creds(worker_uid, worker_gid)? {
+        return Ok(Some(w));
+    }
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } != 0 || allow_root {
+            return Ok(None);
+        }
+        let sudo_uid: Option<u32> = std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok());
+        let sudo_gid: Option<u32> = std::env::var("SUDO_GID").ok().and_then(|s| s.parse().ok());
+        if let Some(uid) = sudo_uid.filter(|u| *u != 0) {
+            return Ok(Some(gate::WorkerCreds {
+                uid,
+                gid: sudo_gid.unwrap_or(uid),
+            }));
+        }
+        anyhow::bail!(
+            "--hardened would run the agent as root: launched as uid 0 with no sudo origin \
+             (SUDO_UID) to drop to. Pass --worker-uid <uid> to name the agent's uid, or \
+             --allow-root to keep uid 0 deliberately; nothing was run"
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = allow_root;
+        Ok(None)
+    }
+}
+
 fn resolve_worker_creds(
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,
@@ -1992,8 +2159,10 @@ fn resolve_worker_creds(
 /// single-segment wildcard silently widens to that whole subtree (a `*.log`
 /// grant becomes the whole directory; `**/*.log` becomes `/`). Rather than grant
 /// a broad read floor by surprise, require the operator to state it explicitly
-/// as a concrete path or a trailing `/**` subtree. The runtime base set is
-/// exempt — it is a documented, printable floor and is not operator input.
+/// as a concrete path or a trailing `/**` subtree. The runtime base set is not
+/// operator input and is not refused here; WO-142@v1: it is checked where the
+/// rule is added (`hardened::apply_read_floor`), which skips any base glob
+/// that would widen instead of flooring the whole prefix.
 fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
     for g in grants {
         // A hardened grant must be ABSOLUTE. A relative grant (e.g. `tmp/**`) is
@@ -2059,12 +2228,12 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         if args.no_base_set {
             al = al.without_base();
         }
-        if args.worker_uid.is_some() {
-            // Hardened mode execs in-process (no fork, no child to drop). The
-            // Landlock floor is already crash-safe, so a uid drop adds nothing.
-            anyhow::bail!("--worker-uid is not used with --hardened (no supervised child to drop)");
-        }
-        return run_hardened(&al.allowed_globs(), args.command);
+        // WO-144@v1: this branch used to refuse --worker-uid ("no supervised
+        // child to drop") and exec in-process at whatever uid launched it, so
+        // `sudo bulwark run --hardened` ran the agent as root. Resolve the
+        // worker the way the forking paths do and drop in-process instead.
+        let worker = hardened_worker_creds(args.worker_uid, args.worker_gid, args.allow_root)?;
+        return run_hardened(&al.allowed_globs(), args.command, worker);
     }
 
     // WO-49: resolve the optional worker credentials once, up front, so every
@@ -2113,7 +2282,16 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         // invisible to the gate and silently allowed. So mark every real mount.
         let mark_paths = real_mount_points();
         let mode = GateMode::AllowList { allow: &al };
-        return gate::run(mode, &mark_paths, args.receipts, args.command, worker);
+        return gate::run(
+            mode,
+            None,
+            Duration::from_secs(args.consent_timeout),
+            &mark_paths,
+            args.receipts,
+            args.command,
+            worker,
+        )
+        .map(|o| o.exit_code);
     }
 
     // WO-30: non-Linux socket consent is a platform-not-implemented path, not a
@@ -2122,8 +2300,6 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
     if matches!(args.consent, ConsentMode::Socket) {
         socket::ensure_available()?;
     }
-
-    let home = home_dir();
 
     // WO-117 (R1): the policy file is opened and read exactly once per run, for
     // both parsing and digesting. `launch` already took its snapshot; `run`
@@ -2144,20 +2320,111 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         // WO-117: a file-backed policy is the snapshot's parsed bytes, the same
         // bytes the integrity record below digests; --profile loads no file.
         let profile_policy;
-        let policy: &Policy = match &snapshot {
-            Some(s) => &s.policy,
-            None => {
-                profile_policy = load_policy(args.profile, args.policy_path)?;
-                &profile_policy
+        let launch_policy;
+        let policy: &Policy = if !args.launch_protect.is_empty() {
+            // WO-141@v1: a launch profile's protect list is a [protected]
+            // section by another name. Wrap it as one so the expansion, the
+            // concrete/glob split and the lenient resolution below are the
+            // single implementation `run --policy` uses; the snapshot still
+            // supplies the integrity record.
+            launch_policy = Policy {
+                protected: Protected {
+                    prompt: args.launch_protect.to_vec(),
+                },
+                ..Policy::default()
+            };
+            &launch_policy
+        } else {
+            match &snapshot {
+                Some(s) => &s.policy,
+                None => {
+                    profile_policy = load_policy(args.profile, args.policy_path)?;
+                    &profile_policy
+                }
             }
         };
-        let concrete = policy.concrete_protected_paths(&home);
-        if !policy.protected_globs(&home).is_empty() {
+        // WO-145@v2: `~` in a protect entry is not one user's home. Until
+        // 0.9.2 it was expanded from $HOME, which under plain sudo on Linux is
+        // /root while the agent runs as the invoking user: that user's real
+        // ~/.ssh went unprotected, silently. A `~/` entry now means that path
+        // under every home on the host; an absolute entry is exact; any other
+        // relative entry refuses the run before anything starts.
+        let homes = policy::host_homes();
+        let has_tilde = policy
+            .protected
+            .prompt
+            .iter()
+            .any(|e| e == "~" || e.starts_with("~/"));
+        if has_tilde {
+            eprintln!(
+                "[bulwark] protecting: `~/` entries are protected under every home directory \
+                 on this host ({} home(s))",
+                homes.len()
+            );
+        }
+        // WO-145@v3 (G1): when the agent will run as a KNOWN non-root uid, at
+        // least one enumerated home must be owned by it, or `~/` entries do not
+        // cover that user's own home (LDAP/AD/SSSD accounts and homes outside
+        // /home|/Users are not enumerated). An explicit `--worker-uid` with no
+        // passwd entry is an anonymous worker that owns no home (exempt).
+        #[cfg(unix)]
+        let agent_uid = match worker {
+            Some(w) => Some(w.uid),
+            None => {
+                let euid = unsafe { libc::geteuid() };
+                if euid != 0 {
+                    Some(euid)
+                } else {
+                    None
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let agent_uid: Option<u32> = worker.map(|w| w.uid);
+        if has_tilde {
+            if let Some(uid) = agent_uid {
+                if homes_owned_by_uid(&homes, uid).is_empty() {
+                    anyhow::bail!(
+                        "the agent will run as uid {uid}, but no home directory on this host \
+                         is owned by that uid. Its account may come from LDAP/AD/SSSD, or its \
+                         home may be outside /home or /Users, so `~/` protect entries would \
+                         not cover that user's own home. Pass absolute --protect paths for \
+                         that user's protected files; nothing was run"
+                    );
+                }
+            }
+        }
+        let concrete = policy.concrete_protected_paths(&homes)?;
+        let globs = policy.protected_globs(&homes)?;
+        if !globs.is_empty() {
             eprintln!(
                 "[bulwark] note: {} wildcard protected pattern(s) are not yet matched at \
-                 decision time in the MVP (only concrete paths resolve to inodes)",
-                policy.protected_globs(&home).len()
+                 decision time in the MVP (only concrete paths resolve to inodes): {}",
+                globs.len(),
+                globs.join(", ")
             );
+        }
+        // WO-145@v3 (G3): stat each expanded protect path once with its origin
+        // home, so a non-absent failure names the home (and that it may belong
+        // to another user) and points at absolute --protect. Stat only the
+        // expanded paths — never readdir inside a home (which could trigger an
+        // automount).
+        for p in &concrete {
+            use std::os::unix::fs::MetadataExt;
+            match std::fs::metadata(p) {
+                Ok(_) => {}
+                Err(e) if protect_stat_is_absent(&e) => {}
+                Err(e) => {
+                    let origin = origin_home(p, &homes);
+                    let other = match (origin, agent_uid) {
+                        (Some(h), Some(uid)) => std::fs::metadata(h)
+                            .map(|m| m.uid() != uid)
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    anyhow::bail!(describe_g3_stat_error(p, origin.unwrap_or("?"), other, &e));
+                }
+            }
         }
         // WO-131@v1: a stat failure that does not prove the path absent (EACCES,
         // EIO, ...) refuses the run here, before any launch or state write,
@@ -2241,33 +2508,57 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             }
             let mode = GateMode::DenyList {
                 protected: &protected,
-                consent: &mut decider,
             };
-            gate::run(mode, &mark_paths, args.receipts, args.command, worker)
+            gate::run(
+                mode,
+                Some(Box::new(decider)),
+                Duration::from_secs(args.consent_timeout),
+                &mark_paths,
+                args.receipts,
+                args.command,
+                worker,
+            )
+            .map(|o| o.exit_code)
         }
         ConsentMode::Socket => {
-            let sock = args.consent_socket.unwrap_or_else(default_consent_socket);
+            let sock =
+                socket::absolutize(&args.consent_socket.unwrap_or_else(default_consent_socket));
             let provider = SocketProvider::bind(&sock, supervisor_pid, timeout)?;
+            // WO-147@v1: bind() places the node inside a sibling 0700 directory
+            // (`bound_path`); print the real path so the operator can `ls` it.
+            // The `--socket` value stays the requested path, which both sides
+            // resolve the same way.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let shown = socket::bound_path(&sock);
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let shown = sock.clone();
             eprintln!(
-                "[bulwark] consent socket ready at {} — answer with: bulwark consent --socket {}",
+                "[bulwark] consent socket ready — answer with: bulwark consent --socket {} (node at {})",
                 sock.display(),
-                sock.display()
+                shown.display()
             );
             let mut decider = CachingProvider::new(provider);
             if tainted {
                 decider = decider.tainted();
             }
-            let code = {
+            let out = {
                 let mode = GateMode::DenyList {
                     protected: &protected,
-                    consent: &mut decider,
                 };
-                gate::run(mode, &mark_paths, args.receipts, args.command, worker)?
+                gate::run(
+                    mode,
+                    Some(Box::new(decider)),
+                    timeout,
+                    &mark_paths,
+                    args.receipts,
+                    args.command,
+                    worker,
+                )?
             };
             // Persist any deny-forever decisions as protected globs so they
             // hold across sessions (path, not inode — inodes are reused).
-            persist_deny_forever(decider.deny_forever_paths(), args.policy_path);
-            Ok(code)
+            persist_deny_forever(&out.deny_forever_paths, args.policy_path);
+            Ok(out.exit_code)
         }
         ConsentMode::Remote => cmd_run_remote(&protected, &mark_paths, &args, worker),
     };
@@ -2291,10 +2582,24 @@ fn protected_object_ids(mark_paths: &[PathBuf]) -> Vec<integrity::ObjId> {
     let mut out = Vec::new();
     for p in mark_paths {
         if let Ok(m) = std::fs::metadata(p) {
+            // WO-130@v1: the inode generation, so a delete-and-recreate that
+            // reuses the inode number still reads as drift. Linux asks the
+            // filesystem; macOS reports st_gen to root only and 0 otherwise,
+            // which is "unknown" here.
+            #[cfg(target_os = "linux")]
+            let generation = integrity::generation_of(p);
+            #[cfg(target_os = "macos")]
+            let generation = {
+                use std::os::macos::fs::MetadataExt as MacMetadataExt;
+                Some(u64::from(m.st_gen())).filter(|g| *g != 0)
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let generation = None;
             out.push(integrity::ObjId {
                 path: p.to_string_lossy().into_owned(),
                 dev: m.dev(),
                 ino: m.ino(),
+                generation,
             });
         }
     }
@@ -2384,7 +2689,7 @@ fn cmd_run_remote(
             .open(&prompt_path)
             .with_context(|| format!("cannot open prompt lane {}", prompt_path.display()))?;
 
-        let mut decider = remote::AsyncRemoteProvider::new(
+        let decider = remote::AsyncRemoteProvider::new(
             cache,
             prompt_file,
             args.host_label.clone(),
@@ -2396,11 +2701,17 @@ fn cmd_run_remote(
             prompt_path.display(),
             verdict_path.display()
         );
-        let mode = GateMode::DenyList {
-            protected,
-            consent: &mut decider,
-        };
-        gate::run(mode, mark_paths, args.receipts, args.command, worker)
+        let mode = GateMode::DenyList { protected };
+        gate::run(
+            mode,
+            Some(Box::new(decider)),
+            Duration::from_secs(args.consent_timeout),
+            mark_paths,
+            args.receipts,
+            args.command,
+            worker,
+        )
+        .map(|o| o.exit_code)
     }
 }
 
@@ -2458,9 +2769,22 @@ fn cmd_check(
     format: OutputFormat,
 ) -> Result<()> {
     use policy::{OutsideWorkspace, PolicyDecision};
-    let home = home_dir();
+    // WO-145@v4 (D): a `~/` allow entry is not expanded across homes and grants
+    // nothing; say so once so the operator reaches for an absolute path.
+    let homes = policy::host_homes();
     let policy = load_policy(profile, policy_path)?;
-    let decision = policy.decide(path, &home);
+    if policy
+        .workspace
+        .allow
+        .iter()
+        .any(|e| e == "~" || e.starts_with("~/"))
+    {
+        eprintln!(
+            "[bulwark] note: a `~/` workspace allow entry is not expanded across homes and \
+             grants nothing; pass an absolute --allow path instead"
+        );
+    }
+    let decision = policy.decide(path, &homes);
     // `decided` is a stable machine token; `label`/`effect` are human strings.
     let (decided, label, effect) = match decision {
         PolicyDecision::AllowWorkspace => ("allow_workspace", "allow (workspace)", "read allowed"),
@@ -3144,6 +3468,61 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
     }
 
     #[test]
+    fn gate_script_auto_worker_sends_numeric_uid_and_no_hidden_flag() {
+        // WO-145@v7: the hidden `run --auto-worker-uid` argument and its
+        // serialization were removed. An anonymous worker dispatch resolves the
+        // uid ssh-side and emits ONLY the numeric `--worker-uid <n>` — never
+        // `--auto-worker-uid` nor any other argument v0.9.2's `run` does not
+        // accept. The v0.9.2 run argument list is pinned here so this test turns
+        // red the moment a new flag is threaded into the remote line.
+        let script = build_gate_script(
+            "/tmp/d",
+            "/tmp/d/p",
+            "/tmp/d/v",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            "nullbot@host",
+            "--protect '/etc/shadow'",
+            Some(60000),
+            "'agent'",
+        );
+        assert!(
+            script.contains("--worker-uid 60000"),
+            "the resolved anonymous uid must be sent as a numeric --worker-uid:\n{script}"
+        );
+        assert!(
+            !script.contains("--auto-worker-uid"),
+            "the hidden --auto-worker-uid flag must not appear on the remote line:\n{script}"
+        );
+        // Only arguments v0.9.2's `run` subcommand accepts may appear on the gate
+        // line. v0.9.2 run signature: run --consent <MODE> --host-label <NAME>
+        // --prompt-out <FILE> --verdict-in <FILE> --worker-uid <UID> --protect <PATH>
+        // ... -- <COMMAND>. Assert every `--long` token in the emitted script is
+        // one of these (the bare `--` separator and any non-flag token are skipped).
+        let allowed = [
+            "--consent",
+            "--host-label",
+            "--prompt-out",
+            "--verdict-in",
+            "--worker-uid",
+            "--protect",
+        ];
+        for tok in script.split_whitespace() {
+            if let Some(rest) = tok.strip_prefix("--") {
+                if rest.is_empty() {
+                    continue;
+                }
+                let name = rest.split(['=', '/']).next().unwrap();
+                assert!(
+                    allowed.iter().any(|a| *a == format!("--{name}")),
+                    "script uses argument --{name} absent from v0.9.2's run:\n{script}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn remote_uid_pick_snippet_uses_getent_and_bounded_probe() {
         // WO-50: the uid picker must seed from the run id, probe with getent only
         // (no useradd — nothing is created), and bound the range with a clear exit.
@@ -3234,6 +3613,51 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(!without.contains("--no-base-set"), "off => flag absent");
     }
 
+    // WO-141@v1: a launch profile's protect entries must come out of the plan
+    // as written and resolve through the policy section's own methods, so
+    // `~` expands and the wildcard entries are split off instead of being
+    // stat'ed literally. The starter profile is the shipped front door.
+    #[test]
+    fn launch_plan_protect_resolves_like_a_policy_protected_section() {
+        let policy = Policy::default_profile();
+        let plan = resolve_launch_plan("agent", &policy).unwrap();
+        assert_eq!(
+            plan.protect, policy.agents["agent"].protect,
+            "the plan must carry the profile's protect entries as written"
+        );
+        let wrapped = Policy {
+            protected: Protected {
+                prompt: plan.protect.clone(),
+            },
+            ..Policy::default()
+        };
+        // WO-145@v2: over the host home set, each `~/` entry per home.
+        let homes = vec!["/home/launcher".to_string(), "/root".to_string()];
+        let concrete = wrapped.concrete_protected_paths(&homes).unwrap();
+        let globs = wrapped.protected_globs(&homes).unwrap();
+        assert_eq!(
+            concrete,
+            vec![
+                "/home/launcher/.ssh".to_string(),
+                "/root/.ssh".to_string(),
+                "/home/launcher/.aws".to_string(),
+                "/root/.aws".to_string(),
+                "/home/launcher/.config/gcloud".to_string(),
+                "/root/.config/gcloud".to_string(),
+            ],
+            "concrete entries must be expanded under every home and wildcard-free"
+        );
+        assert_eq!(
+            globs,
+            vec![
+                "**/.env".to_string(),
+                "/home/launcher/dev/**/secrets/**".to_string(),
+                "/root/dev/**/secrets/**".to_string(),
+            ],
+            "wildcard entries must be split off for decision-time matching"
+        );
+    }
+
     #[test]
     fn resolve_worker_creds_none_is_none() {
         assert!(resolve_worker_creds(None, None).unwrap().is_none());
@@ -3247,6 +3671,38 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
     #[test]
     fn resolve_worker_creds_rejects_gid_without_uid() {
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
+    }
+
+    // WO-145@v3 (G1): the home-ownership predicate drives the refuse/pass call;
+    // the anonymous-worker exemption is the passwd lookup.
+    #[test]
+    fn homes_owned_by_uid_distinguishes_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = test_scratch_dir("g1-own");
+        let owner = std::fs::metadata(&dir).unwrap().uid();
+        let other = if owner != 0 { 0 } else { 65534 };
+        let homes = vec![dir.to_string_lossy().into_owned()];
+        assert!(!homes_owned_by_uid(&homes, owner).is_empty());
+        assert!(homes_owned_by_uid(&homes, other).is_empty());
+        assert!(homes_owned_by_uid(&[], owner).is_empty());
+    }
+
+    #[test]
+    fn g3_message_names_the_home_and_suggests_absolute_protect() {
+        let e = std::io::Error::from_raw_os_error(libc::EACCES);
+        let msg = describe_g3_stat_error("/home/bob/.ssh", "/home/bob", true, &e);
+        assert!(msg.contains("expanded from home /home/bob"), "{msg}");
+        assert!(
+            msg.contains("that home belongs to a different user"),
+            "{msg}"
+        );
+        assert!(msg.contains("absolute --protect"), "{msg}");
+        assert!(msg.contains("nothing was run"), "{msg}");
+        let msg2 = describe_g3_stat_error("/home/bob/.ssh", "/home/bob", false, &e);
+        assert!(
+            !msg2.contains("that home belongs to a different user"),
+            "{msg2}"
+        );
     }
 
     #[test]

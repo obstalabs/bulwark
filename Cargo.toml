@@ -27,6 +27,15 @@ getrandom = "0.2"
 sha2 = "0.10"
 base64 = "0.22"
 
+[features]
+# WO-147/155@v1 (fault-injection): compile IN the test-only reaping-layer
+# switches (`BULWARK_TEST_NO_CGROUP` / `BULWARK_TEST_NO_PDEATHSIG`). OFF by
+# default and never enabled in release/CI release builds — with the feature
+# absent, the code paths that read those variables do not compile, so a shipped
+# binary cannot have its reaping layers disabled by a stray environment
+# variable. Only the tests that isolate a single reaping layer enable it.
+fault-injection = []
+
 [dev-dependencies]
 # Integration tests send signals to the supervisor to exercise fail-closed.
 libc = "0.2"
