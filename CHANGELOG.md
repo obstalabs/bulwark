@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-15
+
 ### Security
 <!-- WO-155@v1 / WO-156@v2: consolidated — tree reaped on any supervisor death with positive-proof empty-scope, freeze fallback and reapable-host refusal; receipts integrity and accounting; deadline-bounded consent; debug-only fault-injection. -->
 - A dead supervisor never leaves a live unsupervised agent. The direct child
