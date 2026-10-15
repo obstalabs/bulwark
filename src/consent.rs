@@ -98,10 +98,28 @@ pub trait ConsentProvider {
     /// how it was reached.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
+    /// Request a verdict with a caller-chosen deadline (shorter than the
+    /// provider's configured one), so a request queued behind a pending prompt
+    /// can be bounded to what remains of its own consent window. Default:
+    /// [`ConsentProvider::request`].
+    fn request_with_timeout(
+        &mut self,
+        req: &ConsentRequest,
+        _timeout: std::time::Duration,
+    ) -> (Verdict, Source) {
+        self.request(req)
+    }
+
     /// Receive the supervised tree's cgroup scope (relative path) so an off-band
     /// provider can reject in-tree answerers by membership. Default: no-op (the
     /// static-deny floor and providers without a peer channel ignore it).
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
+
+    /// WO-147/154@v1: attach the gate's log sink so this provider's diagnostics
+    /// (e.g. a refused off-band peer) line through the bounded queue instead of
+    /// a synchronous stderr write that could stall the consent worker. Default:
+    /// no-op (the static-deny floor, and providers with no diagnostics).
+    fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 }
 
 /// The default open-core provider: deny everything, immediately. This is the
@@ -152,14 +170,27 @@ impl<P: ConsentProvider> CachingProvider<P> {
         self
     }
 
-    /// Paths that were denied forever this session (deduped), for the caller to
-    /// persist as protected globs in the policy file.
-    pub fn deny_forever_paths(&self) -> &[String] {
-        &self.deny_forever_paths
-    }
-
     /// Resolve a verdict for `req`, consulting and updating the cache.
     pub fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
+        self.decide_inner(req, None)
+    }
+
+    /// Decide with a caller-chosen deadline. Same cache semantics, but the inner
+    /// provider is asked to bound its wait to `deadline` (so a request queued
+    /// behind a pending prompt honors what remains of its own consent window).
+    pub fn decide_deadline(
+        &mut self,
+        req: &ConsentRequest,
+        deadline: std::time::Duration,
+    ) -> (Verdict, Source) {
+        self.decide_inner(req, Some(deadline))
+    }
+
+    fn decide_inner(
+        &mut self,
+        req: &ConsentRequest,
+        deadline: Option<std::time::Duration>,
+    ) -> (Verdict, Source) {
         if self.deny_forever.contains(&req.key) {
             return (Verdict::DenyForever, Source::Cache);
         }
@@ -169,7 +200,10 @@ impl<P: ConsentProvider> CachingProvider<P> {
         if !self.tainted && self.allow_session.contains(&req.key) {
             return (Verdict::AllowSession, Source::Cache);
         }
-        let (verdict, source) = self.inner.request(req);
+        let (verdict, source) = match deadline {
+            Some(d) => self.inner.request_with_timeout(req, d),
+            None => self.inner.request(req),
+        };
         if verdict == Verdict::AllowSession && !self.tainted {
             self.allow_session.insert(req.key);
         }
@@ -189,9 +223,29 @@ impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
         CachingProvider::decide(self, req)
     }
 
+    fn decide_deadline(
+        &mut self,
+        req: &ConsentRequest,
+        deadline: std::time::Duration,
+    ) -> (Verdict, Source) {
+        CachingProvider::decide_deadline(self, req, deadline)
+    }
+
     fn bind_scope(&mut self, scope_rel: Option<&str>) {
         // The cache holds no peer channel; forward to the wrapped provider.
         self.inner.bind_scope(scope_rel);
+    }
+
+    fn attach_log(&mut self, sink: crate::receipt::LogSink) {
+        // The cache holds no diagnostics of its own; forward to the provider.
+        self.inner.attach_log(sink);
+    }
+
+    /// The consent worker owns this decider, so `run` collects the deny-forever
+    /// paths from it when the worker exits (via this trait method) and the
+    /// caller persists them.
+    fn deny_forever_paths(&self) -> Vec<String> {
+        self.deny_forever_paths.clone()
     }
 }
 
@@ -269,7 +323,9 @@ mod tests {
         let (v2, s2) = c.decide(&req(9));
         assert_eq!((v2, s2), (Verdict::DenyForever, Source::Cache));
         // the path is recorded once for persistence
-        assert_eq!(c.deny_forever_paths(), &["/x/9".to_string()]);
+        let paths: Vec<String> =
+            <CachingProvider<Scripted> as crate::gate::ConsentDecider>::deny_forever_paths(&c);
+        assert_eq!(paths, vec!["/x/9".to_string()]);
     }
 
     #[test]

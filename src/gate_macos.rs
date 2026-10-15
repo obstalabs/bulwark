@@ -34,7 +34,6 @@ pub enum GateMode<'a> {
     /// still answer from in-memory policy only.
     DenyList {
         protected: &'a ProtectedSet,
-        consent: &'a mut dyn ConsentDecider,
     },
     AllowList {
         allow: &'a AllowList,
@@ -46,6 +45,12 @@ pub enum GateMode<'a> {
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
+    /// Decide with a caller-chosen deadline (default: `decide`). Kept for API
+    /// parity with the Linux gate; the macOS edge prompts from its seeded policy.
+    fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
+        self.decide(req)
+    }
+
     /// Receive the supervised tree's membership scope identifier, mirroring the
     /// Linux gate so the shared `CachingProvider` impl type-checks on every
     /// platform. macOS attributes the tree by the Endpoint Security PID set held
@@ -54,9 +59,34 @@ pub trait ConsentDecider {
     /// ancestry check. Wiring the ES PID set into the consent socket (the macOS
     /// analog of the cgroup fix) is tracked as a documented residual.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
+
+    /// Mirror of the Linux gate's log-sink hook. No-op on macOS (the ES gate
+    /// prompts from seeded policy before any worker thread exists).
+    fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
+
+    /// Mirror of the Linux gate's deny-forever readback. Default empty.
+    fn deny_forever_paths(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Result of a supervised run: the child's exit code plus the deny-forever
+/// paths the operator chose this session (for the caller to persist).
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub deny_forever_paths: Vec<String>,
 }
 
 pub(crate) fn shutdown_requested() -> bool {
+    false
+}
+
+/// Whether the supervisor is tearing the run down (the Linux gate's fanotify
+/// drain). The macOS Endpoint Security gate has no fanotify permission loop and
+/// no deferred-consent drain, so there is no draining teardown to observe — the
+/// consent socket's drain check is therefore always false here. Provided for a
+/// shared call surface with the Linux gate, not cfg'd away at the call site.
+pub(crate) fn draining() -> bool {
     false
 }
 
@@ -111,11 +141,13 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
 
 pub fn run(
     mode: GateMode,
+    mut consent: Option<Box<dyn ConsentDecider + Send>>,
+    _consent_timeout: Duration,
     _mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
     worker: Option<WorkerCreds>,
-) -> Result<i32> {
+) -> Result<RunOutcome> {
     if command.is_empty() {
         bail!("no command given");
     }
@@ -128,21 +160,30 @@ pub fn run(
         }
     }
 
-    let policy = match mode {
-        GateMode::DenyList { protected, consent } => {
+    // The decider survives through `supervise` so its deny-forever paths can be
+    // read back at the end (same contract as the Linux gate).
+    let (policy, decider) = match mode {
+        GateMode::DenyList { protected } => {
             if protected.is_empty() {
                 bail!("no protected inodes resolved — nothing to guard");
             }
-            EdgePolicy::DenyList {
-                protected,
-                decisions: seed_denylist_decisions(protected, consent),
-            }
+            let mut decider = consent
+                .take()
+                .ok_or_else(|| anyhow!("deny-list launch requires a consent decider"))?;
+            let decisions = seed_denylist_decisions(protected, &mut *decider);
+            (
+                EdgePolicy::DenyList {
+                    protected,
+                    decisions,
+                },
+                Some(decider),
+            )
         }
         GateMode::AllowList { allow } => {
             // WO-41: replaces the former
             // "macOS allow-list/default-deny mode is not implemented yet"
             // fail-closed path with a pushed allow-list policy.
-            EdgePolicy::AllowList { allow }
+            (EdgePolicy::AllowList { allow }, None)
         }
     };
 
@@ -192,7 +233,11 @@ pub fn run(
     // WO-127: the receipt log is where an abnormal edge death is recorded.
     let code = supervise(child_pid, &mut edge_child, receipts)?;
     terminate_edge(&mut edge_child)?;
-    Ok(code)
+    let deny_forever_paths = decider.map(|d| d.deny_forever_paths()).unwrap_or_default();
+    Ok(RunOutcome {
+        exit_code: code,
+        deny_forever_paths,
+    })
 }
 
 /// Path inside the gate bundle to the edge executable, relative to a directory that

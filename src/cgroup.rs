@@ -12,9 +12,12 @@
 //! place the supervised child in a dedicated cgroup-v2 scope at launch and
 //! decide membership by that scope, not by ancestry.
 //!
-//! This is best-effort: where cgroup-v2 is not available (v1/hybrid hierarchy,
-//! or a host that does not let us create a scope) we fall back to the ancestry
-//! walk and say so at startup — never worse than the prior behaviour.
+//! Where no scope can be created (v1/hybrid hierarchy, or a host that does not
+//! let us create one) the default mode refuses to start rather than silently
+//! fall back to the ancestry walk — a dead gate must never leave a live
+//! unsupervised tree; `--hardened` keeps its per-process Landlock floor and
+//! still runs. The ancestry walk survives only as the per-open membership
+//! fallback for a single unreadable pid, never as a substitute for a scope.
 //!
 //! Linux only.
 
@@ -44,11 +47,19 @@ pub struct CgroupScope {
 
 impl CgroupScope {
     /// Create a fresh scope for a run supervised by `supervisor_pid`. Returns
-    /// `None` (with a reason logged by the caller) when cgroup-v2 is not usable,
-    /// so the gate can fall back to the ancestry walk.
+    /// `None` when cgroup-v2 is not usable; the caller then refuses to start (a
+    /// dead gate must never leave a live unsupervised tree) rather than fall back
+    /// to the ancestry walk.
     pub fn create(supervisor_pid: i32) -> Option<Self> {
+        // WO-155@v1 (fault-injection): a test-only switch simulates a host with no
+        // writable cgroup-v2 scope (compiled in only under `fault-injection`).
+        // It exercises the scope-less teardown and the default-mode refusal.
+        #[cfg(feature = "fault-injection")]
+        if std::env::var_os("BULWARK_TEST_NO_SCOPE").is_some() {
+            return None;
+        }
         // Detect cgroup-v2: the unified hierarchy exposes `cgroup.procs` at the
-        // root. A pure-v1 host does not, so we decline and fall back.
+        // root. A pure-v1 host does not, so we decline (the caller refuses).
         let root = PathBuf::from(CGROUP_ROOT);
         if !root.join("cgroup.procs").exists() {
             return None;
@@ -84,7 +95,7 @@ impl CgroupScope {
                 }
                 Err(_) => {
                     // No permission to create a scope (not root, or delegation
-                    // denied). Genuine no-cgroup host → fall back.
+                    // denied). Genuine no-cgroup host → the caller refuses.
                     return None;
                 }
             }
@@ -117,6 +128,88 @@ impl CgroupScope {
         &self.rel
     }
 
+    /// WO-155: the `cgroup.kill` trigger path. Writing `1` to it makes the
+    /// kernel SIGKILL every process in this scope, reparent-proof — the way the
+    /// gate's watcher reaps the whole supervised tree if the gate dies. Only
+    /// present on cgroup-v2 with a recent kernel (5.14+); the caller tolerates
+    /// its absence (the direct child is also covered by a parent-death signal).
+    pub fn kill_path(&self) -> PathBuf {
+        self.dir.join("cgroup.kill")
+    }
+
+    /// WO-155@v1: SIGKILL every process in the scope by writing `1` to
+    /// `cgroup.kill`, reparent-proof (a double-fork()'d orphan still carries the
+    /// scope). Best-effort: returns `false` when the trigger file is absent
+    /// (kernel < 5.14), so the caller can fall back to draining. Used on a
+    /// normal-exit with a lingering descendant, so a daemonized orphan never
+    /// outlives the run.
+    pub fn kill_all(&self) -> bool {
+        // WO-155@v1 (fault-injection): a test-only switch makes `cgroup.kill`
+        // fail, forcing the freeze + per-pid SIGKILL fallback (compiled in only
+        // under `fault-injection`).
+        #[cfg(feature = "fault-injection")]
+        if std::env::var_os("BULWARK_TEST_NO_CGROUP_KILL").is_some() {
+            return false;
+        }
+        use std::io::Write;
+        let mut f = match std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.kill_path())
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        f.write_all(b"1").is_ok()
+    }
+
+    /// WO-155@v1: the `cgroup.freeze` trigger path. Writing `1` freezes every
+    /// process in the scope (they stop running, so no more members can fork in);
+    /// the caller then SIGKILLs each pid in `cgroup.procs` to empty the scope by
+    /// hand. This is the fallback where `cgroup.kill` (5.14+) is absent.
+    pub fn freeze_path(&self) -> PathBuf {
+        self.dir.join("cgroup.freeze")
+    }
+
+    /// WO-155@v1: the `cgroup.events` path. Its `populated 1|0` key is how the
+    /// watcher knows the scope is empty after a freeze + per-pid SIGKILL sweep.
+    pub fn events_path(&self) -> PathBuf {
+        self.dir.join("cgroup.events")
+    }
+
+    /// Freeze the scope (best-effort). Returns `false` when `cgroup.freeze` is
+    /// absent (kernel < 5.2), so the caller knows the fallback is unavailable.
+    pub fn freeze(&self) -> bool {
+        use std::io::Write;
+        let mut f = match std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.freeze_path())
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        f.write_all(b"1").is_ok()
+    }
+
+    /// The pids currently in the scope, from `cgroup.procs`. Empty when the scope
+    /// has drained (or is unreadable — the caller treats that as drained).
+    pub fn procs(&self) -> Vec<i32> {
+        let body = match fs::read_to_string(self.dir.join("cgroup.procs")) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        body.lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// WO-155@v1: whether this scope can be reaped at all — either
+    /// `cgroup.kill` (one trigger, 5.14+) or the `cgroup.freeze` + per-pid
+    /// SIGKILL fallback (5.2+). `false` means a dead gate would leave a live
+    /// unsupervised tree, so default mode must refuse to start here.
+    pub fn can_reap(&self) -> bool {
+        self.kill_path().exists() || self.freeze_path().exists()
+    }
+
     /// True if `pid` is a member of this scope. Reads `/proc/<pid>/cgroup`,
     /// whose v2 line is `0::<relpath>`, and compares `<relpath>` to ours.
     ///
@@ -134,12 +227,12 @@ impl CgroupScope {
     /// This is how the supervisor knows an orphaned descendant is still alive
     /// after the foreground child exited: a double-fork()'d process that
     /// outlives its parent keeps the scope populated, so the gate keeps
-    /// enforcing until it too is gone. Unreadable → `false` (treat as drained so
-    /// teardown is never wedged on a missing file).
+    /// enforcing until it too is gone. Unreadable → `true` (fail closed: never
+    /// treat a read failure as "empty"; the gate keeps enforcing).
     pub fn is_populated(&self) -> bool {
         let events = match fs::read_to_string(self.dir.join("cgroup.events")) {
             Ok(s) => s,
-            Err(_) => return false,
+            Err(_) => return true,
         };
         events_populated(&events)
     }
@@ -251,13 +344,15 @@ fn proc_cgroup_is(body: &str, rel: &str) -> bool {
 }
 
 /// True if a `cgroup.events` body reports the scope still has a member process.
+/// A body whose `populated` key is missing is treated as STILL POPULATED (fail
+/// closed): the caller must not conclude "empty" from a malformed read.
 fn events_populated(body: &str) -> bool {
     for line in body.lines() {
         if let Some(v) = line.strip_prefix("populated ") {
             return v.trim() == "1";
         }
     }
-    false
+    true
 }
 
 #[cfg(test)]
@@ -310,7 +405,8 @@ mod tests {
     fn populated_key_parsed() {
         assert!(events_populated("populated 1\nfrozen 0\n"));
         assert!(!events_populated("populated 0\nfrozen 0\n"));
-        assert!(!events_populated("frozen 0\n")); // key absent → treat as drained
-        assert!(!events_populated(""));
+        // Key absent / empty → fail closed to "still populated" (never empty).
+        assert!(events_populated("frozen 0\n"));
+        assert!(events_populated(""));
     }
 }

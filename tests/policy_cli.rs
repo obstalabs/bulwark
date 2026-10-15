@@ -99,6 +99,70 @@ fn check_reports_outside_for_unprotected_path() {
 }
 
 #[test]
+fn check_uses_the_host_home_set_not_home() {
+    // WO-145@v3 (G2): `check` expands `~/` over the host home set, so pointing
+    // $HOME at a nonexistent directory still protects root's `.ssh` (always in
+    // the set). Red before G2: a single-home expansion from $HOME missed it.
+    let target = if cfg!(target_os = "macos") {
+        // host_homes canonicalizes /var/root to /private/var/root on macOS.
+        "/private/var/root/.ssh/id_key".to_string()
+    } else {
+        "/root/.ssh/id_key".to_string()
+    };
+    let out = Command::new(bin())
+        .args(["check", &target, "--profile", "default"])
+        .env("HOME", "/nonexistent-home-for-g2")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "check must succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("protected"),
+        "check must protect {target} regardless of HOME; got: {stdout}"
+    );
+}
+
+#[test]
+fn check_json_decided_token_is_machine_readable() {
+    // WO-145@v5 (G): the JSON `decision` field carries the machine token, not the
+    // human label.
+    let protected = Command::new(bin())
+        .args([
+            "check",
+            "--profile",
+            "default",
+            "--format",
+            "json",
+            "/home/u/dev/proj/.env",
+        ])
+        .output()
+        .unwrap();
+    let p = String::from_utf8_lossy(&protected.stdout);
+    assert!(
+        p.contains(r#""decision":"protected""#),
+        "JSON decision must be the machine token `protected`; got: {p}"
+    );
+
+    let outside = Command::new(bin())
+        .args([
+            "check",
+            "--profile",
+            "default",
+            "--format",
+            "json",
+            "/var/log/syslog",
+        ])
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&outside.stdout);
+    assert!(
+        o.contains(r#""decision":"outside_prompt""#),
+        "JSON decision must be the machine token `outside_prompt`; got: {o}"
+    );
+}
+
+#[test]
 fn audit_renders_and_counts_receipts() {
     let dir = scratch("audit");
     let receipts = dir.join("r.jsonl");
@@ -189,8 +253,18 @@ fn hardened_unsupported_refuses_before_spawn() {
 // with the starter profile (protect AND allow, a deny-list launch) must keep
 // reaching its own path; the operator ruled its allow-list semantics a
 // separate WO. This pins that the new check never fires for launch.
+//
+// WO-141@v1: the positive evidence used to be the strict resolver's error
+// line "cannot stat protected path ~/.ssh", which was the product failing:
+// the profile's entries reached that resolver unexpanded, so the starter
+// profile never launched. The evidence is now what the policy path prints
+// for the same strings once it has expanded and split them. The run still
+// stops at the gate (it needs root), but only after the plan resolved.
+// WO-145@v2: `~/` no longer expands against HOME but under every home on the
+// host, so the evidence is the rule line and the wildcard note, not a path
+// under a HOME of the test's choosing.
 #[test]
-fn launch_with_starter_profile_is_not_refused_by_the_allow_check() {
+fn launch_with_starter_profile_resolves_protect_like_a_policy_run() {
     let dir = scratch("launch-starter");
     let policy = dir.join("Bulwark.toml");
     let init = Command::new(bin())
@@ -210,9 +284,16 @@ fn launch_with_starter_profile_is_not_refused_by_the_allow_check() {
             && body.contains("protect = ["),
         "the starter profile must carry both protect and allow; got: {body}"
     );
+    // HOME is pointed somewhere empty on purpose: the expansion must not
+    // read it (WO-145@v2), so nothing about this run may depend on it.
     let out = Command::new(bin())
         .args(["launch", "probe", "--policy"])
         .arg(&policy)
+        .arg("--state")
+        .arg(dir.join("state.toml"))
+        .arg("--consent-socket")
+        .arg(dir.join("consent.sock"))
+        .env("HOME", dir.join("not-a-home"))
         .current_dir(&dir)
         .output()
         .unwrap();
@@ -221,16 +302,27 @@ fn launch_with_starter_profile_is_not_refused_by_the_allow_check() {
         !stderr.contains("allow-lists apply only with"),
         "launch must not be refused by the run-surface --allow check; got: {stderr}"
     );
-    // WO-133@v3: positive evidence that launch got past plan resolution into
-    // cmd_run. The first thing cmd_run does with a plan's protect list is the
-    // strict ProtectedSet::resolve (its only caller), whose error reads
-    // "cannot stat protected path <p>"; nothing before it in cmd_run prints for
-    // a non-root run (the worker drop is silent below uid 0). The starter
-    // profile's protect list reaches it as written ("~/.ssh", "**/.env"), so
-    // that line is the earliest stable one until the launch-profile WO changes
-    // how launch resolves protect strings, at which point this pin moves.
+    // The literal `~` is what reached the strict resolver before WO-141. A
+    // non-root run may still be refused later by the lenient resolver on a
+    // home it cannot stat (root's, after WO-145), which is a different line.
     assert!(
-        stderr.contains("cannot stat protected path"),
-        "launch must reach cmd_run's strict protect resolution; got: {stderr}"
+        !stderr.contains("cannot stat protected path ~"),
+        "the profile's entries must not reach the strict --protect resolver; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("`~/` entries are protected under every home directory on this host"),
+        "the launch must state the home rule once; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("wildcard protected pattern(s)") && stderr.contains("**/.env"),
+        "the profile's wildcard entries must be split off and named; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not-a-home"),
+        "HOME must play no part in the expansion; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("[agents.probe] allow list (") && stderr.contains("bulwark/WO-136"),
+        "the dropped allow list must be named at launch; got: {stderr}"
     );
 }

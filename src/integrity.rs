@@ -40,11 +40,49 @@ pub const DEFAULT_STATE_PATH: &str = "/var/lib/bulwark/state.toml";
 /// Identity of one protected object at decision time. The pair `(dev, ino)` is
 /// the same identity the gate decides by; `path` is how the object was named so
 /// drift can be reported meaningfully.
+///
+/// WO-130@v1: `(dev, ino)` alone cannot tell a delete-and-recreate apart: ext4
+/// routinely hands the freed inode number straight back, so a swapped file
+/// looked unchanged. `generation` is the kernel's per-inode version
+/// (`FS_IOC_GETVERSION` on Linux, `st_gen` on macOS as root), bumped on reuse,
+/// the same disambiguator the allow-list grant keys carry. `None` means the
+/// filesystem or platform reports none, or the record predates this field:
+/// such a record compares on `(dev, ino)` only, and is rewritten with the
+/// generation on the run that reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjId {
     pub path: String,
     pub dev: u64,
     pub ino: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+}
+
+/// WO-130@v2: the generation of the object at `path`, through the same
+/// `FS_IOC_GETVERSION` read the allow-list snapshot uses. The path is opened
+/// read-only and FOLLOWS a top-level symlink to its target, so it matches
+/// `ProtectedSet::resolve` (which resolves via `fs::metadata`, i.e. follows).
+/// A directory opens too. `None` when the open or the ioctl fails.
+#[cfg(target_os = "linux")]
+pub fn generation_of(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: c is a valid NUL-terminated path. No O_NOFOLLOW: the top-level
+    // symlink is followed so the generation read is of the object actually
+    // protected (its target), exactly as `fs::metadata` resolves it.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let g = crate::allowlist::fs_generation_fd(fd);
+    // SAFETY: fd was opened just above and is not used after close.
+    unsafe { libc::close(fd) };
+    g
 }
 
 // WO-117: where a run's policy came from. The key decides which baseline the
@@ -176,6 +214,10 @@ pub enum TaintReason {
         path: String,
         was: (u64, u64),
         now: (u64, u64),
+        // WO-130@v1: the generations compared, so a same-inode swap is
+        // readable in the receipt (dev/ino alone would print as unchanged).
+        was_gen: Option<u64>,
+        now_gen: Option<u64>,
     },
     // WO-117: the policy at this key has different bytes than last recorded.
     /// The policy loaded for this key changed since the last run that used it.
@@ -193,10 +235,24 @@ impl TaintReason {
     pub fn describe(&self) -> String {
         match self {
             TaintReason::UncleanRestart => "unclean restart (no clean-shutdown marker)".to_string(),
-            TaintReason::ObjectDrift { path, was, now } => format!(
-                "object-identity drift on {path}: dev/ino {}:{} -> {}:{}",
-                was.0, was.1, now.0, now.1
-            ),
+            TaintReason::ObjectDrift {
+                path,
+                was,
+                now,
+                was_gen,
+                now_gen,
+            } => {
+                let show = |g: &Option<u64>| g.map_or("?".to_string(), |g| g.to_string());
+                format!(
+                    "object-identity drift on {path}: dev/ino/gen {}:{}:{} -> {}:{}:{}",
+                    was.0,
+                    was.1,
+                    show(was_gen),
+                    now.0,
+                    now.1,
+                    show(now_gen)
+                )
+            }
             TaintReason::PolicyChanged {
                 key,
                 prior_digest,
@@ -280,13 +336,21 @@ pub fn evaluate(prior: Option<&State>, current: &RunContext) -> Integrity {
     }
 
     // A protected path present in both runs now resolves to a different inode.
+    // WO-130@v1: or to the same inode number with a different generation, which
+    // is a delete-and-recreate the number alone cannot show. A generation is
+    // only compared when both runs have one; a record written before this
+    // field, or a filesystem that reports none, compares on (dev, ino) alone.
     for now in &current.objects {
         if let Some(was) = prior.objects.iter().find(|o| o.path == now.path) {
-            if was.dev != now.dev || was.ino != now.ino {
+            let gen_drift =
+                matches!((was.generation, now.generation), (Some(a), Some(b)) if a != b);
+            if was.dev != now.dev || was.ino != now.ino || gen_drift {
                 return Integrity::Tainted(TaintReason::ObjectDrift {
                     path: now.path.clone(),
                     was: (was.dev, was.ino),
                     now: (now.dev, now.ino),
+                    was_gen: was.generation,
+                    now_gen: now.generation,
                 });
             }
         }
@@ -420,6 +484,15 @@ mod tests {
             path: path.to_string(),
             dev,
             ino,
+            generation: None,
+        }
+    }
+
+    // WO-130@v1: an object with a known generation.
+    fn obj_gen(path: &str, dev: u64, ino: u64, generation: u64) -> ObjId {
+        ObjId {
+            generation: Some(generation),
+            ..obj(path, dev, ino)
         }
     }
 
@@ -527,8 +600,71 @@ mod tests {
                 path: "/s".to_string(),
                 was: (1, 10),
                 now: (1, 99),
+                was_gen: None,
+                now_gen: None,
             })
         );
+    }
+
+    // WO-130@v1: the inode number came back after a delete-and-recreate; only
+    // the generation shows the swap.
+    #[test]
+    fn same_inode_with_new_generation_is_object_drift() {
+        let prior = clean_prior(1, vec![obj_gen("/s", 1, 10, 7)]);
+        let c = ctx(1, vec![obj_gen("/s", 1, 10, 8)]);
+        let verdict = evaluate(Some(&prior), &c);
+        assert_eq!(
+            verdict,
+            Integrity::Tainted(TaintReason::ObjectDrift {
+                path: "/s".to_string(),
+                was: (1, 10),
+                now: (1, 10),
+                was_gen: Some(7),
+                now_gen: Some(8),
+            })
+        );
+        if let Integrity::Tainted(reason) = verdict {
+            assert_eq!(
+                reason.describe(),
+                "object-identity drift on /s: dev/ino/gen 1:10:7 -> 1:10:8"
+            );
+        }
+    }
+
+    // WO-130@v1: an unchanged object with the same generation stays clean, and
+    // a generation known on only one side (a pre-generation state file, or a
+    // filesystem without one) is not drift by itself.
+    #[test]
+    fn generation_is_compared_only_when_both_sides_have_one() {
+        let same = clean_prior(1, vec![obj_gen("/s", 1, 10, 7)]);
+        assert_eq!(
+            evaluate(Some(&same), &ctx(1, vec![obj_gen("/s", 1, 10, 7)])),
+            Integrity::Clean
+        );
+        let legacy = clean_prior(1, vec![obj("/s", 1, 10)]);
+        assert_eq!(
+            evaluate(Some(&legacy), &ctx(1, vec![obj_gen("/s", 1, 10, 7)])),
+            Integrity::Clean
+        );
+        let now_unknown = clean_prior(1, vec![obj_gen("/s", 1, 10, 7)]);
+        assert_eq!(
+            evaluate(Some(&now_unknown), &ctx(1, vec![obj("/s", 1, 10)])),
+            Integrity::Clean
+        );
+    }
+
+    // WO-130@v1: a state file written before the generation field loads, and
+    // a record with one round-trips.
+    #[test]
+    fn objid_generation_is_optional_in_the_state_file() {
+        let legacy: ObjId = toml::from_str("path = \"/s\"\ndev = 1\nino = 10\n").unwrap();
+        assert_eq!(legacy, obj("/s", 1, 10));
+        let with_gen = obj_gen("/s", 1, 10, 7);
+        let text = toml::to_string(&with_gen).unwrap();
+        assert!(text.contains("generation = 7"), "{text}");
+        assert_eq!(toml::from_str::<ObjId>(&text).unwrap(), with_gen);
+        let text = toml::to_string(&obj("/s", 1, 10)).unwrap();
+        assert!(!text.contains("generation"), "{text}");
     }
 
     #[test]
@@ -946,6 +1082,51 @@ mod tests {
         let record = file_record(&source, b"x\n");
         assert_eq!(record.key, source.key().unwrap());
         assert_ne!(record.ino, 0, "inode of an existing file is recorded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-130@v2: generation_of must report the generation of the object ACTUALLY
+    // protected. ProtectedSet resolves with fs::metadata, which follows a
+    // top-level symlink to its target; generation_of must do the same, or a
+    // symlinked protect entry records None and drift collapses to (dev, ino) —
+    // the inode-reuse swap this WO exists to catch. On a filesystem that reports
+    // generation (ext4) the link must equal the target's generation, not None.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn generation_of_follows_a_top_level_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-gen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        let link = dir.join("link");
+        std::fs::write(&target, "x\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let target_gen = generation_of(&target);
+        let link_gen = generation_of(&link);
+        // tmpfs never reports a generation (no FS_IOC_GETVERSION), so skip the
+        // meaningful assertion there; on ext4 the target has one and the link
+        // must resolve to the SAME one, not None.
+        if let Some(tg) = target_gen {
+            assert_eq!(
+                link_gen,
+                Some(tg),
+                "a protected symlink must record its target's generation, not None"
+            );
+        } else {
+            eprintln!(
+                "generation_of_follows_a_top_level_symlink: filesystem under {} reports no \
+                 generation; the follow behavior is not exercised here",
+                std::env::temp_dir().display()
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

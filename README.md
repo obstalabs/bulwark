@@ -133,6 +133,13 @@ bulwark run --protect <path> -- <cmd>
   With `--consent socket`, a protected open is held and an operator answers
   off-band (allow-once / allow-session / deny / deny-forever). Without it,
   protected opens are denied.
+  <!-- WO-145@v2: no single home is ever guessed for a policy entry. -->
+  A policy entry (the default profile, a `Bulwark.toml` `[protected]` section,
+  a launch profile's `protect`) is either an absolute path, protected exactly
+  as written, or starts with `~/`, which means that path under **every** home
+  directory on the host (`~/.ssh` protects every user's `.ssh` and root's).
+  Any other relative entry is refused. `--protect` on the command line is
+  expanded by your shell before Bulwark sees it.
 - **Allow-list (`--deny-all`):** default-deny for CI/CD — the agent may read
   only `--allow` paths plus the runtime base set, every other read denied, no
   prompt. See `docs/ci-allowlist.md`.
@@ -208,12 +215,12 @@ as plainly as the ones it does — see **Known limitations** below and
 - **Reads, not consequences.** Bulwark gates file opens; it does not stop use of
   data already read, environment-variable credentials, or network exfiltration.
   Pair it with an egress control.
-- **fanotify modes fail open on hard supervisor death.** A `SIGKILL`/crash while
-  a read is held releases that read as allowed (documented kernel behaviour); a
-  graceful `SIGTERM` fails closed. The `--hardened` (Landlock) mode is crash-safe
-  and does not have this limitation. The integrity circuit-breaker (below) bounds
-  the blast radius *after* such an event but does not change the held read at the
-  moment of the kill.
+- **The supervised tree is reaped on supervisor death.** If `bulwark run` is
+  `SIGKILL`ed or crashes, a watcher process kills the run's cgroup (`cgroup.kill`,
+  or a `cgroup.freeze` + per-process `SIGKILL` sweep where `cgroup.kill` is
+  absent) so the agent cannot outlive the gate; in the native mode Bulwark
+  refuses to start on a host that cannot do this. The `--hardened` (Landlock) mode
+  is crash-safe with no supervisor at all.
 - Allow-list/hardened modes allow a runtime base set (`bulwark base-set`) so the
   agent can execute — a deliberate, inspectable trade-off.
 - **Daemon-delegated reads are outside the tree.** Bulwark governs the process tree it

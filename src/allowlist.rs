@@ -68,10 +68,26 @@ pub const RUNTIME_BASE_SET: &[&str] = &[
     "/dev/zero",
     "/dev/urandom",
     // Process self-introspection (the supervised process and Bulwark's own
-    // ancestry walk read these).
+    // ancestry walk read these). WO-142@v1: `--hardened` floors none of them:
+    // `/proc/self` is a symlink (no rule is added for it) and the two wildcard
+    // entries would widen to all of `/proc`, so the Landlock apply site skips
+    // them; see `hardened_floor_base_globs_are_faithful_or_explicitly_skipped`.
+    // They stay in the set for the fanotify allow-list mode, where the gate
+    // sees the resolved `/proc/<pid>/status` path (which `/proc/self/**`
+    // never matches) and these two are what let the agent read its own; the
+    // exposure there is process metadata, not cmdline or environ.
     "/proc/self/**",
     "/proc/*/stat",
     "/proc/*/status",
+    // WO-142@v1: system-wide procfs files that tools size themselves from
+    // (libuv reads cpuinfo and stat for os.cpus(), meminfo for memory). Exact
+    // regular files, nothing per-process and nothing under /proc/net, so the
+    // hardened floor can grant them faithfully as file rules.
+    "/proc/cpuinfo",
+    "/proc/stat",
+    "/proc/meminfo",
+    "/proc/loadavg",
+    "/proc/uptime",
     // Name resolution basics (so an agent can do DNS / user lookups to work).
     "/etc/nsswitch.conf",
     "/etc/resolv.conf",
@@ -562,6 +578,76 @@ mod tests {
         let a = AllowList::new(vec!["/g1".into(), "/g2".into()]);
         assert_eq!(a.base_globs(), RUNTIME_BASE_SET);
         assert_eq!(a.grant_globs(), &["/g1".to_string(), "/g2".to_string()]);
+    }
+
+    // WO-142@v1: every base-set glob that reaches the Landlock floor must map
+    // to its concrete prefix without widening, or be on this explicit list of
+    // entries the apply site skips. The list is checked both ways so it cannot
+    // go stale: a listed glob must really be unfaithful (otherwise the floor
+    // would silently lose a path the list claims is skipped) and must be in
+    // the set. Platform-neutral: macOS has no wildcard entries, so its list is
+    // empty and every entry must be faithful.
+    #[test]
+    fn hardened_floor_base_globs_are_faithful_or_explicitly_skipped() {
+        #[cfg(target_os = "linux")]
+        const SKIPPED: &[&str] = &["/proc/*/stat", "/proc/*/status"];
+        #[cfg(not(target_os = "linux"))]
+        const SKIPPED: &[&str] = &[];
+
+        for g in SKIPPED {
+            assert!(
+                RUNTIME_BASE_SET.contains(g),
+                "{g} is on the hardened skip list but not in the base set"
+            );
+        }
+        for g in RUNTIME_BASE_SET {
+            let faithful = glob::is_landlock_faithful(g);
+            let prefix = glob::landlock_prefix(g);
+            if SKIPPED.contains(g) {
+                assert!(
+                    !faithful,
+                    "{g} is listed as skipped but is faithful; take it off the list"
+                );
+            } else {
+                assert!(
+                    faithful,
+                    "base glob {g} would widen the hardened floor to {prefix}; \
+                     it must be concrete, a trailing '/**' subtree, or listed as skipped"
+                );
+            }
+        }
+    }
+
+    // WO-142@v1: what the base set says about /proc. The five system-wide
+    // files are present as exact paths (so the hardened floor grants them as
+    // file rules), and every /proc entry is one of those, the agent's own
+    // `/proc/self/**`, or a wildcard entry the hardened floor skips. Nothing
+    // per-process by number and nothing under /proc/net may creep in.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn base_set_proc_entries_are_system_wide_files_or_hardened_skipped() {
+        const SYSTEM_WIDE: &[&str] = &[
+            "/proc/cpuinfo",
+            "/proc/stat",
+            "/proc/meminfo",
+            "/proc/loadavg",
+            "/proc/uptime",
+        ];
+        const SKIPPED: &[&str] = &["/proc/*/stat", "/proc/*/status"];
+        for f in SYSTEM_WIDE {
+            assert!(
+                RUNTIME_BASE_SET.contains(f),
+                "{f} missing from the base set"
+            );
+            assert!(glob::is_landlock_faithful(f), "{f} must be an exact path");
+        }
+        for g in RUNTIME_BASE_SET.iter().filter(|g| g.starts_with("/proc")) {
+            assert!(
+                SYSTEM_WIDE.contains(g) || *g == "/proc/self/**" || SKIPPED.contains(g),
+                "unexpected /proc entry in the base set: {g}"
+            );
+            assert!(!g.starts_with("/proc/net"), "{g}: nothing under /proc/net");
+        }
     }
 }
 

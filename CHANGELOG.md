@@ -6,6 +6,154 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+<!-- WO-155@v1 / WO-156@v2: consolidated — tree reaped on any supervisor death with positive-proof empty-scope, freeze fallback and reapable-host refusal; receipts integrity and accounting; deadline-bounded consent; debug-only fault-injection. -->
+- A dead supervisor never leaves a live unsupervised agent. The direct child
+  carries a parent-death signal (set after its privilege drop), and an
+  independent watcher reaps the run's cgroup, holding every unanswered
+  permission event until it has positive proof the scope is empty. Release
+  comes only after that proof, so a supervisor panic or other early exit reaps
+  too; a successful `cgroup.kill` is confirmed by polling `cgroup.events` until
+  empty, a kill that cannot be written falls back to freezing the scope and
+  signalling each remaining process, and an unreadable status backs off and
+  retries unless the scope has been removed, which the kernel allows only once
+  it is empty. On kernels without
+  `cgroup.kill` the watcher uses the freeze-and-sweep path, and default mode
+  refuses to start on a host whose scope cannot be read or reaped, naming
+  `--hardened` (its kernel-enforced floor keeps working there). A graceful stop
+  forwards SIGTERM and escalates to a reaping kill only after a grace, and the
+  fanotify group closes only after every deferred consent is answered and the
+  tree is confirmed dead. Receipts are written to a file opened by a
+  component-wise, no-follow walk from a pinned working directory, which refuses
+  a symlinked ancestor (except a root-owned system link), a non-regular path
+  such as a FIFO, and a final component that is not a regular, singly-linked
+  file owned by the effective uid; the accounting summary is the writer's final
+  message, and a lost or failed summary is warned and counted, never blocking
+  the exit. Each consent request shares one absolute, poll-bounded deadline
+  with a capped verdict line, so a trickling or late peer cannot hold an open.
+  The fault-injection feature is compiled out of release builds.
+<!-- WO-142@v1: the hardened Landlock floor took the base set unchecked; two wildcard entries floored all of /proc. -->
+- `--hardened` no longer floors all of `/proc`. The runtime base set's
+  `/proc/*/stat` and `/proc/*/status` reached the Landlock floor as a rule on
+  `/proc` itself, so the agent could read `status`, `stat` and `cmdline` (and
+  any credential on a command line) of every process on the host; `environ`
+  and `maps` were already denied by Landlock's ptrace rule. Every glob is now
+  checked where its rule is added and one that would widen is skipped with a
+  stderr note, base set included. The floor grants the system-wide procfs
+  files tools size themselves from (`/proc/cpuinfo`, `/proc/stat`,
+  `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`) as exact files and nothing
+  per-process: `ps`, reads of `/proc/self/*` and Node's `process.memoryUsage()`
+  fail with EACCES under `--hardened`; Node's `os.cpus()` works; bash, git,
+  python3 and node themselves start and run subprocesses as before.
+<!-- WO-144@v1: the hardened branch refused --worker-uid and exec'd at the launching uid. -->
+- `--hardened` no longer runs the agent as root. Under `sudo` the agent kept
+  uid 0 behind the Landlock floor, and the mode refused `--worker-uid`. The
+  floor is now applied first and the process then drops to `SUDO_UID` (or the
+  `--worker-uid`/`--worker-gid` given) before the exec, asserting that root
+  cannot be regained. Launched as real root with no sudo origin and no
+  `--worker-uid`, hardened mode refuses before anything runs unless
+  `--allow-root` is passed.
+<!-- WO-145@v2: protect entries expanded `~` from $HOME; under plain sudo on Linux that is /root. -->
+- `~` in a protect entry no longer means one guessed home. In 0.9.0, 0.9.1 and
+  0.9.2 the default profile, a `[protected]` section and (once launch worked)
+  a launch profile expanded `~` from `$HOME`, which under plain `sudo` on
+  Linux is root's home: the gate protected `/root/.ssh` while the agent,
+  dropped to the invoking user, read that user's real `~/.ssh` and `~/.aws`
+  unprotected. A `~/` entry now means that path under every home directory on
+  the host (root's, every directory under `/home` or `/Users`, and every
+  `/etc/passwd` home for uid 0 or uid 1000 and up that exists); an absolute
+  entry is protected exactly as written; any other relative entry is refused
+  before the run starts. The run states the rule once. `--protect` on the
+  command line is unaffected, the shell expands it.
+<!-- WO-145@v3: a known non-root agent uid with no enumerated home must refuse; check shares the home set; broken-home refusal names it. -->
+- The every-home `~` rule refuses to launch when the agent would run as a
+  known non-root uid that owns none of the enumerated homes. An account served
+  by LDAP/AD/SSSD, or with a home outside `/home`/`/Users`, would otherwise
+  still read its own keys unprotected; the run now fails first, naming the uid
+  and pointing at absolute `--protect` paths. The check applies to every
+  explicit non-root `--worker-uid`: there is no anonymous-worker exemption.
+  `bulwark check` previews against the same home set as `run`, and a
+  non-ENOENT stat failure on an expanded protect path names the home it came from.
+<!-- WO-147@v1: the consent socket dir lived in /tmp and was reused + chmod'd by path. -->
+- The consent socket directory is no longer a squattable, path-swappable target.
+  As root the socket lives under a root-only runtime dir (`/run/bulwark`, or
+  `/var/run/bulwark` on macOS) created 0711 regardless of `$XDG_RUNTIME_DIR`; the
+  socket directory is created fresh with `mkdir` (or reused only if it is a real
+  directory owned by the effective uid and not group/other-writable), opened
+  `O_DIRECTORY|O_NOFOLLOW`, revalidated with `fstat` after the open (a fresh
+  create must still name the very object it mkdir'd), and every chmod/chown goes
+  through that fd — so a foreign node, symlink, regular file or a swapped-in
+  directory squatting the name is refused, never deleted and never chmod'd, and
+  root cannot be made to chmod an attacker-chosen directory. Only the socket
+  node is chowned (0600) to the invoking user under sudo; the answer client
+  derives the same default node.
+<!-- WO-147@v3: the fixed socket path was not exclusive and a non-root client could not reach the root default. -->
+- A consent socket path is now owned by exactly one run at a time. A second
+  `bulwark run` on a path already in use is refused with a `--consent-socket
+  <other path>` remedy rather than silently taking over the live node and its
+  verdicts, and only that run may clear a stale node. Before the socket
+  directory is created, its parent must be a directory owned by root or the
+  effective uid with no group/other write, or sticky (like `/tmp`), so a
+  directory the operator does not control cannot redirect the socket. `bulwark
+  consent` run as the invoking non-root user now answers a root gate's default
+  socket at `/run/bulwark/consent.sock` with no `--socket`, and the runtime dir
+  is forced to 0711 even under a restrictive `umask` so that traversal works.
+<!-- WO-154@v2: the permission loop wrote every decision to stderr synchronously. -->
+- The permission loop no longer performs blocking output. Every gate decision is
+  enqueued and drained by a separate writer thread, so a stalled log reader
+  drops lines (counted and reported at shutdown) instead of stalling the loop;
+  a protected-open consent decision is made on its own thread (a bounded queue,
+  past which a protected open is denied outright), so a pending prompt cannot
+  delay unrelated opens on the same filesystem. The log writer never changes the
+  inherited stderr's mode (it is shared with the operator and the agent).
+<!-- WO-147@v4: teardown could unlink a successor run's node; a relative socket path failed; the parent check covered only one ancestor. -->
+- Consent socket handoff and path validation are tightened. Teardown unlinks the
+  node while still holding the run lock (never the lock file), a relative
+  `--consent-socket` resolves against the working directory, every ancestor of
+  the socket directory (not just its immediate parent) must be a safe directory,
+  and the answer client has a bounded read timeout with a clear error.
+<!-- WO-130@v1: the integrity record keyed protected objects on (dev, ino) only. -->
+- The integrity circuit breaker now records each protected object's inode
+  generation next to its device and inode number, and reports object drift
+  when the generation moves. Deleting a protected file and creating a new one
+  at the same path routinely gets the same inode number back on ext4, so that
+  swap went unreported. A protected path that is a top-level symlink records
+  its target's generation, matching the reflected organization it actually
+  guards. State files written before this field load unchanged and are rewritten
+  with the generation on the next run.
+
+### Fixed
+<!-- WO-147@v1: socket::bind swapped the process umask to 0177 around the bind. -->
+- `bulwark run` no longer changes the process-wide umask to create the consent
+  socket. The socket is now bound inside a sibling directory created mode 0700
+  and owned by the invoking user, so the socket's own mode no longer matters.
+  The old `umask(0177)` swap raced any concurrent `mkdir` in the supervisor: a
+  directory made in that window came out mode 0600 (no traverse bits), which
+  flaked the multi-threaded policy snapshot tests with EACCES.
+<!-- WO-147@v1: post-bind failure paths leaked the dir fd or left a half-set node; sun_path was a fixed constant. -->
+- Consent-socket failure handling is tightened: the directory descriptor is no
+  longer leaked when a bind fails, a `set_nonblocking` failure now unlinks the
+  just-bound node through the directory fd, the node's chmod/chown are checked
+  and verified (a 0600 socket owned by the invoking user), every error path after
+  bind removes the just-bound node, teardown unlinks the node and removes the
+  directory through a directory fd (never by path as root), and the sun_path
+  limit is read from the platform (`sockaddr_un`) and refused up front when a
+  `--consent-socket` node would exceed it.
+<!-- WO-145@v4: a ~ allow entry must not widen a grant. -->
+- A `~/` workspace allow entry is no longer expanded across every home — that
+  would widen a grant; it grants nothing and asks for an absolute path instead.
+  `bulwark check` now previews protected paths through the same expansion as
+  `run`, so the two can no longer diverge.
+<!-- WO-141@v1: launch handed the profile's protect strings to the strict --protect resolver. -->
+- `bulwark launch <agent>` with the starter profile never started in 0.9.0,
+  0.9.1 and 0.9.2: the profile's protect entries (`~/.ssh`, `**/.env`, ...)
+  were stat'ed literally, so every launch failed with "cannot stat protected
+  path ~/.ssh". A launch profile's protect list now goes through the same
+  home expansion, concrete/wildcard split and lenient resolution as a policy
+  file's `[protected]` section, with the same notes. A profile that sets both
+  protect and allow still ignores its allow list (bulwark/WO-136 decides what
+  it means) and now says so at launch.
+
 ## [0.9.2] - 2026-10-07
 
 ### Security

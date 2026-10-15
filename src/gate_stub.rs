@@ -13,6 +13,7 @@
 //! protected" trap one layer down — so it runs nothing at all.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 
@@ -23,13 +24,8 @@ use crate::protect::ProtectedSet;
 /// Mirror of `gate::GateMode`. Same shape so `main` builds the same value on
 /// every platform; only the implementation behind `run` differs.
 pub enum GateMode<'a> {
-    DenyList {
-        protected: &'a ProtectedSet,
-        consent: &'a mut dyn ConsentDecider,
-    },
-    AllowList {
-        allow: &'a AllowList,
-    },
+    DenyList { protected: &'a ProtectedSet },
+    AllowList { allow: &'a AllowList },
 }
 
 /// Mirror of `gate::ConsentDecider`. The portable `consent::CachingProvider`
@@ -37,9 +33,29 @@ pub enum GateMode<'a> {
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
+    /// Mirror of the enforcing gates' trait (default: `decide`).
+    fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
+        self.decide(req)
+    }
+
     /// Mirror of the enforcing gates' trait so the shared `CachingProvider` impl
     /// type-checks on unsupported platforms. No-op (no enforcement here).
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
+
+    /// Mirror of the enforcing gates' log-sink hook. No-op (no enforcement here).
+    fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
+
+    /// Mirror of the Linux gate's deny-forever readback. Default empty.
+    fn deny_forever_paths(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Result of a supervised run: the child's exit code plus the deny-forever
+/// paths the operator chose this session (for the caller to persist).
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub deny_forever_paths: Vec<String>,
 }
 
 /// Whether a graceful-termination signal has been received. On platforms
@@ -62,11 +78,13 @@ pub struct WorkerCreds {
 /// than run the command unprotected.
 pub fn run(
     _mode: GateMode,
+    _consent: Option<Box<dyn ConsentDecider + Send>>,
+    _consent_timeout: Duration,
     _mark_paths: &[PathBuf],
     _receipts: Option<&Path>,
     _command: &[String],
     _worker: Option<WorkerCreds>,
-) -> Result<i32> {
+) -> Result<RunOutcome> {
     bail!(
         "the kernel read-gate is not implemented on this platform yet — \
          bulwark refuses to run an agent ungated (see bulwark/WO-26, macOS Endpoint Security gate). \

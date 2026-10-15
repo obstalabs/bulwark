@@ -179,9 +179,18 @@ fn deploy_dist_fetches_and_runs() {
         combined.contains("fetching bulwark") || combined.contains("from dist"),
         "dist deploy should announce a fetch; got:\n{combined}"
     );
+    // WO-145@v7: the launcher must exit successfully (the gate ran to completion),
+    // and the denial must be the gate's actual deny line attributing the open to
+    // the command — not a bare "deny" substring (which the word "deny" in
+    // "--auto deny" or usage text would satisfy vacuously).
     assert!(
-        combined.contains("Permission denied") || combined.contains("deny"),
-        "the fetched gate should enforce the protect (deny); got:\n{combined}"
+        out.status.success(),
+        "the dist gate must run to completion; status {}; got:\n{combined}",
+        out.status
+    );
+    assert!(
+        combined.contains("[bulwark] deny ") || combined.contains("Operation not permitted"),
+        "the fetched gate must enforce the protect (deny line); got:\n{combined}"
     );
 }
 
@@ -424,20 +433,21 @@ fn deploy_never_without_binary_errors_clearly() {
     let secret = dir.join("secret.env");
     fs::write(&secret, "x\n").unwrap();
 
-    // Use env -i over ssh by targeting a command that clears PATH is not possible
-    // through our CLI; instead assert the error path shape by checking that a
-    // `never` run against a host WITHOUT bulwark on a stripped PATH fails. Here we
-    // rely on the message text from ensure_remote_bulwark when command -v fails.
-    // If the host DOES have bulwark, this test is a no-op pass (documented).
+    // WO-147@v2: the "no bulwark" error is the ONLY thing this test
+    // asserts, so it must not report ok when the remote HAS bulwark and the error
+    // path is never exercised (a vacuous pass on a product failure is a bug, not a
+    // pass). Fail the precondition loudly instead of an eprintln + early return.
     let has = Command::new("ssh")
         .args(["-o", "BatchMode=yes", TARGET, "command -v bulwark"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    if has {
-        eprintln!("(skip) remote has bulwark on PATH; never-error path not exercised here");
-        return;
-    }
+    assert!(
+        !has,
+        "precondition: {TARGET} must NOT have bulwark on PATH to exercise the \
+         never-error path; it does, so this test cannot run (uninstall it or point \
+         at a host without bulwark)"
+    );
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)

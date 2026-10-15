@@ -27,17 +27,24 @@ On every connection the supervisor reads the peer PID via `SO_PEERCRED` and
 **refuses any answerer that is the supervised root or its descendant**. An agent
 cannot approve its own access even if it knows the socket path. No password: on a
 single Unix user a secret the operator client can read, the agent can read too —
-peer-credential rejection is the correct, forgery-proof guard. The socket is
-created `0600` and chowned to the invoking user (`SUDO_UID`) so the operator —
-not just root — can answer.
+peer-credential rejection is the correct, forgery-proof guard. The socket node
+is `0600` and chowned to the invoking user (`SUDO_UID`), inside a root-owned
+`0711` directory. **Root always uses `/run/bulwark/consent.sock` on Linux
+(`/var/run/bulwark` on macOS), regardless of `$XDG_RUNTIME_DIR`**; a non-root run
+uses `$XDG_RUNTIME_DIR/bulwark-consent.sock`, else `/tmp/bulwark-consent.sock`.
+So the operator (not just root) can answer while no other user can reach or
+replace the node. Every chmod/chown goes through an
+`O_DIRECTORY|O_NOFOLLOW` fd (`fchmod`, `fchownat … AT_SYMLINK_NOFOLLOW`), and the
+opened directory is revalidated by `fstat` before any chmod, so a
+plant-and-swap at the directory name can never make root act on a foreign path.
 
-## Verification gates (green on the VM)
+## Verification gates
 
 - `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` — clean
-- `cargo test` — 36 unit + 5 CLI tests (socket round-trip stress-tested 10×
-  parallel, deterministic)
-- `cargo test --test gate_integration -- --ignored` (sudo) — 6/6
-- `cargo test --test consent_socket -- --ignored` (sudo) — 3/3
+- `cargo test --bin bulwark` — unit suite incl. the umask stress test and the
+  sun_path-length refusal (deterministic)
+- `cargo test --test consent_socket -- --ignored` (sudo) — the refusal,
+  node-mode and root-default socket tests
 
 ## Live evidence
 

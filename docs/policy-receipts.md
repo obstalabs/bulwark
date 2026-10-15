@@ -2,7 +2,7 @@
 
 **Target:** Debian 13 arm64, kernel 6.12.74. **Date:** 2026-06-03.
 
-## Verification gates (green on the VM)
+## Verification gates
 
 - `cargo fmt --check` — clean
 - `cargo clippy --all-targets -- -D warnings` — clean
@@ -45,6 +45,42 @@ TS(ms)          PID      DECISION  PATH                  ANCESTRY
 
 1 allow, 1 deny, 0 unparsed
 ```
+
+## What `~` means in a protect entry
+
+<!-- WO-145@v2: until 0.9.2, `~` came from $HOME, which under plain sudo on Linux is /root. -->
+A protect entry in the default profile, a `[protected]` section or a launch
+profile's `protect` list is one of two things. An **absolute** path is
+protected exactly as written. An entry starting with **`~/`** means that path
+under **every** home directory on the host: root's home, every directory under
+`/home` (`/Users` on macOS, minus `Shared`), and the home of every `/etc/passwd`
+account with uid 0 or uid 1000 and up that exists, canonicalized and
+deduplicated. `~/.ssh` therefore protects every user's `.ssh` and root's, never
+one guessed home. Anything else (a bare relative path such as `secrets/`) is
+refused before the run starts. The run prints the rule once when a `~/` entry
+is in play. The expansion refuses, rather than truncates, past
+`MAX_PROTECT_HOMES` (4096) homes. `--protect` on the command line is not a
+policy entry: your shell expands its `~` before Bulwark sees it.
+
+<!-- WO-145@v3 (G1/G3): `~/` can still miss a non-enumerated home, or hit a broken one. -->
+Two consequences follow when `~/` entries are in play. **G1** — when the run
+will execute the agent as a known non-root uid (the `SUDO_UID` default drop,
+an explicit `--worker-uid`, or an unprivileged launcher's own uid), Bulwark
+requires at least one enumerated home to be *owned* by that uid (a uid owning
+ANY listed home counts; its real home may be elsewhere, which without an
+NSS/LDAP lookup Bulwark cannot know). If none is, the run refuses before
+anything starts, naming the uid and pointing at absolute `--protect` paths —
+this is what catches an account served by LDAP/AD/SSSD, or a home outside
+`/home`/`/Users`, whose own `~/.ssh` the expansion would otherwise miss. The
+check applies uniformly to every explicit non-root `--worker-uid`: there is no
+anonymous-worker exemption. **G3** — a non-ENOENT stat failure on an expanded
+protect path still refuses the run (fail closed, WO-131), and the refusal names
+the home the path was expanded from and, when that home is owned by a
+*different* uid, says so. **Allow** — a `~/` workspace allow entry is not
+expanded across homes (that would widen a grant); it grants nothing and asks
+for an absolute path. Bulwark stats only the expanded protect paths: it never
+reads a directory listing *inside* a home, so it does not deliberately trigger
+an automount.
 
 ## MVP semantics (operator-narrowed)
 
