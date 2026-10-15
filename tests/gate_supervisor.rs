@@ -2164,9 +2164,14 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
 
     // The file writer blocks forever (injected), and the stderr read end is held
     // but never drained, so the stderr writer blocks once its pipe fills.
+    // WO-160@v1: the agent's last action is the marker, so the exit bound below
+    // is measured from the end of its work, not from spawn (its 2000 opens take
+    // a runner-dependent time).
+    let marker = fs.path("agent-done");
     let inner = format!(
-        "for i in $(seq 1 2000); do cat {} >/dev/null; done",
-        allowed.display()
+        "for i in $(seq 1 2000); do cat {} >/dev/null; done; : > {}",
+        allowed.display(),
+        marker.display()
     );
     let mut gate = Command::new(bin())
         .env("BULWARK_TEST_LOG_WRITER_BLOCK", "1")
@@ -2183,15 +2188,26 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
         .spawn()
         .expect("spawn gate");
 
-    // The gate must exit within WRITER_DRAIN_WAIT (2 s) + the agent's work + 1 s.
-    let deadline = Instant::now() + Duration::from_secs(4);
+    // Wait (generously) for the agent to finish its work.
+    let work_deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < work_deadline,
+            "the agent did not finish its opens within 30 s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // From the end of the agent's work, the gate must exit within
+    // WRITER_DRAIN_WAIT (2 s) + 1 s.
+    let deadline = Instant::now() + Duration::from_secs(3);
     let status = loop {
         if let Some(st) = gate.try_wait().expect("try wait gate") {
             break st;
         }
         assert!(
             Instant::now() < deadline,
-            "the gate must not be held hostage by a blocked sink (still running at 4 s)"
+            "the gate must not be held hostage by a blocked sink (still running 3 s after the agent finished)"
         );
         std::thread::sleep(Duration::from_millis(50));
     };
