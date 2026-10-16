@@ -1,4 +1,4 @@
-//! WO-114: can a default-dropped `--auto` agent answer its own consent?
+//! WO-114@v2: can a default-dropped `--auto` agent answer its own consent?
 //! Same real-CLI + fake-ssh fixture style as `remote_consent_uid.rs`, but the
 //! control channels really run: the local operator loop reads a prompt from a
 //! real FIFO and writes its `--auto` reply to a real FIFO. The fake remote gate
@@ -17,13 +17,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
-// WO-114: keep each CLI's transport, lanes and side effects isolated.
+// WO-114@v2: keep each CLI's transport, lanes and side effects isolated.
 struct RemoteFixture {
     root: PathBuf,
 }
 
 impl RemoteFixture {
-    // WO-114: only the fixture SSH executable may receive the CLI's remote calls.
+    // WO-114@v2: only the fixture SSH executable may receive the CLI's remote calls.
     fn new() -> Self {
         let root = PathBuf::from(format!(
             "/tmp/bulwark-wo114-{}-{}",
@@ -34,7 +34,7 @@ impl RemoteFixture {
         fs::create_dir(root.join("bin")).unwrap();
         fs::create_dir(root.join("home")).unwrap();
         let fixture = Self { root };
-        // WO-114: unlike the WO-110 fixture, the prompt reader and verdict writer
+        // WO-114@v2: unlike the WO-110 fixture, the prompt reader and verdict writer
         // sessions execute for real so the operator's --auto reply travels the lane.
         fixture.script(
             "ssh",
@@ -73,7 +73,7 @@ shift 2
 printf '%s\n' "$@" > "$FIXTURE_ROOT/lanes"
 "#,
         );
-        // WO-114: the fake remote gate reproduces the real gate's lane handling:
+        // WO-114@v2: the fake remote gate reproduces the real gate's lane handling:
         // verdict lane opened O_RDWR with an intake loop that applies any allow
         // line it reads (src/remote.rs intake_verdicts), a prompt emitted for the
         // first denied touch, then the agent launched under the same uid.
@@ -130,7 +130,7 @@ exec 3>&- 4>&-
 exit "$status"
 "#,
         );
-        // WO-114: the agent runs as whatever uid the gate dropped it to. It learns
+        // WO-114@v2: the agent runs as whatever uid the gate dropped it to. It learns
         // the lane path the way a real agent would (the gate's argv and stderr
         // name it); only permissions decide whether it can write a verdict.
         fixture.script(
@@ -169,7 +169,7 @@ printf '%s\n' fixture-agent-executed
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    // WO-114: invoke the actual built CLI; fixtures replace transport, not policy.
+    // WO-114@v2: invoke the actual built CLI; fixtures replace transport, not policy.
     fn run(&self, args: &[&str]) -> Output {
         let mut paths = vec![self.root.join("bin")];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -191,7 +191,7 @@ printf '%s\n' fixture-agent-executed
         fs::read_to_string(self.root.join(name)).unwrap_or_default()
     }
 
-    // WO-114: one line of evidence per fact the WO asks to record.
+    // WO-114@v2: one line of evidence per fact the WO asks to record.
     fn evidence(&self, out: &Output) -> String {
         format!(
             "exit={:?}\nworker={:?}\nagent-uid={:?}\nlane-owner(uid mode)={:?}\n\
@@ -215,7 +215,7 @@ impl Drop for RemoteFixture {
     }
 }
 
-// WO-114: `--auto deny` must be a boundary the agent cannot answer for itself.
+// WO-114@v2: `--auto deny` must be a boundary the agent cannot answer for itself.
 // Design-neutral: either the CLI refuses to launch a lane-owning agent, or the
 // launched agent's forged allow line never becomes a grant. Today's default drop
 // (no worker flag, agent = SSH login user = FIFO owner) is the case under test.

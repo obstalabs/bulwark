@@ -858,7 +858,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// WO-156: a receipts path through a user-made symlinked ancestor is refused
+    /// WO-156@v2: a receipts path through a user-made symlinked ancestor is refused
     /// and nothing is created at the link target — the audit trail must not be
     /// redirectable by a workspace directory symlink.
     #[test]

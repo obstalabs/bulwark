@@ -96,7 +96,7 @@ fn interactive_operator_grants_locally() {
         s = secret.display()
     );
 
-    // WO-110: interactive consent requires a worker distinct from the lane owner.
+    // WO-110@v4: interactive consent requires a worker distinct from the lane owner.
     let mut child = Command::new(bin())
         .args([
             "ssh",
@@ -127,7 +127,7 @@ fn interactive_operator_grants_locally() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // WO-110: witness the requested worker drop alongside the existing consent proof.
+    // WO-110@v4: witness the requested worker drop alongside the existing consent proof.
     assert!(
         combined.contains("worker dropped to uid"),
         "interactive dispatch should report its worker drop; got:\n{combined}"
@@ -451,7 +451,7 @@ fn deploy_never_without_binary_errors_clearly() {
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)
-        .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110: isolate deployment diagnostics.
+        .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110@v4: isolate deployment diagnostics.
         .args(["--", "true"])
         .output()
         .expect("spawn");

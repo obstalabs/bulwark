@@ -230,7 +230,7 @@ pub fn run(
         ),
     }
     kill_pid(child_pid, libc::SIGCONT).context("resume supervised child")?;
-    // WO-127: the receipt log is where an abnormal edge death is recorded.
+    // WO-127@v4: the receipt log is where an abnormal edge death is recorded.
     let code = supervise(child_pid, &mut edge_child, receipts)?;
     terminate_edge(&mut edge_child)?;
     let deny_forever_paths = decider.map(|d| d.deny_forever_paths()).unwrap_or_default();
@@ -544,7 +544,7 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
     }
 }
 
-// WO-127: an abnormal edge death is a fail-open window the kernel already
+// WO-127@v4: an abnormal edge death is a fail-open window the kernel already
 // honored; it must leave an audit record even when the run otherwise looks done.
 fn record_edge_death(
     receipts: Option<&Path>,
@@ -587,7 +587,7 @@ fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) 
             if foreground_code.is_none() {
                 foreground_code = try_wait(child_pid)?;
             }
-            // WO-127: only a clean drain (exit 0) is a normal end. An edge killed
+            // WO-127@v4: only a clean drain (exit 0) is a normal end. An edge killed
             // by a signal or exiting non-zero stopped answering the kernel at
             // some point, and the kernel allowed every open after that. That is
             // true even if the child has already finished: the 0.9.0 leak looked
@@ -729,7 +729,7 @@ mod allowlist_edge_tests {
     }
 }
 
-// WO-127: the supervisor must fail closed on an abnormal edge death, including
+// WO-127@v4: the supervisor must fail closed on an abnormal edge death, including
 // after the foreground child already finished (that is how the 0.9.0 leak hid).
 // The spawned children are reaped by `supervise` itself through libc::waitpid,
 // exactly as in production, so std's `wait()` must not be called on them here.
@@ -744,7 +744,7 @@ mod supervise_tests {
         crate::test_scratch_dir(&format!("sup-{tag}"))
     }
 
-    // WO-127: a fake edge that signals readiness, then exits the way asked:
+    // WO-127@v4: a fake edge that signals readiness, then exits the way asked:
     // "trap" dies by SIGTRAP like the real 0.9.0 crash, "clean" drains with 0.
     fn fake_edge(ready: &Path, how: &str) -> Child {
         let script = match how {

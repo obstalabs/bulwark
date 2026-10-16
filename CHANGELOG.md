@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+<!-- WO-123@v1: citations bound to an outdated intent revision were re-checked against the current intent and re-bound. -->
+- Source comments cite the work order behind each function, so every change traces to its stated intent.
+
 ## [0.9.3] - 2026-10-15
 
 ### Security

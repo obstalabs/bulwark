@@ -363,7 +363,7 @@ enum Cmd {
     LandlockCheck,
 
     // WO-115: state the worker-uid requirement in the help text.
-    // WO-114: the requirement covers --auto; the sentence no longer exempts it.
+    // WO-114@v2: the requirement covers --auto; the sentence no longer exempts it.
     /// Run an agent on a REMOTE host under Bulwark enforcement, with consent
     /// routed back to the local operator. Enforcement runs on the remote
     /// kernel (SSH is only transport). A protected read is denied immediately
@@ -438,7 +438,7 @@ enum Cmd {
 
         // WO-49: worker privilege drop.
         // WO-115: consent needs a uid that cannot open the lanes.
-        // WO-114: --auto runs are held to the same rule.
+        // WO-114@v2: --auto runs are held to the same rule.
         /// drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
@@ -1098,8 +1098,8 @@ struct SshArgs<'a> {
     command: &'a [String],
 }
 
-// WO-110: a consent worker must not be root or own its consent FIFOs.
-// WO-114: this covers --auto too; the verdict lane accepts any well-formed allow
+// WO-110@v4: a consent worker must not be root or own its consent FIFOs.
+// WO-114@v2: this covers --auto too; the verdict lane accepts any well-formed allow
 // line, so a lane-owning agent could answer its own `--auto deny`.
 fn remote_consent_worker_uid(
     target: &str,
@@ -1190,8 +1190,8 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
     // the path is somehow occupied.
     let run_id = std::process::id();
-    // WO-110: refuse unsafe worker identities before any remote deployment.
-    // WO-114: --auto is no longer exempt; every consent dispatch runs the agent
+    // WO-110@v4: refuse unsafe worker identities before any remote deployment.
+    // WO-114@v2: --auto is no longer exempt; every consent dispatch runs the agent
     // as a uid that cannot open the lanes, so `--auto deny` is a real boundary.
     // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE
     // inside this check and flows it into the SAME path `--worker-uid` uses. No
@@ -1214,7 +1214,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
-    // WO-114: no second worker resolution here; the uid was settled above for
+    // WO-114@v2: no second worker resolution here; the uid was settled above for
     // every consent dispatch, before the remote deployment resolved.
     let protect_args = protect
         .iter()
@@ -1632,7 +1632,7 @@ fn remote_uid_pick_snippet(run_id: u32) -> String {
 
 /// WO-50: resolve a fresh anonymous worker uid on the remote host. Returns the
 /// picked numeric uid; creates no account (nothing to tear down).
-// WO-110: identity selection does not require deploying the gate first.
+// WO-110@v4: identity selection does not require deploying the gate first.
 fn pick_remote_worker_uid(target: &str, run_id: u32) -> Result<u32> {
     let out = run_remote_capture(target, &remote_uid_pick_snippet(run_id))
         .context("pick a free worker uid on the remote")?;
