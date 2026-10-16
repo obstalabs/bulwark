@@ -812,15 +812,6 @@ fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the user's home directory from `$HOME`. WO-145@v2: protect
-/// expansion no longer uses this (it uses the host home set); retained for any
-/// caller that wants one user's home.
-// WO-145@v2: isolate legacy single-home lookup from host-wide protect expansion.
-#[allow(dead_code)]
-fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
-}
-
 /// WO-145@v2: the enumerated homes owned by `uid`.
 // WO-145@v2: require a non-root worker to own an enumerated host home.
 fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {

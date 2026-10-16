@@ -136,8 +136,8 @@ impl RemoteCache {
     }
 
     // WO-9@v1: expose prompt counts for deterministic remote-gate verification.
-    /// Number of prompts emitted this session (diagnostics + tests).
-    #[allow(dead_code)] // used by tests and the future operator-UI status line
+    /// Number of prompts emitted this session (tests).
+    #[cfg(test)]
     pub fn prompts_emitted(&self) -> u64 {
         self.prompts_emitted.load(Ordering::SeqCst)
     }

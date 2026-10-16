@@ -156,11 +156,10 @@ impl ProtectedSet {
 
     /// True if this inode is in the launch snapshot (open should be denied).
     /// Prefer [`ProtectedSet::protects`], which also covers descendants of a
-    /// protected directory; this exact-inode check is retained for callers that
-    /// already hold the identity (e.g. macOS ES seeding) and as the snapshot
-    /// probe in tests; the Linux gate now decides via `protects`.
+    /// protected directory; this exact-inode check is the snapshot probe in
+    /// tests; the gates decide via `protects`.
     // WO-69@v1: retain exact launch-snapshot membership for inode-based callers.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn contains(&self, key: &InodeKey) -> bool {
         self.inodes.contains(key)
     }

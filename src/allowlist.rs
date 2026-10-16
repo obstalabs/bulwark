@@ -393,7 +393,7 @@ impl AllowList {
 
     /// WO-41: operator grants only, excluding the platform runtime base set.
     #[cfg(target_os = "macos")]
-    #[allow(dead_code)] // retained for diagnostics / a future recursive-witness layer
+    #[cfg(test)]
     pub fn grant_globs(&self) -> &[String] {
         &self.grants
     }
@@ -423,11 +423,10 @@ impl AllowList {
     }
 
     /// Path-only allow check: true if `path` matches the base set or a grant
-    /// glob. Retained for grant/base-set listing and policy preview; the live
-    /// gate decides with [`AllowList::allows_open`], which also gates grants on
-    /// inode identity.
+    /// glob. Test oracle for the grant and base-set globs; the live gate decides
+    /// with [`AllowList::allows_open`], which also gates grants on inode identity.
     // WO-41@v1: evaluate the default-deny path policy without an open-file identity.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn allows(&self, path: &str) -> bool {
         if self.include_base && RUNTIME_BASE_SET.iter().any(|g| glob::matches(g, path)) {
             return true;

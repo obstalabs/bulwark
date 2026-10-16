@@ -10,7 +10,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -430,55 +430,6 @@ fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
     body.push_str(value);
     body.push('\n');
     Ok(())
-}
-
-// Superseded by inode-membership grants (`allow_inode`); retained for a possible
-// recursive grant-root layer (the macOS analog of Linux move-in tracking).
-// WO-72@v1: retain the superseded path-root representation only as inert support.
-#[allow(dead_code)]
-struct AllowGrantRoot {
-    dev: u64,        // WO-41: root device identity
-    ino: u64,        // WO-41: root inode identity
-    recursive: bool, // WO-41: directory grants cover descendants
-    path: PathBuf,   // WO-41: canonical root path for the ES edge
-}
-
-// WO-72@v1: keep retired path-root resolution isolated from active inode grants.
-#[allow(dead_code)]
-fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
-    let mut out = Vec::new();
-    for grant in grants {
-        let (root, recursive) = concrete_grant_root(grant)?;
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("resolve macOS allow grant {}", root.display()))?;
-        let meta = fs::metadata(&root)
-            .with_context(|| format!("metadata macOS allow grant {}", root.display()))?;
-        out.push(AllowGrantRoot {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            recursive: recursive || meta.is_dir(),
-            path: root,
-        });
-    }
-    Ok(out)
-}
-
-// WO-72@v1: reject wildcard roots if the retired resolver is ever reused.
-#[allow(dead_code)]
-fn concrete_grant_root(grant: &str) -> Result<(PathBuf, bool)> {
-    let recursive = grant.ends_with("/**");
-    let root = grant.strip_suffix("/**").unwrap_or(grant);
-    if root.contains('*') || root.contains('?') || root.contains('[') {
-        bail!("macOS allow grants must be concrete paths or trailing /** globs: {grant}");
-    }
-    if let Some(rest) = root.strip_prefix("~/") {
-        let Some(home) = std::env::var_os("HOME") else {
-            bail!("HOME is not set for macOS allow grant {grant}");
-        };
-        return Ok((PathBuf::from(home).join(rest), recursive));
-    }
-    Ok((PathBuf::from(root), recursive))
 }
 
 // WO-24@v1: keep macOS deny-list decisions aligned with the portable CLI.

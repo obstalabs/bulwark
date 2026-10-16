@@ -99,6 +99,11 @@ jobs:
       - name: Unit tests
         run: cargo test --verbose
 
+      # WO-172@v1: the ES proof seal checks are plain bash + grep, so they run here
+      # on every push instead of waiting for a macOS runner.
+      - name: ES proof seal source checks
+        run: bash macos-es-proof/prove_test.sh
+
       # WO-155@v1: `fault-injection` is debug-only (it lets a test disable a
       # reaping layer). A release build that enables it must NOT compile — assert
       # the build fails; a success here means the test switches shipped.
@@ -197,3 +202,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/swift-module-cache"
           xcrun --sdk macosx swiftc -o "$RUNNER_TEMP/es_proof" macos-es-proof/es_proof.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
           xcrun --sdk macosx swiftc -o "$RUNNER_TEMP/bulwark_es_gate" macos-es-proof/es_gate.swift -lEndpointSecurity -lbsm -module-cache-path "$RUNNER_TEMP/swift-module-cache"
+
+      # WO-172@v1: pin the ES proof client's AUTH-callback deadline-safety invariants.
+      - name: ES proof client source checks
+        run: xcrun --sdk macosx swift macos-es-proof/es_proof_test.swift
