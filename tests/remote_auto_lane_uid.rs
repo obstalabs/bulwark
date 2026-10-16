@@ -22,6 +22,7 @@ struct RemoteFixture {
     root: PathBuf,
 }
 
+// WO-114@v2: isolate the real control lanes behind a fake remote transport.
 impl RemoteFixture {
     // WO-114@v2: only the fixture SSH executable may receive the CLI's remote calls.
     fn new() -> Self {
@@ -163,6 +164,7 @@ printf '%s\n' fixture-agent-executed
         fixture
     }
 
+    // WO-114@v2: install executable fixtures for the remote control-lane path.
     fn script(&self, name: &str, contents: &str) {
         let path = self.root.join("bin").join(name);
         fs::write(&path, contents).unwrap();
@@ -187,6 +189,7 @@ printf '%s\n' fixture-agent-executed
             .expect("run real bulwark ssh")
     }
 
+    // WO-114@v2: read the observable lane and identity evidence.
     fn contents(&self, name: &str) -> String {
         fs::read_to_string(self.root.join(name)).unwrap_or_default()
     }
@@ -209,7 +212,9 @@ printf '%s\n' fixture-agent-executed
     }
 }
 
+// WO-114@v2: own cleanup of the remote control-lane fixture.
 impl Drop for RemoteFixture {
+    // WO-114@v2: remove all fake transport and lane artifacts after the test.
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }

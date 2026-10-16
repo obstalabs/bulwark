@@ -528,6 +528,7 @@ var treeLock = os_unfair_lock()
 // is a member from the start), so this only ever fires at genuine teardown.
 let drainQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.drain")
 let drainGrace: DispatchTimeInterval = .milliseconds(100)
+// WO-127@v4: delay normal exit until the supervised tree and receipts are drained.
 func scheduleDrainExit() {
     drainQueue.asyncAfter(deadline: .now() + drainGrace) {
         if treeIsEmpty() {

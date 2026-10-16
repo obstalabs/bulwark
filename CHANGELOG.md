@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1: source citations identify the current intent behind each attributed region. -->
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function, so every change traces to its stated intent.
 
 ## [0.9.3] - 2026-10-15

@@ -102,6 +102,7 @@ pub trait ConsentProvider {
     /// provider's configured one), so a request queued behind a pending prompt
     /// can be bounded to what remains of its own consent window. Default:
     /// [`ConsentProvider::request`].
+    // WO-154@v1: bound queued consent work to the original request deadline.
     fn request_with_timeout(
         &mut self,
         req: &ConsentRequest,
@@ -113,12 +114,15 @@ pub trait ConsentProvider {
     /// Receive the supervised tree's cgroup scope (relative path) so an off-band
     /// provider can reject in-tree answerers by membership. Default: no-op (the
     /// static-deny floor and providers without a peer channel ignore it).
+    // WO-59@v1: reject consent peers that belong to the supervised cgroup.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// WO-147/154@v1: attach the gate's log sink so this provider's diagnostics
     /// (e.g. a refused off-band peer) line through the bounded queue instead of
     /// a synchronous stderr write that could stall the consent worker. Default:
     /// no-op (the static-deny floor, and providers with no diagnostics).
+    // WO-154@v1: route provider diagnostics away from the permission loop.
+    // WO-155@v1: keep a stalled terminal from blocking consent teardown.
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 }
 
@@ -171,6 +175,7 @@ impl<P: ConsentProvider> CachingProvider<P> {
     }
 
     /// Resolve a verdict for `req`, consulting and updating the cache.
+    // WO-154@v1: enter the shared deadline-aware consent path.
     pub fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         self.decide_inner(req, None)
     }
@@ -178,6 +183,7 @@ impl<P: ConsentProvider> CachingProvider<P> {
     /// Decide with a caller-chosen deadline. Same cache semantics, but the inner
     /// provider is asked to bound its wait to `deadline` (so a request queued
     /// behind a pending prompt honors what remains of its own consent window).
+    // WO-154@v1: preserve one absolute deadline across queued consent work.
     pub fn decide_deadline(
         &mut self,
         req: &ConsentRequest,
@@ -186,6 +192,7 @@ impl<P: ConsentProvider> CachingProvider<P> {
         self.decide_inner(req, Some(deadline))
     }
 
+    // WO-154@v1: share cache semantics between default and bounded consent calls.
     fn decide_inner(
         &mut self,
         req: &ConsentRequest,
@@ -223,6 +230,7 @@ impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
         CachingProvider::decide(self, req)
     }
 
+    // WO-154@v1: forward the gate's remaining consent time through the cache.
     fn decide_deadline(
         &mut self,
         req: &ConsentRequest,
@@ -231,11 +239,14 @@ impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
         CachingProvider::decide_deadline(self, req, deadline)
     }
 
+    // WO-59@v1: forward supervised-cgroup identity to the peer provider.
     fn bind_scope(&mut self, scope_rel: Option<&str>) {
         // The cache holds no peer channel; forward to the wrapped provider.
         self.inner.bind_scope(scope_rel);
     }
 
+    // WO-154@v1: forward the bounded gate log to the peer provider.
+    // WO-155@v1: isolate provider diagnostics from a stalled terminal.
     fn attach_log(&mut self, sink: crate::receipt::LogSink) {
         // The cache holds no diagnostics of its own; forward to the provider.
         self.inner.attach_log(sink);
@@ -244,6 +255,7 @@ impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
     /// The consent worker owns this decider, so `run` collects the deny-forever
     /// paths from it when the worker exits (via this trait method) and the
     /// caller persists them.
+    // WO-154@v1: return persistent denials after the consent worker drains.
     fn deny_forever_paths(&self) -> Vec<String> {
         self.deny_forever_paths.clone()
     }
@@ -313,6 +325,7 @@ mod tests {
         assert_eq!((v2, s2), (Verdict::AllowSession, Source::Cache));
     }
 
+    // WO-154@v1: preserve persistent denials across worker-owned consent calls.
     #[test]
     fn deny_forever_is_cached_and_path_recorded() {
         let scripted = Scripted(std::cell::RefCell::new(vec![Verdict::DenyForever]));

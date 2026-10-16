@@ -98,6 +98,7 @@ fn check_reports_outside_for_unprotected_path() {
     );
 }
 
+// WO-145@v2: make policy checks expand protected entries across host homes.
 #[test]
 fn check_uses_the_host_home_set_not_home() {
     // WO-145@v3 (G2): `check` expands `~/` over the host home set, so pointing
@@ -123,6 +124,7 @@ fn check_uses_the_host_home_set_not_home() {
     );
 }
 
+// WO-145@v2: expose the stable policy decision token in JSON output.
 #[test]
 fn check_json_decided_token_is_machine_readable() {
     // WO-145@v5 (G): the JSON `decision` field carries the machine token, not the

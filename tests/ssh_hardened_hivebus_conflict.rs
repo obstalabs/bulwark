@@ -18,7 +18,9 @@ struct Fixture {
     root: PathBuf,
 }
 
+// WO-120@v1: isolate the fake transport used to prove pre-dispatch rejection.
 impl Fixture {
+    // WO-120@v1: create a transport fixture that records any SSH attempt.
     fn new() -> Self {
         let root = PathBuf::from(format!(
             "/tmp/bulwark-wo120-{}-{}",
@@ -40,6 +42,7 @@ impl Fixture {
         Self { root }
     }
 
+    // WO-120@v1: provide the key path used by the conflicting SSH flag.
     fn architect_pub(&self) -> String {
         self.root.join("architect.pub").display().to_string()
     }
@@ -59,6 +62,7 @@ impl Fixture {
             .expect("run real bulwark ssh")
     }
 
+    // WO-120@v1: prove argument rejection occurred before remote contact.
     fn ssh_attempted(&self) -> bool {
         self.root.join("ssh.calls").exists()
     }
@@ -92,7 +96,9 @@ impl Fixture {
     }
 }
 
+// WO-120@v1: own cleanup of the fake SSH transport fixture.
 impl Drop for Fixture {
+    // WO-120@v1: remove transport evidence after each conflict test.
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }

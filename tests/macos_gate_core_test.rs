@@ -238,6 +238,7 @@ fn ci_compiles_macos_rust_and_documents_swift_link_check() {
     }
 }
 
+// WO-41@v1: require the hardware harness to exercise sealed allow-list behavior.
 #[test]
 fn allowlist_gate_has_sealed_hardware_harness() {
     let source = repo_file("macos-es-proof/verify-allowlist-gate.sh");

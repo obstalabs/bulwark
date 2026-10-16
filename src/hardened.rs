@@ -36,6 +36,7 @@ const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 const SYS_OPENAT2: libc::c_long = 437;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
+// WO-81@v1: pass openat2 constraints without following grant-path symlinks.
 #[repr(C)]
 struct OpenHow {
     flags: u64,
@@ -49,6 +50,7 @@ struct OpenHow {
 /// of which must fail closed: the grant then adds no Landlock rule). Resolving
 /// every component (not just the final one, as `O_NOFOLLOW` would) is what makes
 /// the floor exactly as wide as the real path the operator named.
+// WO-81@v1: resolve each grant without accepting a symlink component.
 fn open_no_symlinks(cpath: &CString) -> RawFd {
     let how = OpenHow {
         flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
@@ -128,6 +130,9 @@ pub fn abi_version() -> Option<i32> {
 /// `allow_paths` should include the runtime base set (so the agent can load its
 /// interpreter and libc) plus the operator's grants. A path that does not exist
 /// is skipped with a warning rather than failing the whole floor.
+// WO-81@v1: apply the read floor only to safely resolved grant paths.
+// WO-134@v1: request directory-read access only for directory grants.
+// WO-142@v1: omit glob shapes that would widen the Landlock floor.
 pub fn apply_read_floor(allow_paths: &[String]) -> Result<()> {
     if abi_version().is_none() {
         bail!("Landlock is not available on this kernel — hardened mode requires Landlock (Linux 5.13+)");
