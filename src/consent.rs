@@ -31,6 +31,8 @@ pub enum Verdict {
 // WO-8@v1: expose decision semantics and their wire representation.
 impl Verdict {
     // WO-8@v1: distinguish the two decisions that permit an open.
+    // WO-173@v2: Linux-only: fanotify maps consent verdicts to open responses.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// True if the open should be permitted.
     pub fn allows(self) -> bool {
         matches!(self, Verdict::AllowOnce | Verdict::AllowSession)
@@ -89,6 +91,8 @@ pub enum Source {
 // WO-8@v1: serialize decision sources for receipt records.
 impl Source {
     // WO-8@v1: expose the stable wire label for each decision source.
+    // WO-173@v2: Linux-only: fanotify receipts serialize consent provenance.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Operator => "operator",
@@ -126,6 +130,8 @@ pub trait ConsentProvider {
     /// provider can reject in-tree answerers by membership. Default: no-op (the
     /// static-deny floor and providers without a peer channel ignore it).
     // WO-59@v1: reject consent peers that belong to the supervised cgroup.
+    // WO-173@v2: Linux-only: bind consent peers to the fanotify run cgroup.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// WO-154@v1: attach the gate's log sink so this provider's diagnostics
@@ -134,6 +140,8 @@ pub trait ConsentProvider {
     /// no-op (the static-deny floor, and providers with no diagnostics).
     // WO-154@v1: route provider diagnostics away from the permission loop.
     // WO-155@v1: keep a stalled terminal from blocking consent teardown.
+    // WO-173@v2: Linux-only: attach diagnostics to the fanotify gate log.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 }
 
@@ -202,6 +210,8 @@ impl<P: ConsentProvider> CachingProvider<P> {
     /// provider is asked to bound its wait to `deadline` (so a request queued
     /// behind a pending prompt honors what remains of its own consent window).
     // WO-154@v1: preserve one absolute deadline across queued consent work.
+    // WO-173@v2: Linux-only: bound queued fanotify consent decisions.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn decide_deadline(
         &mut self,
         req: &ConsentRequest,

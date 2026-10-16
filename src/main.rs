@@ -5,7 +5,6 @@
 // The Linux gate exercises the full fanotify/Landlock/socket surface. Other
 // platforms compile the portable support code progressively as their gate
 // backends land, so scope the dead-code allowance away from Linux only.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 // WO-155@v1: the `fault-injection` feature exists for DEBUG-only tests (it lets
 // a test disable a reaping layer). It must never compile into a release binary —
@@ -1882,8 +1881,14 @@ struct RunArgs<'a> {
     consent: ConsentMode,
     consent_socket: Option<PathBuf>,
     consent_timeout: u64,
+    // WO-173@v2: Linux-only: label remote prompts emitted by the fanotify gate.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     host_label: String,
+    // WO-173@v2: Linux-only: carry the fanotify gate's remote prompt lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     prompt_out: Option<PathBuf>,
+    // WO-173@v2: Linux-only: carry the fanotify gate's remote verdict lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     verdict_in: Option<PathBuf>,
     deny_all: bool,
     allow: &'a [String],
@@ -3004,6 +3009,8 @@ fn run_doctor_checks() -> Vec<DoctorCheck> {
 }
 
 // WO-164@v2: Linux enforcement needs the OS and root or CAP_SYS_ADMIN; kernel and Landlock inform.
+// WO-173@v2: Linux-only: collect fanotify and Landlock readiness checks.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
     // Linux is required — the gate is fanotify/Landlock.
     let is_linux = cfg!(target_os = "linux");
@@ -3059,6 +3066,8 @@ fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
 }
 
 // WO-164@v2: report the Linux kernel version as an informational doctor check.
+// WO-173@v2: Linux-only: read the kernel version for Linux doctor output.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Read the kernel release string via uname(2). Empty on failure or non-Linux.
 fn kernel_release() -> String {
     #[cfg(target_os = "linux")]
@@ -3079,6 +3088,8 @@ fn kernel_release() -> String {
 }
 
 // WO-164@v2: report whether this host can support hardened Landlock runs.
+// WO-173@v2: Linux-only: probe Landlock for Linux doctor output.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Probe Landlock support by asking the kernel for the current ABI version.
 /// Returns true when ABI >= 1. Non-Linux always false.
 fn landlock_available() -> bool {

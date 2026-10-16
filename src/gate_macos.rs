@@ -52,6 +52,8 @@ pub trait ConsentDecider {
     /// Decide with a caller-chosen deadline (default: `decide`). Kept for API
     /// parity with the Linux gate; the macOS edge prompts from its seeded policy.
     // WO-154@v1: keep deadline-aware consent API parity with the Linux gate.
+    // WO-173@v2: Linux-only: callers use deadline-aware consent in the fanotify gate.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
         self.decide(req)
     }
@@ -64,11 +66,15 @@ pub trait ConsentDecider {
     /// ancestry check. Wiring the ES PID set into the consent socket (the macOS
     /// analog of the cgroup fix) is tracked as a documented residual.
     // WO-71@v1: retain the shared membership-binding contract across platforms.
+    // WO-173@v2: Linux-only: callers bind consent to fanotify cgroup scope.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// Mirror of the Linux gate's log-sink hook. No-op on macOS (the ES gate
     /// prompts from seeded policy before any worker thread exists).
     // WO-154@v1: retain the shared asynchronous-log contract across platforms.
+    // WO-173@v2: Linux-only: callers attach logs to fanotify consent workers.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 
     /// Mirror of the Linux gate's deny-forever readback. Default empty.

@@ -23,6 +23,8 @@ use anyhow::{anyhow, Context, Result};
 // WO-3@v1: key the Linux permission gate to stable inode identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
+    // WO-173@v2: Linux-only: fanotify receipts record explicitly allowed opens.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Allow,
     Deny,
 }
@@ -248,6 +250,8 @@ impl LogSink {
     /// Record one decision. Enqueued to both sinks, never written synchronously.
     // WO-154@v1: enqueue decisions without delaying permission responses.
     // WO-155@v1: send each decision to independently bounded sinks.
+    // WO-173@v2: Linux-only: fanotify helper threads enqueue decision receipts.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn record(&self, r: &Receipt) {
         route(
             &self.file_tx,
@@ -543,6 +547,8 @@ impl ReceiptLog {
     /// once the gate AND its helper threads are done.
     // WO-154@v1: give helper threads bounded access to both output queues.
     // WO-155@v1: keep all producers inside shared sink accounting.
+    // WO-173@v2: Linux-only: share receipt queues with fanotify helper threads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn sink(&self) -> LogSink {
         LogSink {
             file_tx: self.file_tx.as_ref().expect("file sender present").clone(),
@@ -581,6 +587,8 @@ impl ReceiptLog {
     /// this so their stderr output cannot block the permission loop either.
     // WO-154@v1: keep warning output away from the permission loop.
     // WO-155@v1: count warnings dropped by a stalled terminal sink.
+    // WO-173@v2: Linux-only: queue fanotify gate warnings off the permission loop.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn warn(&mut self, line: &str) {
         self.route(None, format!("[bulwark] WARN {line}\n"));
     }
@@ -589,6 +597,8 @@ impl ReceiptLog {
     /// own status messages, which must also never block on output.
     // WO-154@v1: enqueue gate status without delaying permission responses.
     // WO-155@v1: bound informational output when the terminal stalls.
+    // WO-173@v2: Linux-only: queue fanotify gate status off the permission loop.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn note(&mut self, line: &str) {
         self.route(None, format!("[bulwark] {line}\n"));
     }
