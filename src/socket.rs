@@ -78,6 +78,7 @@ fn peer_pid(stream: &UnixStream) -> Option<i32> {
     Some(pid)
 }
 
+// WO-8@v1: encode consent requests for the off-band operator socket.
 /// Encode a request as the wire line (tab-separated, newline-terminated).
 fn encode_request(req: &ConsentRequest) -> String {
     // Tabs/newlines in fields would corrupt the framing; paths/ancestry from
@@ -94,6 +95,7 @@ fn encode_request(req: &ConsentRequest) -> String {
     )
 }
 
+// WO-8@v1: decode consent request fields for the operator client.
 /// Parse a wire request line into its fields (for the operator client display).
 pub fn parse_request(line: &str) -> Option<Vec<(String, String)>> {
     let line = line.strip_prefix("REQUEST\t")?;
@@ -400,6 +402,7 @@ fn check_parent(parent: &Path) -> Result<()> {
     Ok(())
 }
 
+// WO-8@v1: own the operator socket used for protected-open decisions.
 /// The supervisor side: owns the listening socket and answers gate requests by
 /// talking to whichever operator client connects.
 pub struct SocketProvider {
@@ -429,6 +432,7 @@ pub struct SocketProvider {
     sink: Option<LogSink>,
 }
 
+// WO-8@v1: bind and authenticate the off-band operator channel.
 impl SocketProvider {
     /// Bind the consent socket for the requested `path`, rejecting requests not
     /// answered within `timeout`. `supervised_root` is the agent tree's root
@@ -757,6 +761,7 @@ impl SocketProvider {
     }
 }
 
+// WO-8@v1: remove the consent socket when its provider is released.
 impl Drop for SocketProvider {
     // WO-147@v1: remove the consent node through its verified directory identity.
     fn drop(&mut self) {
@@ -980,6 +985,7 @@ pub fn answer_once(socket: &Path, verdict: Option<Verdict>) -> Result<String> {
     Ok(v.as_str().to_string())
 }
 
+// WO-8@v1: tolerate startup races while connecting the operator client.
 /// Connect to the consent socket, retrying with a short backoff until `budget`
 /// elapses. Tolerates the socket not yet existing or refusing connections while
 /// the supervisor is between accepts.
@@ -1000,6 +1006,7 @@ fn connect_with_retry(socket: &Path, budget: Duration) -> Result<UnixStream> {
     }
 }
 
+// WO-8@v1: collect an interactive operator verdict for the socket reply.
 /// Read a verdict from stdin interactively.
 fn prompt_verdict() -> Result<Verdict> {
     eprint!("  decision [o=allow-once, s=allow-session, d=deny, f=deny-forever]: ");
@@ -1011,11 +1018,13 @@ fn prompt_verdict() -> Result<Verdict> {
     Verdict::parse(&input).ok_or_else(|| anyhow!("unrecognized decision: {}", input.trim()))
 }
 
+// WO-8@v1: verify consent framing and live operator socket behavior.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protect::InodeKey;
 
+    // WO-8@v1: build a deterministic protected-open request for socket tests.
     fn req() -> ConsentRequest {
         ConsentRequest {
             pid: 4242,
@@ -1029,6 +1038,7 @@ mod tests {
         }
     }
 
+    // WO-8@v1: preserve consent request fields across socket framing.
     #[test]
     fn request_encode_parse_round_trip() {
         let line = encode_request(&req());
@@ -1047,6 +1057,7 @@ mod tests {
         assert_eq!(get("ancestry"), "cat(4242) <- bash(10)");
     }
 
+    // WO-8@v1: prevent request fields from corrupting socket framing.
     #[test]
     fn encode_sanitizes_framing_chars() {
         let mut r = req();
@@ -1059,6 +1070,7 @@ mod tests {
         assert!(!path.contains('\t') && !path.contains('\n'));
     }
 
+    // WO-8@v1: reject socket input that is not a consent request.
     #[test]
     fn parse_request_rejects_non_request_line() {
         assert!(parse_request("allow-once\n").is_none());
@@ -1475,6 +1487,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // WO-8@v1: create short unique socket paths for live consent tests.
     /// End-to-end over a real socket pair: an "operator" thread connects and
     /// answers; the provider returns that verdict with Source::Operator.
     #[cfg(target_os = "linux")]
@@ -1498,6 +1511,7 @@ mod tests {
         dir.join(name)
     }
 
+    // WO-8@v1: prove a live operator decision reaches the socket provider.
     #[cfg(target_os = "linux")]
     #[test]
     fn socket_round_trip_operator_allows() {
@@ -1524,6 +1538,7 @@ mod tests {
         assert_eq!(source, Source::Operator);
     }
 
+    // WO-8@v1: prove an unanswered socket request denies at its timeout.
     #[cfg(target_os = "linux")]
     #[test]
     fn socket_times_out_to_deny_when_no_operator() {

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::glob;
 
+// WO-5@v1: represent the default decision outside configured workspace grants.
 /// What to do for an open that is neither explicitly allowed nor protected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -27,6 +28,7 @@ pub enum OutsideWorkspace {
     Deny,
 }
 
+// WO-5@v1: keep unanswered policy decisions fail closed by default.
 /// What to do when an interactive prompt is not answered in time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +37,7 @@ pub enum OnTimeout {
     Allow,
 }
 
+// WO-5@v1: store path globs that a policy permits without prompting.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Workspace {
     /// Globs the supervised tree may read freely.
@@ -42,6 +45,7 @@ pub struct Workspace {
     pub allow: Vec<String>,
 }
 
+// WO-5@v1: store path globs whose opens require gate decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Protected {
     /// Globs that are protected: an open is gated (prompt, or deny in the MVP).
@@ -49,6 +53,7 @@ pub struct Protected {
     pub prompt: Vec<String>,
 }
 
+// WO-5@v1: persist deterministic policy behavior for unmatched and timed-out opens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     #[serde(default = "default_outside_workspace")]
@@ -57,14 +62,18 @@ pub struct Defaults {
     pub on_timeout: OnTimeout,
 }
 
+// WO-5@v1: default unmatched paths to an operator-mediated decision.
 fn default_outside_workspace() -> OutsideWorkspace {
     OutsideWorkspace::Prompt
 }
+// WO-5@v1: default unanswered prompts to denial.
 fn default_on_timeout() -> OnTimeout {
     OnTimeout::Deny
 }
 
+// WO-5@v1: construct the fail-closed policy defaults used by serde and profiles.
 impl Default for Defaults {
+    // WO-5@v1: pair prompt-on-outside with deny-on-timeout.
     fn default() -> Self {
         Defaults {
             outside_workspace: default_outside_workspace(),
@@ -73,6 +82,7 @@ impl Default for Defaults {
     }
 }
 
+// WO-27@v1: represent the decision mode selected by a named launch profile.
 /// Static decision policy for a configured agent launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,10 +92,12 @@ pub enum AgentDecision {
     Allow,
 }
 
+// WO-27@v1: make named launch profiles ask unless configured otherwise.
 fn default_agent_decision() -> AgentDecision {
     AgentDecision::Ask
 }
 
+// WO-27@v1: enable receipt output for named launch profiles by default.
 fn default_agent_audit() -> bool {
     true
 }
@@ -110,7 +122,9 @@ pub struct AgentProfile {
     pub audit: bool,
 }
 
+// WO-27@v1: construct the opinionated starter configuration for a named agent.
 impl AgentProfile {
+    // WO-27@v1: seed a launch profile with credential protections and safe defaults.
     /// Starter profile used by `bulwark init` and `bulwark launch --init`.
     pub fn starter(command: Vec<String>) -> Self {
         AgentProfile {
@@ -134,6 +148,7 @@ impl AgentProfile {
     }
 }
 
+// WO-5@v1: define the portable policy document consumed by the gate.
 /// The full Bulwark.toml document.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Policy {
@@ -151,6 +166,7 @@ pub struct Policy {
     pub agents: BTreeMap<String, AgentProfile>,
 }
 
+// WO-5@v1: separate allowed, protected, and unmatched policy outcomes.
 /// A gate decision a policy yields for a given path, before kernel/inode work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -165,6 +181,7 @@ pub enum PolicyDecision {
 
 // WO-145@v2: keep host-home protection expansion inside the shared policy path.
 impl Policy {
+    // WO-5@v1: ship a conservative policy profile for common credential paths.
     /// The shipped default profile. Protects the usual credential stores and
     /// secret-bearing filenames; the workspace allowlist is intentionally empty
     /// so the operator opts their project in explicitly.
@@ -200,6 +217,7 @@ impl Policy {
         }
     }
 
+    // WO-5@v1: retain default protections while granting a development workspace.
     /// The built-in `dev` profile: same protections, but allows a typical
     /// project working directory so day-to-day reads are not gated.
     pub fn dev_profile() -> Self {
@@ -208,6 +226,7 @@ impl Policy {
         p
     }
 
+    // WO-5@v1: resolve the supported built-in policy profiles by name.
     /// Select a named built-in profile.
     pub fn named(name: &str) -> Option<Self> {
         match name {
@@ -217,6 +236,7 @@ impl Policy {
         }
     }
 
+    // WO-5@v1: parse the policy document selected for a supervised run.
     /// Load a policy from a Bulwark.toml file.
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
@@ -226,17 +246,20 @@ impl Policy {
         Ok(policy)
     }
 
+    // WO-5@v1: render policies in their canonical editable format.
     /// Serialize to TOML.
     pub fn to_toml(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serialize policy")
     }
 
+    // WO-5@v1: persist policy changes in the canonical TOML format.
     /// Save to a Bulwark.toml file.
     pub fn save(&self, path: &Path) -> Result<()> {
         fs::write(path, self.to_toml()?)
             .with_context(|| format!("cannot write policy {}", path.display()))
     }
 
+    // WO-5@v1: add protected globs without duplicating existing policy entries.
     /// Add a protected glob (idempotent). Returns true if newly added.
     pub fn add_protected(&mut self, pattern: &str) -> bool {
         if self.protected.prompt.iter().any(|p| p == pattern) {
@@ -247,6 +270,7 @@ impl Policy {
         }
     }
 
+    // WO-5@v1: add workspace grants without duplicating existing policy entries.
     /// Add a workspace allow glob (idempotent). Returns true if newly added.
     pub fn add_allow(&mut self, pattern: &str) -> bool {
         if self.workspace.allow.iter().any(|p| p == pattern) {
@@ -257,6 +281,7 @@ impl Policy {
         }
     }
 
+    // WO-27@v1: add a named starter profile without replacing existing configuration.
     /// Add a starter launch profile. Returns true if newly added.
     pub fn add_agent(&mut self, name: &str) -> bool {
         if self.agents.contains_key(name) {
@@ -464,10 +489,12 @@ pub fn homes_from(
     homes
 }
 
+// WO-5@v1: verify policy defaults, persistence, and idempotent mutation.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // WO-5@v1: prove policy defaults prompt unmatched paths and deny timeouts.
     #[test]
     fn defaults_are_prompt_and_deny() {
         let d = Defaults::default();
@@ -475,6 +502,7 @@ mod tests {
         assert_eq!(d.on_timeout, OnTimeout::Deny);
     }
 
+    // WO-5@v1: prove the shipped profile protects common credential paths.
     #[test]
     fn default_profile_protects_credentials() {
         let p = Policy::default_profile();
@@ -484,6 +512,7 @@ mod tests {
         assert!(p.workspace.allow.is_empty());
     }
 
+    // WO-27@v1: prove the shipped policy seeds usable named launch profiles.
     #[test]
     fn default_profile_seeds_launch_agents() {
         let p = Policy::default_profile();
@@ -496,6 +525,7 @@ mod tests {
         assert!(claude.audit);
     }
 
+    // WO-5@v1: preserve policy fields across canonical TOML serialization.
     #[test]
     fn toml_round_trip() {
         let p = Policy::dev_profile();
@@ -509,6 +539,7 @@ mod tests {
         assert_eq!(back.agents.get("claude"), p.agents.get("claude"));
     }
 
+    // WO-27@v1: prove adding a named launch profile is idempotent.
     #[test]
     fn add_agent_is_idempotent() {
         let mut p = Policy::default_profile();
@@ -578,6 +609,7 @@ mod tests {
         );
     }
 
+    // WO-5@v1: prove adding an existing protected glob is idempotent.
     #[test]
     fn add_protected_is_idempotent() {
         let mut p = Policy::default_profile();
