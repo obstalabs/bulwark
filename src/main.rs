@@ -3741,6 +3741,8 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
+    // WO-164@v1: doctor marks the checks enforcement depends on as required, on both platforms.
+    // WO-24@v1: on macOS the required set includes the ES edge and its entitlement.
     #[test]
     fn doctor_always_reports_the_required_checks() {
         let checks = run_doctor_checks();
