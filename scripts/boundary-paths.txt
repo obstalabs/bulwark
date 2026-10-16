@@ -1,0 +1,11 @@
+# WO-140@v1: one source of truth for changes that require hardware-seal acknowledgement.
+src/allowlist.rs
+src/protect.rs
+src/gate.rs
+src/gate_macos.rs
+src/hardened.rs
+src/glob.rs
+macos-es-proof/es_gate.swift
+macos-es-proof/*.entitlements
+macos-es-proof/verify-gate.sh
+macos-es-proof/verify-allowlist-gate.sh

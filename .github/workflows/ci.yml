@@ -104,6 +104,14 @@ jobs:
       - name: ES proof seal source checks
         run: bash macos-es-proof/prove_test.sh
 
+      # WO-140@v1: keep release upload refusal covered without release credentials.
+      - name: macOS release seal gate fixtures
+        run: bash macos-es-proof/release_gate_test.sh
+
+      # WO-140@v1: exercise boundary acknowledgement against isolated histories.
+      - name: Hardware seal acknowledgement fixtures
+        run: bash scripts/check-seal-ack_test.sh
+
       # WO-155@v1: `fault-injection` is debug-only (it lets a test disable a
       # reaping layer). A release build that enables it must NOT compile — assert
       # the build fails; a success here means the test switches shipped.
@@ -165,6 +173,21 @@ jobs:
 
       - name: Supervisor reaping tests (fault-injection, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_supervisor --features fault-injection -- --ignored --test-threads=1
+
+  # WO-140@v1: flag pull requests that cross the hardware-sealed boundary.
+  hardware-seal-ack:
+    name: hardware seal acknowledgement
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      # WO-140@v1: commit bodies and the complete base range are gate inputs.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # WO-140@v1: require the exact marker for paths in boundary-paths.txt.
+      - name: Check hardware seal acknowledgement
+        run: scripts/check-seal-ack.sh origin/${{ github.base_ref }} HEAD
 
   supply-chain:
     name: supply-chain (cargo-deny)

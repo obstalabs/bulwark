@@ -31,6 +31,66 @@
 # refuses otherwise (then rebuild with macos-es-proof/build-gate-bundle.sh).
 set -euo pipefail
 
+# WO-140@v1: read one exact identity field from a hardware-seal receipt.
+release_receipt_field() {
+  local receipt="$1" field="$2"
+  awk -v field="$field" '
+    index($0, field ":") == 1 {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      print
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' "$receipt"
+}
+
+# WO-140@v1: refuse release upload unless both seals name this source and binary.
+release_gate() {
+  local seal_dir="$1" expected_sha="$2" binary="$3" expected_hash
+  local receipt verdict receipt_sha receipt_hash
+  expected_hash=$(shasum -a 256 "$binary" | awk '{print $1}') || {
+    echo "!! release seal check failed: cannot hash binary $binary" >&2
+    return 1
+  }
+  for receipt in "$seal_dir/gate-receipt.txt" "$seal_dir/allowlist-gate-receipt.txt"; do
+    if [ ! -f "$receipt" ]; then
+      echo "!! release seal check failed: missing receipt $receipt" >&2
+      return 1
+    fi
+    verdict=$(release_receipt_field "$receipt" verdict) || {
+      echo "!! release seal check failed: verdict missing from $receipt" >&2
+      return 1
+    }
+    case "$verdict" in
+      SEALED*) ;;
+      *)
+        echo "!! release seal check failed: $receipt is not SEALED" >&2
+        return 1
+        ;;
+    esac
+    receipt_sha=$(release_receipt_field "$receipt" head_sha) || {
+      echo "!! release seal check failed: head_sha missing from $receipt" >&2
+      return 1
+    }
+    if [ "$receipt_sha" != "$expected_sha" ]; then
+      echo "!! release seal check failed: head_sha mismatch in $receipt" >&2
+      return 1
+    fi
+    receipt_hash=$(release_receipt_field "$receipt" bulwark_sha256) || {
+      echo "!! release seal check failed: bulwark_sha256 missing from $receipt" >&2
+      return 1
+    }
+    if [ "$receipt_hash" != "$expected_hash" ]; then
+      echo "!! release seal check failed: bulwark_sha256 mismatch in $receipt" >&2
+      return 1
+    fi
+  done
+}
+
+# WO-140@v1: let fixture tests source the pure upload gate without release inputs.
+if [ -n "${RELEASE_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
 # WO-95@v1: the release being packaged; required so a run never guesses it.
 VERSION="${VERSION:?set VERSION to the tagged release, e.g. 0.9.4}"
 # WO-95@v1: the release whose notarized gate app is reused when the gate sources are unchanged.
@@ -99,9 +159,14 @@ seal() {
   cp "$SRC_REPO/macos-es-proof/verify-gate.sh" "$SRC_REPO/macos-es-proof/verify-allowlist-gate.sh" "$s/"
   COPYFILE_DISABLE=1 cp -R "$W/$APP" "$s/"
   cp "$W/ci/bulwark-$VERSION-aarch64-apple-darwin/bulwark" "$s/bulwark"
+  # WO-140@v1: bind both receipts to the commit named by the release tag.
+  local source_sha
+  source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
+    || die "cannot resolve v$VERSION to a source commit"
+  [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die "v$VERSION source SHA is not 40 hex characters"
   echo "Run both, expect SEALED from each:"
-  echo "  sudo BULWARK=$s/bulwark $s/verify-gate.sh"
-  echo "  sudo BULWARK=$s/bulwark $s/verify-allowlist-gate.sh"
+  printf '  sudo BULWARK_SOURCE_SHA=%q BULWARK=%q %q\n' "$source_sha" "$s/bulwark" "$s/verify-gate.sh"
+  printf '  sudo BULWARK_SOURCE_SHA=%q BULWARK=%q %q\n' "$source_sha" "$s/bulwark" "$s/verify-allowlist-gate.sh"
 }
 
 # WO-95@v1: rebuild the darwin tarballs with the gate app, in the layout release.yml uses.
@@ -155,6 +220,14 @@ verify() {
 
 # WO-95@v1: replace the CI darwin assets and add the pkgs on the tagged release.
 upload() {
+  # WO-140@v1: the shared upload point fails before gh sees any unsealed asset.
+  local source_sha sealed_binary
+  source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
+    || die "cannot resolve v$VERSION to a source commit"
+  [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die "v$VERSION source SHA is not 40 hex characters"
+  sealed_binary="$W/ci/bulwark-$VERSION-aarch64-apple-darwin/bulwark"
+  release_gate "$W/seal" "$source_sha" "$sealed_binary" \
+    || die "macOS release upload refused: hardware seal evidence does not match v$VERSION"
   gh_ release upload "v$VERSION" --repo "$REPO" --clobber "$W"/out/*
   gh_ release view "v$VERSION" --repo "$REPO" --json assets -q '.assets[].name'
 }

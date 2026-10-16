@@ -104,6 +104,15 @@ export BULWARK_MACOS_ES_GATE="$PWD/bulwark_es_gate.app/Contents/MacOS/bulwark_es
 The edge bundle must carry `com.apple.developer.endpoint-security.client`, be
 signed, notarized, stapled, and launched from a terminal with Full Disk Access.
 
+<!-- WO-140@v1: make hardware-seal evidence a release requirement, not an optional ritual. -->
+A macOS release is publishable only when both hardware-seal receipts identify the
+exact Bulwark binary, source commit, and signed gate used, and the shared upload
+step refuses missing or mismatched evidence. A change matching
+[`scripts/boundary-paths.txt`](../scripts/boundary-paths.txt) also needs the exact
+commit-body line `Seal-required: acknowledged`. Any defect observed in use must
+produce a reproduction and a permanent automated or seal check; when it crossed
+the enforcement boundary, add its path to that list if it was missing.
+
 ## Preflight
 
 ```sh
