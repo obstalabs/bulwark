@@ -29,6 +29,7 @@ pub struct InodeKey {
 }
 
 impl InodeKey {
+    // WO-24@v1: derive the inode identity shared with the macOS gate.
     pub(crate) fn of(meta: &fs::Metadata) -> Self {
         InodeKey {
             dev: meta.dev(),
@@ -56,6 +57,7 @@ pub struct ProtectedOrigin {
 /// This closes the directory-expansion gap where `--protect ~/.gnupg` left
 /// `~/.gnupg/private-keys-v1.d/<key>` and post-launch keys readable.
 #[derive(Debug, Default, Clone)]
+// WO-69@v1: protect directory descendants, including files created after launch.
 pub struct ProtectedSet {
     inodes: HashSet<InodeKey>,
     dirs: HashSet<InodeKey>, // inodes of protected directories (for descendant matching)
@@ -86,6 +88,7 @@ impl ProtectedSet {
     /// the point. Recursion does NOT descend through symlinked directories, so a
     /// symlink inside a protected tree cannot redirect the walk into an unrelated
     /// hierarchy.
+    // WO-69@v1: recursively seed protected directories without following link trees.
     pub fn resolve(paths: &[std::path::PathBuf]) -> Result<Self> {
         let mut b = Build::default();
         for p in paths {
@@ -153,6 +156,7 @@ impl ProtectedSet {
     /// protected directory; this exact-inode check is retained for callers that
     /// already hold the identity (e.g. macOS ES seeding) and as the snapshot
     /// probe in tests; the Linux gate now decides via `protects`.
+    // WO-69@v1: retain exact launch-snapshot membership for inode-based callers.
     #[allow(dead_code)]
     pub fn contains(&self, key: &InodeKey) -> bool {
         self.inodes.contains(key)
@@ -173,6 +177,7 @@ impl ProtectedSet {
     /// it stays denied, but a post-launch file linked out escapes. Creating that
     /// link requires write access to the protected directory, which the dropped,
     /// unprivileged agent typically lacks for a mode-700 credential store.
+    // WO-69@v1: include post-launch files through protected ancestor identities.
     pub fn protects(&self, key: &InodeKey, path: &str) -> bool {
         if self.inodes.contains(key) {
             return true;
@@ -222,6 +227,7 @@ impl ProtectedSet {
 /// Accumulator for resolving protected paths into the inode/dir snapshot,
 /// with bounded recursion through protected directories.
 #[derive(Default)]
+// WO-69@v1: build both exact-inode and protected-directory snapshots.
 struct Build {
     inodes: HashSet<InodeKey>,
     dirs: HashSet<InodeKey>,
@@ -229,10 +235,12 @@ struct Build {
     capped: bool,
 }
 
+// WO-69@v1: bound recursive snapshot construction while retaining directory coverage.
 impl Build {
     /// Record `path` (resolved metadata `meta`) and, if it is a directory,
     /// recurse into its real subdirectories. `depth` is the current recursion
     /// depth from the top-level protected path.
+    // WO-69@v1: snapshot real descendants without adopting symlinked directory trees.
     fn add(&mut self, path: &Path, meta: &fs::Metadata, depth: usize) {
         let key = InodeKey::of(meta);
         if self.inodes.insert(key) {
@@ -287,6 +295,7 @@ impl Build {
         }
     }
 
+    // WO-69@v1: disclose when bounded snapshotting falls back to directory descent.
     fn warn_if_capped(&self) {
         if self.capped {
             eprintln!(
@@ -297,6 +306,7 @@ impl Build {
         }
     }
 
+    // WO-69@v1: preserve both exact and ancestor identities in the resolved set.
     fn into_set(self) -> ProtectedSet {
         ProtectedSet {
             inodes: self.inodes,
@@ -307,6 +317,7 @@ impl Build {
 }
 
 #[cfg(test)]
+// WO-69@v1: pin recursive and post-launch directory protection semantics.
 mod tests {
     use super::*;
 
@@ -319,10 +330,12 @@ mod tests {
         crate::test_scratch_dir(&format!("protect-{tag}"))
     }
 
+    // WO-69@v1: identify fixture files exactly as the production resolver does.
     fn key_of(p: &Path) -> InodeKey {
         InodeKey::of(&fs::metadata(p).unwrap())
     }
 
+    // WO-69@v1: provide canonical path evidence to the descendant check.
     fn s(p: &Path) -> String {
         p.to_string_lossy().into_owned()
     }
@@ -334,6 +347,7 @@ mod tests {
     /// then a key written to a subdir). Reverting `protects` to `contains` makes
     /// this red.
     #[test]
+    // WO-69@v1: prove files created after the snapshot remain protected.
     fn post_launch_file_under_protected_dir_is_protected() {
         let root = scratch("postlaunch");
         let sub = root.join("private-keys-v1.d");
@@ -359,6 +373,7 @@ mod tests {
     /// Deeply nested files present at launch are snapshotted by recursion (so
     /// they are protected by inode even if hardlinked out later).
     #[test]
+    // WO-69@v1: prove launch-time recursion records deeply nested files.
     fn nested_file_present_at_launch_is_snapshotted() {
         let root = scratch("nested");
         let deep = root.join("a/b/c");
@@ -378,6 +393,7 @@ mod tests {
     /// A sibling file outside the protected directory is not protected: descent
     /// only matches when an ancestor directory inode is protected.
     #[test]
+    // WO-69@v1: keep unrelated sibling trees outside the protected set.
     fn file_outside_protected_dir_is_not_protected() {
         let base = scratch("outside");
         let prot = base.join("protected");
@@ -482,6 +498,7 @@ mod tests {
     /// in the symlink's external target is not pulled into the protected dir set.
     #[cfg(unix)]
     #[test]
+    // WO-69@v1: prevent a symlinked directory from expanding the protected tree.
     fn recursion_does_not_descend_through_symlinked_dir() {
         let base = scratch("symlink");
         let prot = base.join("protected");

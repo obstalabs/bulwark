@@ -10,6 +10,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail=0
+# WO-104@v1: reject public-tree text that exposes private tooling or identifiers.
 flag() {
   # $1 = human label, $2 = extended-regex. Print matches, set fail.
   local label="$1" re="$2" hits

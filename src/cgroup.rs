@@ -33,6 +33,7 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// A dedicated cgroup-v2 scope owning the supervised tree for one run. Created
 /// at launch, removed on drop. Membership in this scope is the tree-membership
 /// signal: it survives re-parenting, which the ancestry walk does not.
+// WO-59@v1: make supervised-tree membership survive process reparenting.
 pub struct CgroupScope {
     /// Absolute path of the scope directory, e.g.
     /// `/sys/fs/cgroup/bulwark.run-12345`.
@@ -45,13 +46,15 @@ pub struct CgroupScope {
     procs_cstr: CString,
 }
 
+// WO-59@v1: keep cgroup attribution operations behind the run-scope handle.
 impl CgroupScope {
     /// Create a fresh scope for a run supervised by `supervisor_pid`. Returns
     /// `None` when cgroup-v2 is not usable; the caller then refuses to start (a
     /// dead gate must never leave a live unsupervised tree) rather than fall back
     /// to the ancestry walk.
+    // WO-59@v1: create a dedicated scope before the supervised process starts.
     pub fn create(supervisor_pid: i32) -> Option<Self> {
-        // WO-155@v1 (fault-injection): a test-only switch simulates a host with no
+        // WO-155@v1: fault-injection: a test-only switch simulates a host with no
         // writable cgroup-v2 scope (compiled in only under `fault-injection`).
         // It exercises the scope-less teardown and the default-mode refusal.
         #[cfg(feature = "fault-injection")]
@@ -117,6 +120,7 @@ impl CgroupScope {
 
     /// The `cgroup.procs` path to write the joining pid into. Used by the
     /// forked child before exec (raw libc, see `join_self`).
+    // WO-59@v1: expose the scope join path used before child exec.
     pub fn procs_path(&self) -> &CString {
         &self.procs_cstr
     }
@@ -124,6 +128,7 @@ impl CgroupScope {
     /// The scope's cgroup path relative to the cgroup root (e.g.
     /// `/bulwark.run-12345`). The off-band consent channel takes this so it can
     /// reject in-tree answerers by the same membership primitive as the gate.
+    // WO-71@v1: share the gate's membership boundary with off-band consent.
     pub fn rel(&self) -> &str {
         &self.rel
     }
@@ -144,7 +149,7 @@ impl CgroupScope {
     /// normal-exit with a lingering descendant, so a daemonized orphan never
     /// outlives the run.
     pub fn kill_all(&self) -> bool {
-        // WO-155@v1 (fault-injection): a test-only switch makes `cgroup.kill`
+        // WO-155@v1: fault-injection: a test-only switch makes `cgroup.kill`
         // fail, forcing the freeze + per-pid SIGKILL fallback (compiled in only
         // under `fault-injection`).
         #[cfg(feature = "fault-injection")]
@@ -178,6 +183,7 @@ impl CgroupScope {
 
     /// Freeze the scope (best-effort). Returns `false` when `cgroup.freeze` is
     /// absent (kernel < 5.2), so the caller knows the fallback is unavailable.
+    // WO-155@v1: freeze descendants before the per-pid reap fallback.
     pub fn freeze(&self) -> bool {
         use std::io::Write;
         let mut f = match std::fs::OpenOptions::new()
@@ -192,6 +198,7 @@ impl CgroupScope {
 
     /// The pids currently in the scope, from `cgroup.procs`. Empty when the scope
     /// has drained (or is unreadable — the caller treats that as drained).
+    // WO-155@v1: enumerate members for the frozen-scope reap fallback.
     pub fn procs(&self) -> Vec<i32> {
         let body = match fs::read_to_string(self.dir.join("cgroup.procs")) {
             Ok(s) => s,
@@ -216,6 +223,7 @@ impl CgroupScope {
     /// A re-parented orphan still reports our scope here; a process outside the
     /// tree reports a different path. Unreadable (process gone, or a race) →
     /// `false`, and the caller's ancestry-walk fallback decides.
+    // WO-59@v1: decide membership from the inherited cgroup identity.
     pub fn contains(&self, pid: i32) -> bool {
         pid_in_scope(pid, &self.rel)
     }
@@ -229,6 +237,7 @@ impl CgroupScope {
     /// outlives its parent keeps the scope populated, so the gate keeps
     /// enforcing until it too is gone. Unreadable → `true` (fail closed: never
     /// treat a read failure as "empty"; the gate keeps enforcing).
+    // WO-155@v1: keep enforcement alive until the scope is positively empty.
     pub fn is_populated(&self) -> bool {
         let events = match fs::read_to_string(self.dir.join("cgroup.events")) {
             Ok(s) => s,
@@ -238,7 +247,9 @@ impl CgroupScope {
     }
 }
 
+// WO-155@v1: remove an emptied run scope without weakening enforcement teardown.
 impl Drop for CgroupScope {
+    // WO-155@v1: retry removal only after the run scope has drained.
     fn drop(&mut self) {
         // The scope is empty once the supervised tree has drained (the gate does
         // not return until `is_populated()` is false). The kernel may take a
@@ -267,6 +278,7 @@ impl Drop for CgroupScope {
 ///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
+// WO-59@v1: join the child before exec so descendants inherit membership.
 pub unsafe fn join_self(procs_cstr: &CString) -> std::result::Result<(), i32> {
     // Format our own pid into a stack buffer without allocating. getpid() is
     // async-signal-safe; decimal-encode it manually.
@@ -302,6 +314,7 @@ pub unsafe fn join_self(procs_cstr: &CString) -> std::result::Result<(), i32> {
     Ok(())
 }
 
+// WO-59@v1: preserve the raw join failure across child-side libc calls.
 unsafe fn errno() -> i32 {
     *libc::__errno_location()
 }
@@ -313,6 +326,7 @@ unsafe fn errno() -> i32 {
 /// is from the supervisor's `/proc` view (the root cgroup namespace), so a peer
 /// that enters its own cgroup namespace cannot hide its true scope. Unreadable
 /// (process gone, or a race) → `false`.
+// WO-59@v1: recognize reparented descendants by their inherited scope.
 pub fn pid_in_scope(pid: i32, rel: &str) -> bool {
     let raw = match fs::read_to_string(format!("/proc/{pid}/cgroup")) {
         Ok(s) => s,
@@ -334,6 +348,7 @@ pub fn pid_in_scope(pid: i32, rel: &str) -> bool {
 /// otherwise a sub-cgroup move (combined with a double-fork to evade the ancestry
 /// fallback) escapes the gate. The `/` boundary is required so `/bulwark.run-1`
 /// does not spuriously match a sibling `/bulwark.run-12`.
+// WO-59@v1: include nested sub-cgroups without matching sibling name prefixes.
 fn proc_cgroup_is(body: &str, rel: &str) -> bool {
     for line in body.lines() {
         if let Some(path) = line.strip_prefix("0::") {
@@ -346,6 +361,7 @@ fn proc_cgroup_is(body: &str, rel: &str) -> bool {
 /// True if a `cgroup.events` body reports the scope still has a member process.
 /// A body whose `populated` key is missing is treated as STILL POPULATED (fail
 /// closed): the caller must not conclude "empty" from a malformed read.
+// WO-155@v1: require positive empty-scope evidence before teardown completes.
 fn events_populated(body: &str) -> bool {
     for line in body.lines() {
         if let Some(v) = line.strip_prefix("populated ") {
@@ -356,10 +372,12 @@ fn events_populated(body: &str) -> bool {
 }
 
 #[cfg(test)]
+// WO-59@v1: pin the cgroup membership boundary and its fail-safe parsing.
 mod tests {
     use super::*;
 
     #[test]
+    // WO-59@v1: accept only the unified scope and its descendants.
     fn membership_matches_unified_line_only() {
         let rel = "/bulwark.run-123";
         // Pure v2: single unified line.
@@ -393,6 +411,7 @@ mod tests {
     /// integration test. This is the standalone primitive the consent socket
     /// uses to refuse in-tree answerers by membership rather than ancestry.
     #[test]
+    // WO-71@v1: reject peers not proven to occupy the supervised scope.
     fn pid_in_scope_negative_controls() {
         assert!(!pid_in_scope(
             std::process::id() as i32,
@@ -402,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    // WO-155@v1: malformed status must never be mistaken for an empty scope.
     fn populated_key_parsed() {
         assert!(events_populated("populated 1\nfrozen 0\n"));
         assert!(!events_populated("populated 0\nfrozen 0\n"));

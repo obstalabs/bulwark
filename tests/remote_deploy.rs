@@ -38,6 +38,7 @@ const TARGET: &str = "nullbot@localhost";
 /// `--auto allow-session`: the remote read of a protected file is denied on first
 /// touch, the local relay auto-answers allow-session, and the second read passes
 /// from cache. No interactive tty needed.
+// WO-18@v1: the local relay answers a remote consent prompt without the agent seeing it.
 #[test]
 #[ignore = "needs ssh localhost + sudo; VM only"]
 fn auto_allow_session_lets_second_read_through() {
@@ -96,7 +97,7 @@ fn interactive_operator_grants_locally() {
         s = secret.display()
     );
 
-    // WO-110: interactive consent requires a worker distinct from the lane owner.
+    // WO-110@v4: interactive consent requires a worker distinct from the lane owner.
     let mut child = Command::new(bin())
         .args([
             "ssh",
@@ -127,7 +128,7 @@ fn interactive_operator_grants_locally() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // WO-110: witness the requested worker drop alongside the existing consent proof.
+    // WO-110@v4: witness the requested worker drop alongside the existing consent proof.
     assert!(
         combined.contains("worker dropped to uid"),
         "interactive dispatch should report its worker drop; got:\n{combined}"
@@ -145,6 +146,7 @@ fn interactive_operator_grants_locally() {
 
 /// `--deploy dist`: fetch the matching release tarball, verify its sha256, and
 /// run it. Uses the real published v0.5.0 dist release for this host's arch.
+// WO-18@v1: auto-deploy fetches a checksum-verified release when the remote has no gate.
 #[test]
 #[ignore = "needs ssh localhost + sudo + network; VM only"]
 fn deploy_dist_fetches_and_runs() {
@@ -179,7 +181,7 @@ fn deploy_dist_fetches_and_runs() {
         combined.contains("fetching bulwark") || combined.contains("from dist"),
         "dist deploy should announce a fetch; got:\n{combined}"
     );
-    // WO-145@v7: the launcher must exit successfully (the gate ran to completion),
+    // WO-145@v2: the launcher must exit successfully (the gate ran to completion),
     // and the denial must be the gate's actual deny line attributing the open to
     // the command — not a bare "deny" substring (which the word "deny" in
     // "--auto deny" or usage text would satisfy vacuously).
@@ -433,7 +435,7 @@ fn deploy_never_without_binary_errors_clearly() {
     let secret = dir.join("secret.env");
     fs::write(&secret, "x\n").unwrap();
 
-    // WO-147@v2: the "no bulwark" error is the ONLY thing this test
+    // WO-147@v1: the "no bulwark" error is the ONLY thing this test
     // asserts, so it must not report ok when the remote HAS bulwark and the error
     // path is never exercised (a vacuous pass on a product failure is a bug, not a
     // pass). Fail the precondition loudly instead of an eprintln + early return.
@@ -451,7 +453,7 @@ fn deploy_never_without_binary_errors_clearly() {
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)
-        .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110: isolate deployment diagnostics.
+        .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110@v4: isolate deployment diagnostics.
         .args(["--", "true"])
         .output()
         .expect("spawn");

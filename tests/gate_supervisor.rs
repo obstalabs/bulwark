@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// WO-154@v1: run the real gate binary for permission-loop tests.
+// WO-155@v1: run the real supervisor for teardown and reaping tests.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
@@ -17,6 +19,7 @@ fn bin() -> PathBuf {
 /// process), bounded so a blocked open cannot hang the test thread — the
 /// stalled gate is recovered by the harness, releasing the open. Returns the
 /// elapsed milliseconds (capped at the budget).
+// WO-154@v1: bound an unrelated open while the gate handles slow work.
 fn probe_open_ms(path: &Path) -> u128 {
     let t = Instant::now();
     let mut child = Command::new("sh")
@@ -125,11 +128,13 @@ fn pending_consent_does_not_delay_outside_opens() {
     let _ = gate.wait();
 }
 
-/// WO-147/154@v1: the receipts FILE must never wait on stderr. Two bounded
+/// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded
 /// queues/writers drain independently: with stderr stalled on a never-read pipe,
 /// the file still receives every one of the 6000 receipts (its own queue never
 /// drops), and the per-sink summary balances exactly — `submitted == written +
 /// dropped` holds for each sink, so a lost line is never silent.
+// WO-154@v1: prove terminal backpressure does not block gate decisions.
+// WO-155@v1: prove a stalled terminal cannot starve file receipts.
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_stalled_stderr_never_costs_the_receipts_file_a_line() {
@@ -262,6 +267,7 @@ fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
 }
 
 /// Wait until `path` exists (an agent wrote its ready marker), bounded.
+// WO-155@v1: prove the supervised process reached the intended test phase.
 fn wait_for_path(path: &Path, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     while !path.exists() {
@@ -274,6 +280,7 @@ fn wait_for_path(path: &Path, budget: Duration) -> bool {
 }
 
 /// The number of open file descriptors the gate process holds (its `/proc/N/fd`).
+// WO-154@v1: bound descriptor retention while consent work is queued.
 fn fd_count(pid: i32) -> usize {
     match std::fs::read_dir(format!("/proc/{pid}/fd")) {
         Ok(d) => d.count(),
@@ -282,6 +289,8 @@ fn fd_count(pid: i32) -> usize {
 }
 
 /// Parse the integer value of the first `"key":N` pair in a JSON fragment.
+// WO-154@v1: read per-sink accounting from the final receipt record.
+// WO-155@v1: verify submitted output is written or counted as dropped.
 fn field_num(s: &str, key: &str) -> u64 {
     let needle = format!("\"{key}\":");
     let at = s
@@ -300,6 +309,7 @@ fn field_num(s: &str, key: &str) -> u64 {
 /// Scoped by `PPid == supervisor_pid` so a shared runner's unrelated gates are
 /// never signaled. Recorded BEFORE the supervisor is killed (after that the
 /// watcher is reparented to pid 1 and no longer enumerates this way).
+// WO-155@v1: discover only the crash watcher owned by this supervisor.
 #[cfg(feature = "fault-injection")]
 fn watcher_pids_of(supervisor_pid: i32) -> Vec<i32> {
     let mut out = Vec::new();
@@ -323,6 +333,7 @@ fn watcher_pids_of(supervisor_pid: i32) -> Vec<i32> {
 }
 
 /// Read one whitespace-split field value from `/proc/<pid>/status`.
+// WO-155@v1: identify a watcher by its original supervisor parent.
 #[cfg(feature = "fault-injection")]
 fn proc_field(pid: i32, field: &str) -> Option<String> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
@@ -332,6 +343,7 @@ fn proc_field(pid: i32, field: &str) -> Option<String> {
 }
 
 /// The process name from `/proc/<pid>/comm`.
+// WO-155@v1: distinguish the crash watcher from unrelated child processes.
 #[cfg(feature = "fault-injection")]
 fn proc_comm(pid: i32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -355,6 +367,7 @@ fn proc_comm(pid: i32) -> Option<String> {
 /// aborts the process, so the suite never continues racing a possibly-held
 /// fanotify group. (Non-Linux:
 /// these root tests are always ignored, so the guard is inert.)
+// WO-155@v1: own every process and cgroup resource used by watcher tests.
 #[cfg(feature = "fault-injection")]
 struct RunGuard {
     gate: Option<std::process::Child>,
@@ -381,8 +394,10 @@ const WATCHER_KILL_BOUND: Duration = Duration::from_secs(2);
 #[cfg(feature = "fault-injection")]
 const GATE_REAP_BOUND: Duration = Duration::from_secs(5);
 
+// WO-155@v1: expose pidfd-based control of one supervised test run.
 #[cfg(feature = "fault-injection")]
 impl RunGuard {
+    // WO-155@v1: take ownership before a panic can leak the gate or scope.
     fn new(gate: std::process::Child, scope: PathBuf) -> Self {
         RunGuard {
             gate: Some(gate),
@@ -392,17 +407,20 @@ impl RunGuard {
     }
 
     /// Mutable gate access, for tests that kill, panic or wait it on purpose.
+    // WO-155@v1: keep destructive gate operations under guard ownership.
     fn gate(&mut self) -> Option<&mut std::process::Child> {
         self.gate.as_mut()
     }
 
     /// The run's cgroup scope path.
+    // WO-155@v1: expose the exact scope owned by this guarded run.
     fn scope(&self) -> &Path {
         &self.scope
     }
 
     /// Pin one pidfd per watcher pid (fail closed). Panics on an empty list BEFORE
     /// any destructive step, and on any pidfd_open failure.
+    // WO-155@v1: pin every watcher identity before sending any signal.
     fn add_watchers(&mut self, pids: &[i32]) {
         assert!(
             !pids.is_empty(),
@@ -429,6 +447,7 @@ impl RunGuard {
     }
 
     /// Send `sig` to every watcher via pidfd_send_signal, asserting each succeeds.
+    // WO-155@v1: signal watcher identities without pid-reuse races.
     fn signal_watchers(&self, sig: libc::c_int) {
         #[cfg(target_os = "linux")]
         for &(fd, _) in &self.watchers {
@@ -452,6 +471,7 @@ impl RunGuard {
 
     /// Block until every watcher has exited (pidfd poll, `POLLIN` = exited), by
     /// `deadline` — never by busy-checking /proc/<pid>.
+    // WO-155@v1: require bounded pidfd proof that every watcher exited.
     fn watchers_exited(&self, deadline: Instant) {
         #[cfg(target_os = "linux")]
         for &(fd, _) in &self.watchers {
@@ -490,8 +510,10 @@ impl RunGuard {
     }
 }
 
+// WO-155@v1: guarantee full teardown before a watcher test can continue.
 #[cfg(feature = "fault-injection")]
 impl Drop for RunGuard {
+    // WO-155@v1: kill, drain, close, and remove every owned resource before return.
     fn drop(&mut self) {
         // Teardown never aborts mid-sequence: every step runs (b → … → scope
         // rmdir) and each failure is pushed onto `failures` as one stderr line
@@ -998,12 +1020,13 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
     );
 }
 
-/// WO-147/155@v1 (fault-injection): in a DEFAULT build (feature OFF) the
+/// WO-155@v1: fault-injection: in a DEFAULT build (feature OFF) the
 /// test-only reaping switches are not compiled in, so setting BOTH
 /// `BULWARK_TEST_NO_CGROUP` and `BULWARK_TEST_NO_PDEATHSIG` must be ignored and
 /// the agent must still die with the gate. Compiled only when the feature is
 /// absent, so it doubles as the "release build cannot be weakened by an env var"
 /// check.
+// WO-155@v1: prove production builds ignore test-only reaping switches.
 #[test]
 #[cfg(not(feature = "fault-injection"))]
 #[ignore = "requires Linux + root"]
@@ -1760,9 +1783,10 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
     assert!(!leak.exists(), "no protected read may have succeeded");
 }
 
-/// WO-155@v1 (P3): a SIGTERM-cooperative child (a TERM trap that writes a marker
+/// WO-155@v1: a SIGTERM-cooperative child (a TERM trap that writes a marker
 /// and exits) must observe the forwarded SIGTERM and exit BEFORE the reap
 /// escalates to SIGKILL — the marker proves the child got SIGTERM, not SIGKILL.
+// WO-155@v1: give cooperative children a bounded graceful exit before reaping.
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
@@ -1900,12 +1924,13 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// WO-155@v1 (P2): on a successful cgroup.kill the watcher must NOT exit until it
+/// WO-155@v1: on a successful cgroup.kill the watcher must NOT exit until it
 /// can positively confirm the scope is empty. With the cgroup.events reads failing
 /// indefinitely (injected), a hard SIGKILL of the supervisor must leave the watcher
 /// ALIVE after 2 s — it cannot prove empty, so it keeps holding the fanotify fd and
 /// the grandchild's protected open never returns success. Exercises the
 /// kill-success path's positive-proof rule (not the live-supervisor loop).
+// WO-155@v1: keep the watcher alive until cgroup emptiness is proven.
 #[test]
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
@@ -1989,10 +2014,11 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
     // The guard reaps the still-alive watcher on drop (also on an assertion failure).
 }
 
-/// WO-155@v1 (P2): on a successful cgroup.kill the watcher polls cgroup.events for
+/// WO-155@v1: on a successful cgroup.kill the watcher polls cgroup.events for
 /// positive proof. With the events forced to report `populated 1` for N reads
 /// (injected), the watcher must STAY ALIVE during those reads and exit only once a
 /// later read reports `populated 0`. Exercises the kill-success polling rule.
+// WO-155@v1: require positive empty-scope evidence before watcher exit.
 #[test]
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
@@ -2056,12 +2082,13 @@ fn the_watcher_stays_alive_while_events_report_populated() {
     guard.watchers_exited(deadline);
 }
 
-/// WO-155@v1 (P1): a SUPERVISOR PANIC must not release the watcher — a
+/// WO-155@v1: a SUPERVISOR PANIC must not release the watcher — a
 /// panic-unwind drop of the guard closes the pipe, so the watcher REAPS the tree
 /// rather than exiting unwatched. The fault-injection switch arms a SIGUSR2
 /// handler; the test signals the supervisor once the grandchild is live. The
 /// grandchild must die within the watcher bound, no protected read may complete,
 /// and the watcher must exit.
+// WO-155@v1: retain crash reaping when supervisor control unwinds unexpectedly.
 #[test]
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
@@ -2146,10 +2173,12 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
     guard.watchers_exited(watcher_deadline);
 }
 
-/// WO-155@v1 (P2): a file writer blocked indefinitely (fault-injection) AND a
+/// WO-155@v1: a file writer blocked indefinitely (fault-injection) AND a
 /// stderr pipe nobody drains must not delay the gate's exit — Drop enqueues the
 /// summary, waits only a bounded time, and returns regardless, so the gate
 /// finishes within the bound + 1 s and its integrity state is clean.
+// WO-155@v1: bound gate exit when both receipt sinks are blocked.
+// WO-160@v1: measure the exit bound only after supervised work completes.
 #[test]
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]

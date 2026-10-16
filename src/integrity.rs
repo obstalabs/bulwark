@@ -58,7 +58,7 @@ pub struct ObjId {
     pub generation: Option<u64>,
 }
 
-/// WO-130@v2: the generation of the object at `path`, through the same
+/// WO-130@v1: the generation of the object at `path`, through the same
 /// `FS_IOC_GETVERSION` read the allow-list snapshot uses. The path is opened
 /// read-only and FOLLOWS a top-level symlink to its target, so it matches
 /// `ProtectedSet::resolve` (which resolves via `fs::metadata`, i.e. follows).
@@ -91,6 +91,7 @@ pub fn generation_of(path: &std::path::Path) -> Option<u64> {
 // it, so a Bulwark.toml appearing beside bulwark.toml is a change, not a new
 // project), and a directory with no file still gets a record so a file created
 // there later is a change too.
+// WO-117@v1: key policy history by the file or discovery directory used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySource {
     /// `--policy <FILE>`.
@@ -99,10 +100,12 @@ pub enum PolicySource {
     Discovered { dir: PathBuf, file: Option<PathBuf> },
 }
 
+// WO-117@v1: derive stable policy keys and audit labels from one source.
 impl PolicySource {
     /// The history key. Canonical so symlinks and `./` spellings collapse.
     // WO-117 (R2): fail closed. A key that cannot be resolved would either
     // invent a fresh baseline or collide with another; refuse the run instead.
+    // WO-117@v1: refuse policy identities that cannot be canonicalized.
     pub fn key(&self) -> Result<String> {
         let target = match self {
             PolicySource::Explicit(path) => path.as_path(),
@@ -118,6 +121,7 @@ impl PolicySource {
     }
 
     /// The file whose bytes the run enforces, if any.
+    // WO-117@v1: identify the exact policy file backing this run.
     pub fn path(&self) -> Option<&Path> {
         match self {
             PolicySource::Explicit(path) => Some(path.as_path()),
@@ -126,6 +130,7 @@ impl PolicySource {
     }
 
     /// Audit-safe description of what was digested.
+    // WO-117@v1: label policy evidence without exposing policy contents.
     pub fn label(&self) -> String {
         match self.path() {
             Some(path) => format!("file:{}", path.display()),
@@ -136,6 +141,7 @@ impl PolicySource {
 
 // WO-117: one entry of the keyed policy history. Only `digest` is compared;
 // `dev`/`ino` are recorded for the audit line because editors rename-replace.
+// WO-117@v1: persist the keyed policy digest and audit identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyRecord {
     pub key: String,
@@ -151,11 +157,13 @@ pub struct PolicyRecord {
 // a real file digest is 64 hex characters and can never equal it.
 pub const BUILTIN_POLICY_DIGEST: &str = "builtin";
 
+// WO-117@v1: construct policy records from enforced bytes or the built-in marker.
 impl PolicyRecord {
     /// Record a file-backed policy from the handle it was read through: the
     /// identity comes from that handle's metadata and the digest from the bytes
     /// read from it, so the record describes exactly the bytes the run parsed.
     // WO-117 (R1): no second stat or read of the path, and no identity fallback.
+    // WO-117@v1: bind the policy digest and identity to one open handle.
     pub fn from_file(
         source: &PolicySource,
         meta: &std::fs::Metadata,
@@ -175,6 +183,7 @@ impl PolicyRecord {
     /// profile ships inside the binary and is not agent-writable, so there is
     /// nothing to digest; the marker only makes a later file a change.
     // WO-117 (R3): fixed marker; 0:0 identity is meaningful only here.
+    // WO-117@v1: baseline discovery directories that use the built-in policy.
     pub fn builtin(source: &PolicySource) -> Result<Self> {
         Ok(PolicyRecord {
             key: source.key()?,
@@ -197,6 +206,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// The integrity context of the run being started: the policy this run loaded
 /// (if any file-backed source was resolved) and the identity of every protected
 /// object resolved at launch.
+// WO-117@v1: evaluate policy and protected-object state as one run context.
 #[derive(Debug, Clone)]
 pub struct RunContext {
     pub policy: Option<PolicyRecord>,
@@ -232,6 +242,8 @@ pub enum TaintReason {
 
 impl TaintReason {
     /// One-line, audit-safe description (no file content, only identity).
+    // WO-117@v1: describe policy digest drift without exposing policy bytes.
+    // WO-130@v1: include inode generation when object identity changes.
     pub fn describe(&self) -> String {
         match self {
             TaintReason::UncleanRestart => "unclean restart (no clean-shutdown marker)".to_string(),
@@ -479,6 +491,7 @@ impl Store {
 mod tests {
     use super::*;
 
+    // WO-130@v1: build object identities without a reported inode generation.
     fn obj(path: &str, dev: u64, ino: u64) -> ObjId {
         ObjId {
             path: path.to_string(),
@@ -519,6 +532,7 @@ mod tests {
         }
     }
 
+    // WO-117@v1: build a clean keyed-policy baseline for integrity tests.
     fn clean_prior(tag: u64, objects: Vec<ObjId>) -> State {
         State {
             generation: 1,
@@ -546,6 +560,7 @@ mod tests {
 
     // WO-117 (R1): write `bytes` to the source's file and record it the way the
     // gate does: identity and bytes from one open handle.
+    // WO-117@v1: build test records from the same handle that supplies policy bytes.
     fn file_record(source: &PolicySource, bytes: &[u8]) -> PolicyRecord {
         use std::io::Read;
         let path = source.path().expect("file-backed source");
@@ -590,6 +605,7 @@ mod tests {
         );
     }
 
+    // WO-130@v1: treat a changed inode number as protected-object drift.
     #[test]
     fn changed_inode_is_object_drift() {
         let prior = clean_prior(1, vec![obj("/s", 1, 10)]);
@@ -825,6 +841,7 @@ mod tests {
 
     // WO-117 (a): a --protect-only run must not erase the baseline a later
     // policy run at the same key is compared against.
+    // WO-117@v1: retain keyed policy history across protect-only runs.
     #[test]
     fn protect_only_run_keeps_policy_baseline() {
         let (dir, path) = scratch_state("wo117a");
@@ -846,6 +863,7 @@ mod tests {
 
     // WO-117 (b): the state file is host-global; two projects with unchanged
     // policies must be able to alternate without ever tainting.
+    // WO-117@v1: preserve independent policy baselines for alternating projects.
     #[test]
     fn alternating_unchanged_projects_stay_clean() {
         let (dir, path) = scratch_state("wo117b");
@@ -869,6 +887,7 @@ mod tests {
 
     // WO-117 (c): discovery is keyed by the directory searched, so a
     // Bulwark.toml appearing beside bulwark.toml compares against one baseline.
+    // WO-117@v1: key discovered policy names by their shared directory.
     #[test]
     fn discovery_key_is_the_directory_not_the_file_name() {
         let (dir, _) = scratch_state("wo117c");
@@ -900,6 +919,7 @@ mod tests {
 
     // WO-117 (d): a directory with no policy file records the built-in marker,
     // so a file created there later is a change, not a first sighting.
+    // WO-117@v1: detect a policy file appearing after a built-in baseline.
     #[test]
     fn file_appearing_after_builtin_baseline_taints() {
         let (dir, path) = scratch_state("wo117d");
@@ -925,6 +945,7 @@ mod tests {
 
     // WO-117 (R3): the no-file marker is a fixed word, never a hash, so a
     // bulwark upgrade that changes the default profile taints nothing.
+    // WO-117@v1: keep the built-in baseline stable across binary upgrades.
     #[test]
     fn builtin_record_digest_is_marker() {
         let (dir, _) = scratch_state("wo117r3");
@@ -948,6 +969,7 @@ mod tests {
 
     // WO-117 (R2): a file-backed source whose identity cannot be resolved is an
     // error naming the path, never a record with a made-up key or 0:0 identity.
+    // WO-117@v1: refuse policy sources whose stable identity cannot be resolved.
     #[test]
     fn unresolvable_policy_source_is_an_error() {
         let (dir, _) = scratch_state("wo117r2");
@@ -967,6 +989,7 @@ mod tests {
 
     // WO-117 (R1): the record describes the bytes read from the open handle,
     // and the identity comes from that same handle.
+    // WO-117@v1: verify policy bytes and identity come from one handle.
     #[test]
     fn file_record_digest_matches_bytes_read() {
         use std::io::Read;
@@ -990,6 +1013,7 @@ mod tests {
 
     // WO-117 (e): editors rename-replace, so only the digest is compared; a
     // byte-identical rewrite with a new inode is clean.
+    // WO-117@v1: compare policy content rather than rename-replaced inode identity.
     #[test]
     fn byte_identical_rewrite_is_clean() {
         let (dir, _) = scratch_state("wo117e");
@@ -1014,6 +1038,7 @@ mod tests {
 
     // WO-117 (f): a key never seen before has no baseline; it is recorded, not
     // tainted (mirrors new_protected_path_alone_is_not_drift).
+    // WO-117@v1: record a new policy key without treating it as drift.
     #[test]
     fn first_observation_of_a_key_is_clean() {
         let (dir, path) = scratch_state("wo117f");
@@ -1038,6 +1063,7 @@ mod tests {
 
     // WO-117 (g): a pre-digest state file still loads (its stale policy_epoch
     // key is ignored) and its sticky taint still outranks everything.
+    // WO-117@v1: preserve sticky taint while loading legacy state.
     #[test]
     fn legacy_state_file_keeps_sticky_taint() {
         let (dir, path) = scratch_state("wo117g");
@@ -1085,7 +1111,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // WO-130@v2: generation_of must report the generation of the object ACTUALLY
+    // WO-130@v1: generation_of must report the generation of the object ACTUALLY
     // protected. ProtectedSet resolves with fs::metadata, which follows a
     // top-level symlink to its target; generation_of must do the same, or a
     // symlinked protect entry records None and drift collapses to (dev, ino) —

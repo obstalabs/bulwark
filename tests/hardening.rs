@@ -30,6 +30,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-12@v1: a bind-mounted alias of a protected inode is gated like the original path.
 #[test]
 #[ignore = "requires Linux + root for fanotify + mount"]
 fn bind_mount_alias_is_gated() {
@@ -67,6 +68,7 @@ fn bind_mount_alias_is_gated() {
     );
 }
 
+// WO-12@v1: a graceful supervisor stop denies a held read instead of releasing it.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn graceful_sigterm_denies_held_read() {
@@ -115,6 +117,7 @@ fn graceful_sigterm_denies_held_read() {
     );
 }
 
+// WO-12@v1: the filesystem-wide mark still denies the protected file and allows its neighbour.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn defended_vectors_still_pass_after_filesystem_mark() {
@@ -251,6 +254,7 @@ fn worker_uid_agent_cannot_kill_the_root_supervisor() {
 /// This test forces the failure mode by shrinking `fs.fanotify.max_queued_events`
 /// to a tiny value, then floods opens while hammering the protected secret. With the
 /// fix the secret is never read; without it, it leaks thousands of times.
+// WO-66@v1: a permission-queue overflow must fail closed, never release the protected read.
 #[test]
 #[ignore = "requires Linux + root for fanotify + sysctl write"]
 fn queue_overflow_fails_closed() {
@@ -336,6 +340,7 @@ fn queue_overflow_fails_closed() {
 /// Plants a setuid-root helper on a suid-honoring filesystem (NOT /tmp, which is
 /// usually `nosuid`), runs the agent under the default drop, and asserts the helper
 /// runs as the dropped uid — i.e. the setuid bit was ignored.
+// WO-67@v1: the worker drop is irreversible; a setuid-root exec cannot regain root.
 #[test]
 #[ignore = "requires Linux + root + a suid-honoring fs (/usr/local)"]
 fn privilege_drop_is_irreversible_to_setuid_exec() {

@@ -1,4 +1,4 @@
-//! WO-110: exercise the real CLI's remote identity boundary without SSH or root.
+//! WO-110@v4: exercise the real CLI's remote identity boundary without SSH or root.
 //! The fixture runs the generated gate shell and creates real FIFOs, but replaces
 //! the privileged gate and transport. It does not prove kernel EACCES behavior.
 
@@ -14,14 +14,15 @@ const WORKER_UID: &str = "42002";
 const PICKED_UID: &str = "62002";
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
-// WO-110: keep each CLI's transport, identity replies and side effects isolated.
+// WO-110@v4: keep each CLI's transport, identity replies and side effects isolated.
 struct RemoteFixture {
     root: PathBuf,
     login_uid: String,
 }
 
+// WO-110@v4: centralize the isolated remote-consent CLI fixture lifecycle.
 impl RemoteFixture {
-    // WO-110: only the fixture SSH executable may receive the CLI's remote calls.
+    // WO-110@v4: only the fixture SSH executable may receive the CLI's remote calls.
     fn new() -> Self {
         let root = PathBuf::from(format!(
             "/tmp/bulwark-wo110-{}-{}",
@@ -31,7 +32,7 @@ impl RemoteFixture {
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("bin")).unwrap();
         fs::create_dir(root.join("home")).unwrap();
-        // WO-110: the remote owner deliberately differs from the local identity.
+        // WO-110@v4: the remote owner deliberately differs from the local identity.
         let login_uid = if unsafe { libc::geteuid() } == 42001 {
             "42003"
         } else {
@@ -132,13 +133,14 @@ printf '%s\n' fixture-agent-executed
         fixture
     }
 
+    // WO-110@v4: install only fixture executables inside the isolated transport path.
     fn script(&self, name: &str, contents: &str) {
         let path = self.root.join("bin").join(name);
         fs::write(&path, contents).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    // WO-110: invoke the actual built CLI; fixtures replace transport, not policy.
+    // WO-110@v4: invoke the actual built CLI; fixtures replace transport, not policy.
     fn run(&self, args: &[&str], overrides: &[(&str, &str)]) -> Output {
         let mut paths = vec![self.root.join("bin")];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -162,11 +164,12 @@ printf '%s\n' fixture-agent-executed
         cmd.output().expect("run real bulwark ssh")
     }
 
+    // WO-110@v4: read named fixture evidence for launch and cleanup assertions.
     fn contents(&self, name: &str) -> String {
         fs::read_to_string(self.root.join(name)).unwrap_or_default()
     }
 
-    // WO-110: refusal must prevent side effects, not merely print a warning.
+    // WO-110@v4: refusal must prevent side effects, not merely print a warning.
     fn assert_refused(&self, out: &Output, diagnostic: &str) {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "unexpected success: {stderr}");
@@ -180,7 +183,7 @@ printf '%s\n' fixture-agent-executed
         assert!(out.stdout.is_empty(), "refusal leaked agent output");
     }
 
-    // WO-110: accepted requests must reach the agent with the selected identity.
+    // WO-110@v4: accepted requests must reach the agent with the selected identity.
     fn assert_launched(&self, out: &Output, worker: &str, hardened: bool) {
         assert!(
             out.status.success(),
@@ -208,13 +211,15 @@ printf '%s\n' fixture-agent-executed
     }
 }
 
+// WO-110@v4: remove every per-test remote-consent fixture artifact.
 impl Drop for RemoteFixture {
+    // WO-110@v4: make cleanup unconditional on assertion success.
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
 
-// WO-110: an implicit sudo-origin worker must never enter interactive consent.
+// WO-110@v4: an implicit sudo-origin worker must never enter interactive consent.
 #[test]
 fn refuses_missing_worker_before_launch() {
     let f = RemoteFixture::new();
@@ -224,7 +229,7 @@ fn refuses_missing_worker_before_launch() {
     assert!(!f.root.join("ssh.calls").exists());
 }
 
-// WO-110: explicit root remains able to answer every lane and must be refused.
+// WO-110@v4: explicit root remains able to answer every lane and must be refused.
 #[test]
 fn refuses_explicit_root() {
     let f = RemoteFixture::new();
@@ -232,7 +237,7 @@ fn refuses_explicit_root() {
     f.assert_refused(&out, "--worker-uid");
 }
 
-// WO-110: compare against the remote login, not the local launching user.
+// WO-110@v4: compare against the remote login, not the local launching user.
 #[test]
 fn refuses_remote_login_uid() {
     let f = RemoteFixture::new();
@@ -247,7 +252,7 @@ fn refuses_remote_login_uid() {
     assert_eq!(f.contents("queries"), "identity\n");
 }
 
-// WO-110: a valid distinct identity must survive the full CLI dispatch unchanged.
+// WO-110@v4: a valid distinct identity must survive the full CLI dispatch unchanged.
 #[test]
 fn distinct_worker_launches_and_cleans_lanes() {
     let f = RemoteFixture::new();
@@ -261,7 +266,7 @@ fn distinct_worker_launches_and_cleans_lanes() {
         .contains(&format!("worker dropped to uid {WORKER_UID}")));
 }
 
-// WO-110: a root SSH login may launch only a separately selected non-root worker.
+// WO-110@v4: a root SSH login may launch only a separately selected non-root worker.
 #[test]
 fn root_login_can_launch_distinct_worker() {
     let f = RemoteFixture::new();
@@ -273,7 +278,7 @@ fn root_login_can_launch_distinct_worker() {
     assert_eq!(f.contents("queries"), "identity\n");
 }
 
-// WO-110: automatic selection is explicit opt-in, still checked against the owner.
+// WO-110@v4: automatic selection is explicit opt-in, still checked against the owner.
 #[test]
 fn auto_selected_worker_launches_unchanged() {
     let f = RemoteFixture::new();
@@ -284,7 +289,7 @@ fn auto_selected_worker_launches_unchanged() {
         .contains(&format!("worker dropped to uid {PICKED_UID}")));
 }
 
-// WO-110: the picker is not authority to reuse the lane owner's uid.
+// WO-110@v4: the picker is not authority to reuse the lane owner's uid.
 #[test]
 fn refuses_auto_selected_login_uid() {
     let f = RemoteFixture::new();
@@ -296,7 +301,7 @@ fn refuses_auto_selected_login_uid() {
     assert_eq!(f.contents("queries"), "identity\npicker\n");
 }
 
-// WO-110: even an unexpected root result from the picker must fail closed.
+// WO-110@v4: even an unexpected root result from the picker must fail closed.
 #[test]
 fn refuses_auto_selected_root() {
     let f = RemoteFixture::new();
@@ -307,7 +312,7 @@ fn refuses_auto_selected_root() {
     f.assert_refused(&out, "--worker-uid");
 }
 
-// WO-110: stdout from a failed identity query is not trustworthy evidence.
+// WO-110@v4: stdout from a failed identity query is not trustworthy evidence.
 #[test]
 fn failed_identity_query_refuses_even_with_numeric_stdout() {
     let f = RemoteFixture::new();
@@ -319,7 +324,7 @@ fn failed_identity_query_refuses_even_with_numeric_stdout() {
     assert_eq!(f.contents("queries"), "identity\n");
 }
 
-// WO-110: successful transport without an identity cannot authorize a launch.
+// WO-110@v4: successful transport without an identity cannot authorize a launch.
 #[test]
 fn empty_identity_query_refuses() {
     let f = RemoteFixture::new();
@@ -330,7 +335,7 @@ fn empty_identity_query_refuses() {
     f.assert_refused(&out, "SSH login uid");
 }
 
-// WO-110: reject ambiguous, signed, nonnumeric and overflowing identity replies.
+// WO-110@v4: reject ambiguous, signed, nonnumeric and overflowing identity replies.
 #[test]
 fn malformed_identity_queries_refuse() {
     for uid in ["unknown", "42001\n42003\n", "+42001", "-1", "4294967296"] {
@@ -344,7 +349,7 @@ fn malformed_identity_queries_refuse() {
     }
 }
 
-// WO-110: automatic selection must not bypass a failed owner check.
+// WO-110@v4: automatic selection must not bypass a failed owner check.
 #[test]
 fn auto_worker_refuses_failed_identity_query_before_picker() {
     let f = RemoteFixture::new();
@@ -356,7 +361,7 @@ fn auto_worker_refuses_failed_identity_query_before_picker() {
     assert_eq!(f.contents("queries"), "identity\n");
 }
 
-// WO-110: an unresolved picker result must not fall back to root or the login.
+// WO-110@v4: an unresolved picker result must not fall back to root or the login.
 #[test]
 fn invalid_or_failed_auto_selection_refuses() {
     for (uid, status) in [("", "0"), ("unknown", "0"), (PICKED_UID, "73")] {
@@ -370,7 +375,7 @@ fn invalid_or_failed_auto_selection_refuses() {
     }
 }
 
-// WO-110: rejected consent must not place optional key material first.
+// WO-110@v4: rejected consent must not place optional key material first.
 #[test]
 fn unsafe_worker_refuses_before_key_handoff() {
     let f = RemoteFixture::new();
@@ -387,7 +392,7 @@ fn unsafe_worker_refuses_before_key_handoff() {
     f.assert_refused(&out, "SSH login uid");
 }
 
-// WO-114: --auto no longer keeps the no-worker path; the lane owner could write
+// WO-114@v2: --auto no longer keeps the no-worker path; the lane owner could write
 // its own allow verdict, so dispatch refuses before any remote call.
 #[test]
 fn auto_verdict_refuses_missing_worker_before_launch() {
@@ -400,7 +405,7 @@ fn auto_verdict_refuses_missing_worker_before_launch() {
     assert!(!f.root.join("ssh.calls").exists());
 }
 
-// WO-114: --auto with worker selection now checks the picked uid against the SSH
+// WO-114@v2: --auto with worker selection now checks the picked uid against the SSH
 // login uid like interactive consent; a failed identity query refuses first.
 #[test]
 fn auto_verdict_auto_worker_requires_identity_check() {
@@ -433,7 +438,7 @@ fn auto_verdict_auto_worker_requires_identity_check() {
     assert_eq!(f.contents("queries"), "identity\npicker\n");
 }
 
-// WO-110: hardened dispatch stays consent-free and never queries the login uid.
+// WO-110@v4: hardened dispatch stays consent-free and never queries the login uid.
 #[test]
 fn hardened_launch_remains_consent_free() {
     let f = RemoteFixture::new();
@@ -445,7 +450,7 @@ fn hardened_launch_remains_consent_free() {
     assert!(!f.root.join("queries").exists());
 }
 
-// WO-110: safe consent dispatch must preserve agent failure and lane cleanup.
+// WO-110@v4: safe consent dispatch must preserve agent failure and lane cleanup.
 #[test]
 fn distinct_worker_preserves_agent_exit_status_and_cleanup() {
     let f = RemoteFixture::new();

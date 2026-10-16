@@ -100,6 +100,7 @@ fn glob_match(pat: &[u8], text: &[u8]) -> bool {
 /// grant (Landlock `path_beneath`): segments are taken until the first one
 /// containing a wildcard. `/var/log/app/**` -> `/var/log/app`; `/proc/*/stat`
 /// -> `/proc`; `**/*.log` -> `/`. A wildcard-free glob is returned unchanged.
+// WO-73@v1: reduce supported grants to the directory Landlock can express.
 pub fn landlock_prefix(glob: &str) -> String {
     let mut prefix = String::new();
     for seg in glob.split('/') {
@@ -125,6 +126,7 @@ pub fn landlock_prefix(glob: &str) -> String {
 /// after `**` (`**/*.log`) — makes the path-based grant BROADER than the
 /// pattern. Used to refuse `--hardened` operator grants that would silently
 /// widen to a whole subtree the operator did not ask for.
+// WO-73@v1: reject glob shapes that a path-beneath grant would widen.
 pub fn is_landlock_faithful(glob: &str) -> bool {
     if !glob.contains('*') && !glob.contains('?') {
         return true;
@@ -139,6 +141,7 @@ pub fn is_landlock_faithful(glob: &str) -> bool {
 mod tests {
     use super::*;
 
+    // WO-73@v1: pin the concrete prefixes used for Landlock grants.
     #[test]
     fn landlock_prefix_strips_wildcards() {
         assert_eq!(landlock_prefix("/lib/**"), "/lib");
@@ -148,6 +151,7 @@ mod tests {
         assert_eq!(landlock_prefix("**/*secret*"), "/");
     }
 
+    // WO-73@v1: distinguish exact subtree grants from widening glob shapes.
     #[test]
     fn faithful_grants_are_concrete_or_trailing_doublestar() {
         // Faithful: the Landlock prefix equals the pattern's intent.

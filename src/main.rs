@@ -49,6 +49,7 @@ mod hardened;
 mod hardened;
 
 // cgroup-v2 membership attribution is a Linux-only fanotify-gate support module.
+// WO-59@v1: keep Linux process-tree attribution in a dedicated cgroup module.
 #[cfg(target_os = "linux")]
 mod cgroup;
 
@@ -363,7 +364,7 @@ enum Cmd {
     LandlockCheck,
 
     // WO-115: state the worker-uid requirement in the help text.
-    // WO-114: the requirement covers --auto; the sentence no longer exempts it.
+    // WO-114@v2: the requirement covers --auto; the sentence no longer exempts it.
     /// Run an agent on a REMOTE host under Bulwark enforcement, with consent
     /// routed back to the local operator. Enforcement runs on the remote
     /// kernel (SSH is only transport). A protected read is denied immediately
@@ -438,7 +439,7 @@ enum Cmd {
 
         // WO-49: worker privilege drop.
         // WO-115: consent needs a uid that cannot open the lanes.
-        // WO-114: --auto runs are held to the same rule.
+        // WO-114@v2: --auto runs are held to the same rule.
         /// drop the remote agent to this unprivileged uid. The remote gate
         /// stays root (it holds the fanotify fd), so the agent cannot `SIGKILL` it
         /// and force the kernel's fail-open-on-death residual. The account must
@@ -546,6 +547,7 @@ enum Cmd {
     },
 }
 
+// WO-85@v1: dispatch private memfd loader entrypoints before parsing public commands.
 fn main() -> Result<()> {
     let mut raw_args = std::env::args();
     let _program = raw_args.next();
@@ -729,7 +731,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// WO-147@v3: the root-owned runtime consent socket path, shared by the
+/// WO-147@v1: the root-owned runtime consent socket path, shared by the
 /// root gate default and the non-root client's preference check.
 fn runtime_consent_socket() -> PathBuf {
     if cfg!(target_os = "macos") {
@@ -744,6 +746,7 @@ fn runtime_consent_socket() -> PathBuf {
 /// REGARDLESS of `$XDG_RUNTIME_DIR`, so `ensure_root_parent` actually governs the
 /// root default. Non-root keeps `$XDG_RUNTIME_DIR/bulwark-consent.sock`, else
 /// `/tmp/bulwark-consent.sock`.
+// WO-147@v1: choose the root-owned runtime socket independently of user runtime state.
 fn default_consent_socket() -> PathBuf {
     if unsafe { libc::geteuid() } == 0 {
         return runtime_consent_socket();
@@ -756,7 +759,7 @@ fn default_consent_socket() -> PathBuf {
     PathBuf::from("/tmp/bulwark-consent.sock")
 }
 
-/// WO-147@v3: the `bulwark consent` client default. A non-root operator
+/// WO-147@v1: the `bulwark consent` client default. A non-root operator
 /// answering a root gate (`sudo bulwark run`) must reach the same root-owned
 /// runtime socket, so prefer it when its node exists; otherwise keep the
 /// per-user default.
@@ -771,6 +774,7 @@ fn client_consent_socket() -> PathBuf {
 }
 
 /// `bulwark consent` — operator side: answer one pending request.
+// WO-147@v1: connect the operator client to the hardened consent socket default.
 fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     let sock = socket.unwrap_or_else(client_consent_socket);
     let v = match verdict {
@@ -782,15 +786,17 @@ fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the user's home directory from `$HOME`. WO-145@v3 (G2): protect
+/// Resolve the user's home directory from `$HOME`. WO-145@v2: protect
 /// expansion no longer uses this (it uses the host home set); retained for any
 /// caller that wants one user's home.
+// WO-145@v2: isolate legacy single-home lookup from host-wide protect expansion.
 #[allow(dead_code)]
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
 }
 
-/// WO-145@v3 (G1): the enumerated homes owned by `uid`.
+/// WO-145@v2: the enumerated homes owned by `uid`.
+// WO-145@v2: require a non-root worker to own an enumerated host home.
 fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {
     use std::os::unix::fs::MetadataExt;
     homes
@@ -804,8 +810,9 @@ fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {
         .collect()
 }
 
-/// WO-145@v3 (G3): the enumerated home `path` was expanded from, if any — the
+/// WO-145@v2: the enumerated home `path` was expanded from, if any — the
 /// longest home that equals `path` or is a directory ancestor of it.
+// WO-145@v2: retain the source home for expanded-path diagnostics.
 fn origin_home<'a>(path: &str, homes: &'a [String]) -> Option<&'a str> {
     homes
         .iter()
@@ -814,17 +821,19 @@ fn origin_home<'a>(path: &str, homes: &'a [String]) -> Option<&'a str> {
         .map(|s| s.as_str())
 }
 
-/// WO-145@v3 (G3): the two stat errors that prove a protect path is absent
+/// WO-145@v2: the two stat errors that prove a protect path is absent
 /// (NotFound, and ENOTDIR when a component is a regular file) — the same rule
 /// the lenient resolver applies, so the pre-flight stat agrees with it.
+// WO-145@v2: distinguish absent paths from protection errors that must refuse launch.
 fn protect_stat_is_absent(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
 }
 
-/// WO-145@v3 (G3): the refusal message for an expanded protect path whose stat
+/// WO-145@v2: the refusal message for an expanded protect path whose stat
 /// failed with something other than "absent". Naming the origin home (and that
 /// it belongs to a different user) and pointing at absolute --protect turns a
 /// bare EACCES/EIO into a diagnosable failure.
+// WO-145@v2: explain which expanded home caused a fail-closed stat refusal.
 fn describe_g3_stat_error(path: &str, origin: &str, other: bool, err: &std::io::Error) -> String {
     let other_clause = if other {
         " (that home belongs to a different user)"
@@ -859,6 +868,7 @@ fn describe_g3_stat_error(path: &str, origin: &str, other: bool, err: &std::io::
 /// pre-squat the consent lanes. Reads the OS CSPRNG; on the (very unlikely)
 /// failure to read it, falls back to time+pid — degraded entropy, but the gate
 /// script's fail-closed `mkdir`/`mkfifo` remain the structural backstop.
+// WO-75@v1: make each remote consent directory impractical to predict and pre-squat.
 fn rand_token() -> String {
     let mut buf = [0u8; 16];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
@@ -873,6 +883,8 @@ fn rand_token() -> String {
     format!("{nanos:x}{:x}", std::process::id())
 }
 
+// WO-85@v1: compose streamed remote deployment into the gate bootstrap script.
+// WO-87@v1: remove both run and deployment directories on every script exit.
 #[allow(clippy::too_many_arguments)]
 fn build_gate_script(
     remote_dir: &str,
@@ -981,6 +993,8 @@ mkdir -p {dir}
     )
 }
 
+// WO-85@v1: run Landlock preflight through the selected streamed deployment.
+// WO-87@v1: clean a streamed deployment when preflight fails.
 fn build_hardened_preflight_script(
     remote_invocation: &str,
     deploy_prelude: Option<&str>,
@@ -1009,6 +1023,7 @@ trap cleanup_on_failure EXIT INT TERM HUP
     }
 }
 
+// WO-87@v1: collect remote artifacts that teardown must remove together.
 fn cleanup_targets(remote_dir: &str, deploy_cleanup_dir: Option<&str>) -> String {
     match deploy_cleanup_dir {
         Some(dir) => format!("{remote_dir} {dir}"),
@@ -1016,6 +1031,7 @@ fn cleanup_targets(remote_dir: &str, deploy_cleanup_dir: Option<&str>) -> String
     }
 }
 
+// WO-50@v1: place worker identity variables inside sudo's remote invocation.
 fn invocation_with_worker_env(remote_invocation: &str, env_prefix: &str) -> String {
     if env_prefix.is_empty() {
         return remote_invocation.to_string();
@@ -1029,6 +1045,7 @@ fn invocation_with_worker_env(remote_invocation: &str, env_prefix: &str) -> Stri
     format!("{env_prefix}{remote_invocation}")
 }
 
+// WO-85@v1: stream an optional deployment payload into the remote bootstrap.
 fn spawn_remote_script(
     target: &str,
     remote_script: &str,
@@ -1053,6 +1070,7 @@ fn spawn_remote_script(
         .with_context(|| format!("cannot ssh to {target}"))
 }
 
+// WO-85@v1: wait for a streamed remote bootstrap and preserve its exit status.
 fn run_remote_script_status(
     target: &str,
     remote_script: &str,
@@ -1098,8 +1116,8 @@ struct SshArgs<'a> {
     command: &'a [String],
 }
 
-// WO-110: a consent worker must not be root or own its consent FIFOs.
-// WO-114: this covers --auto too; the verdict lane accepts any well-formed allow
+// WO-110@v4: a consent worker must not be root or own its consent FIFOs.
+// WO-114@v2: this covers --auto too; the verdict lane accepts any well-formed allow
 // line, so a lane-owning agent could answer its own `--auto deny`.
 fn remote_consent_worker_uid(
     target: &str,
@@ -1190,8 +1208,8 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // the gate script's `mkdir` (no -p) + `mkfifo` (no `|| true`) fail closed if
     // the path is somehow occupied.
     let run_id = std::process::id();
-    // WO-110: refuse unsafe worker identities before any remote deployment.
-    // WO-114: --auto is no longer exempt; every consent dispatch runs the agent
+    // WO-110@v4: refuse unsafe worker identities before any remote deployment.
+    // WO-114@v2: --auto is no longer exempt; every consent dispatch runs the agent
     // as a uid that cannot open the lanes, so `--auto deny` is a real boundary.
     // WO-50: `--auto-worker-uid` resolves a fresh anonymous uid ON THE REMOTE
     // inside this check and flows it into the SAME path `--worker-uid` uses. No
@@ -1214,7 +1232,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     let prompt_lane = format!("{remote_dir}/prompts");
     let verdict_lane = format!("{remote_dir}/verdicts");
 
-    // WO-114: no second worker resolution here; the uid was settled above for
+    // WO-114@v2: no second worker resolution here; the uid was settled above for
     // every consent dispatch, before the remote deployment resolved.
     let protect_args = protect
         .iter()
@@ -1632,7 +1650,7 @@ fn remote_uid_pick_snippet(run_id: u32) -> String {
 
 /// WO-50: resolve a fresh anonymous worker uid on the remote host. Returns the
 /// picked numeric uid; creates no account (nothing to tear down).
-// WO-110: identity selection does not require deploying the gate first.
+// WO-110@v4: identity selection does not require deploying the gate first.
 fn pick_remote_worker_uid(target: &str, run_id: u32) -> Result<u32> {
     let out = run_remote_capture(target, &remote_uid_pick_snippet(run_id))
         .context("pick a free worker uid on the remote")?;
@@ -1662,6 +1680,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+// WO-85@v1: execute a streamed Linux payload directly from an anonymous memfd.
 #[cfg(target_os = "linux")]
 fn cmd_internal_memfd_exec(command: &[String]) -> Result<()> {
     use std::io::Write;
@@ -1710,6 +1729,7 @@ fn cmd_internal_memfd_exec(command: &[String]) -> Result<()> {
     Err(anyhow::anyhow!(std::io::Error::last_os_error())).context("fexecve memfd payload")
 }
 
+// WO-85@v1: refuse the Linux-only memfd loader on unsupported platforms.
 #[cfg(not(target_os = "linux"))]
 fn cmd_internal_memfd_exec(_command: &[String]) -> Result<()> {
     anyhow::bail!("internal memfd loader is only supported on Linux")
@@ -1719,6 +1739,7 @@ fn cmd_internal_memfd_exec(_command: &[String]) -> Result<()> {
 /// `command`. The Bulwark process is replaced by the agent, which now carries a
 /// kernel-enforced restriction for its whole life — crash-safe, no supervisor.
 /// Only returns on error (a successful `execvp` never returns).
+// WO-144@v1: drop to the resolved worker identity before hardened exec.
 fn run_hardened(
     allow_globs: &[String],
     command: &[String],
@@ -1897,6 +1918,7 @@ fn launch_policy_source(
     })
 }
 
+// WO-117@v1: enforce and digest one immutable snapshot of a launch policy.
 fn cmd_launch(
     agent: &str,
     policy_path: Option<&Path>,
@@ -1982,6 +2004,7 @@ fn cmd_launch_init(agent: &str, policy_path: &Path) -> Result<()> {
     Ok(())
 }
 
+// WO-141@v1: carry profile protect entries into the shared policy-resolution path.
 fn resolve_launch_plan(agent: &str, policy: &Policy) -> Result<LaunchPlan> {
     let profile = policy.agents.get(agent).ok_or_else(|| {
         anyhow::anyhow!("no agent configured for {agent}; run: bulwark launch --init {agent}")
@@ -2214,6 +2237,8 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
     Ok(())
 }
 
+// WO-73@v1: refuse hardened grants that Landlock would enforce more broadly.
+// WO-117@v1: enforce and measure the same file-backed policy snapshot.
 fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
@@ -2362,7 +2387,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 homes.len()
             );
         }
-        // WO-145@v3 (G1): when the agent will run as a KNOWN non-root uid, at
+        // WO-145@v2: when the agent will run as a KNOWN non-root uid, at
         // least one enumerated home must be owned by it, or `~/` entries do not
         // cover that user's own home (LDAP/AD/SSSD accounts and homes outside
         // /home|/Users are not enumerated). An explicit `--worker-uid` with no
@@ -2404,7 +2429,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 globs.join(", ")
             );
         }
-        // WO-145@v3 (G3): stat each expanded protect path once with its origin
+        // WO-145@v2: stat each expanded protect path once with its origin
         // home, so a non-absent failure names the home (and that it may belong
         // to another user) and points at absolute --protect. Stat only the
         // expanded paths — never readdir inside a home (which could trigger an
@@ -2631,6 +2656,7 @@ fn cmd_reset(state: Option<&Path>) -> Result<()> {
 /// immediately and a prompt is appended to the prompt lane; a background thread
 /// reads operator allow-session replies from the verdict lane and updates the
 /// cache so the next open passes. The kernel deadline is always met.
+// WO-154@v1: keep remote consent decisions off the fanotify event loop.
 fn cmd_run_remote(
     protected: &ProtectedSet,
     mark_paths: &[PathBuf],
@@ -2762,6 +2788,7 @@ fn persist_deny_forever(paths: &[String], policy_path: Option<&Path>) {
 /// `bulwark check <path>` — print the policy decision for a path. In the Linux
 /// MVP a `Protected` match and an `Outside(prompt)` both resolve to a denied
 /// read at the gate (no interactive prompt yet); this is stated in the output.
+// WO-145@v2: evaluate checks with the same host-home expansion used by runs.
 fn cmd_check(
     path: &str,
     profile: Option<&str>,
@@ -2769,7 +2796,7 @@ fn cmd_check(
     format: OutputFormat,
 ) -> Result<()> {
     use policy::{OutsideWorkspace, PolicyDecision};
-    // WO-145@v4 (D): a `~/` allow entry is not expanded across homes and grants
+    // WO-145@v2: a `~/` allow entry is not expanded across homes and grants
     // nothing; say so once so the operator reaches for an absolute path.
     let homes = policy::host_homes();
     let policy = load_policy(profile, policy_path)?;
@@ -3196,6 +3223,7 @@ fn load_policy(profile: Option<&str>, policy_path: Option<&Path>) -> Result<Poli
 // ONE open handle: identity from the handle's metadata, bytes read from that
 // handle, then parse and sha256 of those same bytes. No second open or read can
 // observe a different file than the one enforced.
+// WO-117@v1: bind parsed policy content and integrity identity to one open handle.
 struct PolicySnapshot {
     policy: Policy,
     record: integrity::PolicyRecord,
@@ -3212,6 +3240,7 @@ enum PolicyInput {
 
 // WO-117 (R1): the single read path for a file-backed policy. Error texts match
 // Policy::load so operators see the same diagnostics as before.
+// WO-117@v1: parse and digest file-backed policy bytes from one read.
 fn snapshot_policy(source: &integrity::PolicySource) -> Result<PolicySnapshot> {
     use std::io::Read;
     let Some(path) = source.path() else {
@@ -3355,6 +3384,9 @@ mod tests {
         assert_eq!(json_escape("tab\tend"), "tab\\tend");
     }
 
+    // WO-29@v1: keep hivebus handoff outside the gate bootstrap connection.
+    // WO-85@v1: pin deployment prelude placement in the remote gate script.
+    // WO-87@v1: pin teardown of the remote run and deployment directories.
     #[test]
     fn gate_script_keeps_lanes_out_of_hivebus_and_cleans_up() {
         // WO-29 acceptance: with no hivebus flags, `bulwark ssh` must behave
@@ -3469,7 +3501,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 
     #[test]
     fn gate_script_auto_worker_sends_numeric_uid_and_no_hidden_flag() {
-        // WO-145@v7: the hidden `run --auto-worker-uid` argument and its
+        // WO-145@v2: the hidden `run --auto-worker-uid` argument and its
         // serialization were removed. An anonymous worker dispatch resolves the
         // uid ssh-side and emits ONLY the numeric `--worker-uid <n>` — never
         // `--auto-worker-uid` nor any other argument v0.9.2's `run` does not
@@ -3566,6 +3598,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(!script.contains("--prompt-out"), "hardened: no prompt lane");
     }
 
+    // WO-87@v1: prove failed hardened preflight removes its streamed deployment.
     #[test]
     fn hardened_preflight_cleans_deploy_dir_only_on_failure() {
         let script = build_hardened_preflight_script(
@@ -3586,6 +3619,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
+    // WO-25@v1: prove hardened remote bootstrap preserves the base-set toggle.
     #[test]
     fn hardened_gate_script_no_base_set_toggles() {
         let with = build_hardened_gate_script(
@@ -3673,8 +3707,9 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
     }
 
-    // WO-145@v3 (G1): the home-ownership predicate drives the refuse/pass call;
+    // WO-145@v2: the home-ownership predicate drives the refuse/pass call;
     // the anonymous-worker exemption is the passwd lookup.
+    // WO-145@v2: prove target-uid ownership controls host-home eligibility.
     #[test]
     fn homes_owned_by_uid_distinguishes_owner() {
         use std::os::unix::fs::MetadataExt;
@@ -3687,6 +3722,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(homes_owned_by_uid(&[], owner).is_empty());
     }
 
+    // WO-145@v2: prove expanded-home stat failures explain the safe alternative.
     #[test]
     fn g3_message_names_the_home_and_suggests_absolute_protect() {
         let e = std::io::Error::from_raw_os_error(libc::EACCES);
@@ -3705,6 +3741,8 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
+    // WO-164@v1: doctor marks the checks enforcement depends on as required, on both platforms.
+    // WO-24@v1: on macOS the required set includes the ES edge and its entitlement.
     #[test]
     fn doctor_always_reports_the_required_checks() {
         let checks = run_doctor_checks();

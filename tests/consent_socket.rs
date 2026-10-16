@@ -14,6 +14,7 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-8@v1: each consent scenario gets a private scratch dir for its socket and fixtures.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -25,7 +26,7 @@ fn scratch(tag: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).unwrap();
     {
-        // WO-147@v3: bind refuses a group/other-writable parent of <sock>.d;
+        // WO-147@v1: bind refuses a group/other-writable parent of <sock>.d;
         // force a safe mode here so a loose umask does not leak into the tests.
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -44,6 +45,7 @@ fn sock_node(sock: &std::path::Path) -> PathBuf {
 
 /// Run a consent scenario: launch the gate (sleeps then reads the secret) and an
 /// operator that answers `verdict`. Returns (agent_read_contents, receipts).
+// WO-8@v1: run the gate and an off-band operator together, as consent runs in practice.
 fn scenario(tag: &str, verdict: &str) -> (String, String) {
     let dir = scratch(tag);
     let secret = dir.join("secret.env");
@@ -132,6 +134,7 @@ fn operator_allow_once_lets_read_through_with_operator_source() {
     );
 }
 
+// WO-8@v1: the supervised command must not be able to answer its own consent prompt.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn agent_cannot_answer_its_own_consent() {
@@ -198,6 +201,7 @@ fn agent_cannot_answer_its_own_consent() {
 /// "reject only if provably in-tree" rule would accept the dead in-tree peer and
 /// let the agent answer its own consent. The gate must refuse a peer it can no
 /// longer observe (fail closed), so the protected read stays denied.
+// WO-80@v1: a peer that exited before the membership check is refused, so the read stays denied.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn dead_peer_cannot_answer_its_own_consent() {
@@ -299,6 +303,7 @@ fn sock_dir(sock: &std::path::Path) -> PathBuf {
 
 /// Run the gate just far enough to reach `bind`, which must refuse the planted
 /// socket directory. Returns stderr.
+// WO-147@v1: start the gate only far enough for bind to refuse the planted socket directory.
 fn run_and_expect_refusal(sock: &std::path::Path) -> String {
     let out = Command::new(bin())
         .args([
@@ -320,6 +325,7 @@ fn run_and_expect_refusal(sock: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+// WO-147@v1: a socket dir owned by another uid is refused and left in place.
 #[test]
 #[ignore = "requires Linux + root for fanotify + chown"]
 fn foreign_owned_socket_dir_is_refused() {
@@ -341,6 +347,7 @@ fn foreign_owned_socket_dir_is_refused() {
     );
 }
 
+// WO-147@v1: a symlink at the socket dir is refused and its target is untouched.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn symlink_at_socket_dir_is_refused_and_target_unchanged() {
@@ -373,6 +380,7 @@ fn symlink_at_socket_dir_is_refused_and_target_unchanged() {
     );
 }
 
+// WO-147@v1: a regular file at the socket dir is refused, never deleted.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn regular_file_at_socket_dir_is_not_deleted() {
@@ -393,6 +401,7 @@ fn regular_file_at_socket_dir_is_not_deleted() {
     );
 }
 
+// WO-147@v1: the bound node is a 0600 socket owned by the invoking user.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn node_is_0600_socket_owned_by_invoking_user() {
@@ -422,11 +431,11 @@ fn node_is_0600_socket_owned_by_invoking_user() {
     assert_eq!(m.uid(), 65534, "node must be owned by SUDO_UID");
     let _ = gate.kill();
     let _ = gate.wait();
-    // WO-147@v2: leave no scratch behind once the assertions are done.
+    // WO-147@v1: leave no scratch behind once the assertions are done.
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// WO-147@v2: as root, the default consent socket lives under the root-owned
+/// WO-147@v1: as root, the default consent socket lives under the root-owned
 /// runtime dir (`/run/bulwark` on Linux, `/var/run/bulwark` on macOS) REGARDLESS
 /// of `$XDG_RUNTIME_DIR` — so `ensure_root_parent` actually governs the root
 /// default, and an attacker's XDG_RUNTIME_DIR (which `sudo -E` preserves and the
@@ -492,7 +501,7 @@ fn root_default_socket_ignores_xdg_runtime_dir() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// WO-147@v3: a consent socket under a directory owned by another uid must be
+/// WO-147@v1: a consent socket under a directory owned by another uid must be
 /// refused up front (the parent of `<sock>.d` is neither root's nor ours). Red
 /// when the parent is not checked and the bind proceeds inside the foreign dir.
 #[test]
@@ -510,7 +519,7 @@ fn parent_owned_by_another_uid_is_refused() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// WO-147@v3: the tests below exercise the ROOT DEFAULT socket at `/run/bulwark`
+/// WO-147@v1: the tests below exercise the ROOT DEFAULT socket at `/run/bulwark`
 /// (the client default and the runtime-dir hardening). They must never delete
 /// `/run/bulwark` — so they probe the run lock and skip loudly if a live run
 /// already holds it.
@@ -531,7 +540,7 @@ fn root_default_in_use() -> bool {
     rc != 0 // a non-blocking exclusive lock fails only when a live run holds it
 }
 
-/// WO-147@v3: a root gate binds the default `/run/bulwark/consent.sock`; a
+/// WO-147@v1: a root gate binds the default `/run/bulwark/consent.sock`; a
 /// non-root operator answering `bulwark consent` with NO `--socket` must still
 /// reach it (the client default prefers the root runtime socket when its node
 /// exists), and the verdict must reach the gate.
@@ -607,7 +616,7 @@ fn non_root_client_connects_to_the_root_gate_default_without_socket() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// WO-147@v3: `ensure_root_parent` must leave `/run/bulwark` traversable (0711)
+/// WO-147@v1: `ensure_root_parent` must leave `/run/bulwark` traversable (0711)
 /// even under a restrictive umask (077), and the invoking user must be able to
 /// answer. Red when a fresh mkdir under umask 077 leaves it 0700, blocking the
 /// invoking user's traversal.

@@ -25,6 +25,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// Run `bulwark run --deny-all --allow <grant> -- <cmd>` and return stdout.
+// WO-15@v1: run one default-deny allow-list gate and return what the agent printed.
 fn run_allowlist(grant: &str, cmd: &[&str]) -> String {
     let mut c = Command::new(bin());
     c.args(["run", "--allow-root", "--deny-all", "--allow", grant, "--"]);

@@ -98,9 +98,10 @@ fn check_reports_outside_for_unprotected_path() {
     );
 }
 
+// WO-145@v2: make policy checks expand protected entries across host homes.
 #[test]
 fn check_uses_the_host_home_set_not_home() {
-    // WO-145@v3 (G2): `check` expands `~/` over the host home set, so pointing
+    // WO-145@v2: `check` expands `~/` over the host home set, so pointing
     // $HOME at a nonexistent directory still protects root's `.ssh` (always in
     // the set). Red before G2: a single-home expansion from $HOME missed it.
     let target = if cfg!(target_os = "macos") {
@@ -123,9 +124,10 @@ fn check_uses_the_host_home_set_not_home() {
     );
 }
 
+// WO-145@v2: expose the stable policy decision token in JSON output.
 #[test]
 fn check_json_decided_token_is_machine_readable() {
-    // WO-145@v5 (G): the JSON `decision` field carries the machine token, not the
+    // WO-145@v2: the JSON `decision` field carries the machine token, not the
     // human label.
     let protected = Command::new(bin())
         .args([

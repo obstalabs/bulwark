@@ -51,7 +51,7 @@ evidence_grep() {
 # caller's tri-state signal). A line that is not a complete JSON object counts
 # as unparsable; the allow and deny counts run over complete records only, and
 # the deny counts only a record whose .ino, .decision and .source all match.
-# WO-137@v1 (F2): a receipt truncated right after `"source":"allowlist"` used to
+# WO-137@v1: a receipt truncated right after `"source":"allowlist"` used to
 # satisfy a substring grep; the edge ignores short writes, so truncation is a
 # real failure mode and the evidence must be a parsed record, not a substring.
 # The file is passed as an argument, never piped in (SIGPIPE under pipefail).
@@ -203,7 +203,7 @@ cp "$SUP_ERR" "$SUP_ERR_KEEP"
 ALLOW_FILE_OK=$(grep -q "^ALLOW_FILE_OK:allowed-ok$" "$SUP_OUT" && echo 1 || echo 0)
 DENY_OUTSIDE_OK=$(grep -q "^OUTSIDE_DENIED$" "$SUP_OUT" && echo 1 || echo 0)
 DENY_SYMLINK_OK=$(grep -q "^SYMLINK_ESCAPE_DENIED$" "$SUP_OUT" && echo 1 || echo 0)
-# WO-137@v1 (TEST 4a): grants are inode identities (WO-68/72), so a hardlink of
+# WO-137@v1: TEST 4a: grants are inode identities (WO-68/72), so a hardlink of
 # the GRANTED file placed outside the folder is the granted content under another
 # name and is ALLOWED; reading it discloses nothing the grant did not already
 # allow. The pre-2026-06-24 path-scoped expectation (denied) was replaced per the

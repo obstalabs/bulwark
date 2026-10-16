@@ -42,11 +42,13 @@ pub enum GateMode<'a> {
 
 /// Same public surface as the Linux gate. The ES edge reads pushed policy and
 /// startup consent decisions from its config, then answers AUTH_OPEN from memory.
+// WO-23@v1: preserve the Linux gate contract on the Endpoint Security surface.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Decide with a caller-chosen deadline (default: `decide`). Kept for API
     /// parity with the Linux gate; the macOS edge prompts from its seeded policy.
+    // WO-154@v1: keep deadline-aware consent API parity with the Linux gate.
     fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
         self.decide(req)
     }
@@ -58,13 +60,16 @@ pub trait ConsentDecider {
     /// string to bind here yet and this is a no-op: socket membership stays the
     /// ancestry check. Wiring the ES PID set into the consent socket (the macOS
     /// analog of the cgroup fix) is tracked as a documented residual.
+    // WO-71@v1: retain the shared membership-binding contract across platforms.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// Mirror of the Linux gate's log-sink hook. No-op on macOS (the ES gate
     /// prompts from seeded policy before any worker thread exists).
+    // WO-154@v1: retain the shared asynchronous-log contract across platforms.
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 
     /// Mirror of the Linux gate's deny-forever readback. Default empty.
+    // WO-154@v1: retain the shared consent-result contract across platforms.
     fn deny_forever_paths(&self) -> Vec<String> {
         Vec::new()
     }
@@ -72,6 +77,7 @@ pub trait ConsentDecider {
 
 /// Result of a supervised run: the child's exit code plus the deny-forever
 /// paths the operator chose this session (for the caller to persist).
+// WO-154@v1: return persisted consent outcomes with the supervised exit status.
 pub struct RunOutcome {
     pub exit_code: i32,
     pub deny_forever_paths: Vec<String>,
@@ -86,6 +92,7 @@ pub(crate) fn shutdown_requested() -> bool {
 /// no deferred-consent drain, so there is no draining teardown to observe — the
 /// consent socket's drain check is therefore always false here. Provided for a
 /// shared call surface with the Linux gate, not cfg'd away at the call site.
+// WO-155@v1: expose teardown state through the shared gate surface.
 pub(crate) fn draining() -> bool {
     false
 }
@@ -120,6 +127,7 @@ pub struct WorkerCreds {
 ///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
+// WO-49@v1: drop the agent outside the root edge's signal authority.
 unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     let groups = [creds.gid as libc::gid_t];
     if libc::setgroups(1, groups.as_ptr()) != 0 {
@@ -139,6 +147,7 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     Ok(())
 }
 
+// WO-23@v1: supervise the agent behind an armed Endpoint Security edge.
 pub fn run(
     mode: GateMode,
     mut consent: Option<Box<dyn ConsentDecider + Send>>,
@@ -230,7 +239,7 @@ pub fn run(
         ),
     }
     kill_pid(child_pid, libc::SIGCONT).context("resume supervised child")?;
-    // WO-127: the receipt log is where an abnormal edge death is recorded.
+    // WO-127@v4: the receipt log is where an abnormal edge death is recorded.
     let code = supervise(child_pid, &mut edge_child, receipts)?;
     terminate_edge(&mut edge_child)?;
     let deny_forever_paths = decider.map(|d| d.deny_forever_paths()).unwrap_or_default();
@@ -257,6 +266,7 @@ const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
 /// Resolve the ES edge path (env override, then auto-discovery) without erroring —
 /// for `doctor`, which reports presence rather than failing. `None` means neither the
 /// env var nor discovery found an edge.
+// WO-163@v1: the env override wins; otherwise discover the gate next to the installed CLI.
 pub fn resolve_edge_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(ES_EDGE_ENV) {
         return Some(PathBuf::from(value));
@@ -264,6 +274,7 @@ pub fn resolve_edge_path() -> Option<PathBuf> {
     discover_edge()
 }
 
+// WO-163@v1: a missing gate is an error that names the packaged location and the override.
 fn edge_path() -> Result<PathBuf> {
     resolve_edge_path().ok_or_else(|| {
         anyhow!(
@@ -276,6 +287,7 @@ fn edge_path() -> Result<PathBuf> {
 
 /// Look for the gate bundle relative to the current executable. Returns the first
 /// candidate that exists; `None` if discovery comes up empty (caller errors).
+// WO-163@v1: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
 fn discover_edge() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Canonicalize to resolve a Homebrew bin symlink to the real Cellar path.
@@ -339,6 +351,7 @@ impl GateTemp {
     }
 }
 
+// WO-72@v1: serialize allow-list grants as launch-snapshot inode identities.
 fn write_config(
     path: &Path,
     policy: &EdgePolicy<'_>,
@@ -409,6 +422,7 @@ fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
 
 // Superseded by inode-membership grants (`allow_inode`); retained for a possible
 // recursive grant-root layer (the macOS analog of Linux move-in tracking).
+// WO-72@v1: retain the superseded path-root representation only as inert support.
 #[allow(dead_code)]
 struct AllowGrantRoot {
     dev: u64,        // WO-41: root device identity
@@ -417,6 +431,7 @@ struct AllowGrantRoot {
     path: PathBuf,   // WO-41: canonical root path for the ES edge
 }
 
+// WO-72@v1: keep retired path-root resolution isolated from active inode grants.
 #[allow(dead_code)]
 fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
     let mut out = Vec::new();
@@ -437,6 +452,7 @@ fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
     Ok(out)
 }
 
+// WO-72@v1: reject wildcard roots if the retired resolver is ever reused.
 #[allow(dead_code)]
 fn concrete_grant_root(grant: &str) -> Result<(PathBuf, bool)> {
     let recursive = grant.ends_with("/**");
@@ -480,6 +496,7 @@ struct StoppedChild {
     pid: libc::pid_t,
 }
 
+// WO-49@v1: arm the edge before resuming and dropping the supervised child.
 fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<StoppedChild> {
     let prog = CString::new(command[0].as_bytes())?;
     let argv: Vec<CString> = command
@@ -544,7 +561,7 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
     }
 }
 
-// WO-127: an abnormal edge death is a fail-open window the kernel already
+// WO-127@v4: an abnormal edge death is a fail-open window the kernel already
 // honored; it must leave an audit record even when the run otherwise looks done.
 fn record_edge_death(
     receipts: Option<&Path>,
@@ -568,6 +585,7 @@ fn record_edge_death(
     });
 }
 
+// WO-62@v1: keep the edge alive until its tracked process set drains.
 fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) -> Result<i32> {
     // The foreground child exiting is NOT the end of the supervised tree: a
     // process that double-fork()s leaves an orphan (reparented to launchd) that
@@ -587,7 +605,7 @@ fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) 
             if foreground_code.is_none() {
                 foreground_code = try_wait(child_pid)?;
             }
-            // WO-127: only a clean drain (exit 0) is a normal end. An edge killed
+            // WO-127@v4: only a clean drain (exit 0) is a normal end. An edge killed
             // by a signal or exiting non-zero stopped answering the kernel at
             // some point, and the kernel allowed every open after that. That is
             // true even if the child has already finished: the 0.9.0 leak looked
@@ -681,6 +699,7 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) -> Result<()> {
 }
 
 #[cfg(test)]
+// WO-72@v1: pin inode-grant serialization for the macOS edge.
 mod allowlist_edge_tests {
     use super::*;
     use crate::allowlist::AllowList;
@@ -697,6 +716,7 @@ mod allowlist_edge_tests {
     /// secret into a granted path leaked. Reverting to `allow_root` makes this
     /// red on the `allow_inode`/no-`allow_root` assertions.
     #[test]
+    // WO-72@v1: reject path-root grants that admit moved or hardlinked inodes.
     fn allowlist_grants_emit_inode_not_root() {
         let dir = scratch("grants");
         let f = dir.join("app.log");
@@ -729,7 +749,7 @@ mod allowlist_edge_tests {
     }
 }
 
-// WO-127: the supervisor must fail closed on an abnormal edge death, including
+// WO-127@v4: the supervisor must fail closed on an abnormal edge death, including
 // after the foreground child already finished (that is how the 0.9.0 leak hid).
 // The spawned children are reaped by `supervise` itself through libc::waitpid,
 // exactly as in production, so std's `wait()` must not be called on them here.
@@ -744,7 +764,7 @@ mod supervise_tests {
         crate::test_scratch_dir(&format!("sup-{tag}"))
     }
 
-    // WO-127: a fake edge that signals readiness, then exits the way asked:
+    // WO-127@v4: a fake edge that signals readiness, then exits the way asked:
     // "trap" dies by SIGTRAP like the real 0.9.0 crash, "clean" drains with 0.
     fn fake_edge(ready: &Path, how: &str) -> Child {
         let script = match how {
@@ -759,6 +779,7 @@ mod supervise_tests {
             .expect("spawn fake edge")
     }
 
+    // WO-127@v4: require the fake edge to prove readiness before supervision.
     fn wait_ready(ready: &Path) {
         for _ in 0..200 {
             if ready.exists() {
@@ -769,11 +790,13 @@ mod supervise_tests {
         panic!("fake edge never signalled readiness");
     }
 
+    // WO-127@v4: verify abnormal edge teardown does not leave the child alive.
     fn pid_alive(pid: libc::pid_t) -> bool {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
     #[test]
+    // WO-127@v4: audit an abnormal edge exit after the child has finished.
     fn abnormal_edge_exit_after_child_finished_is_an_error_with_audit() {
         let dir = scratch("after");
         let receipts = dir.join("r.jsonl");
@@ -796,6 +819,7 @@ mod supervise_tests {
     }
 
     #[test]
+    // WO-127@v4: kill the supervised child when the edge dies first.
     fn abnormal_edge_exit_with_live_child_kills_it() {
         let dir = scratch("live");
         let receipts = dir.join("r.jsonl");
@@ -825,6 +849,7 @@ mod supervise_tests {
     }
 
     #[test]
+    // WO-127@v4: preserve the child status after a clean edge drain.
     fn clean_edge_drain_returns_the_child_exit_code() {
         let dir = scratch("clean");
         let child = Command::new("/bin/sh")

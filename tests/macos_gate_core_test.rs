@@ -57,7 +57,7 @@ fn swift_edge_decides_by_inode_and_tracks_supervised_tree() {
     );
 }
 
-// WO-127: the edge must convert Darwin's Int32 dev_t without trapping and must
+// WO-127@v4: the edge must convert Darwin's Int32 dev_t without trapping and must
 // land on the same key Rust derives, or devfs opens kill the client and the
 // kernel allows every later read.
 #[test]
@@ -141,7 +141,7 @@ fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
     assert!(respond_failure.contains("exit(70)"));
 }
 
-// WO-127: the source slice between two unique markers, so a contract test pins
+// WO-127@v4: the source slice between two unique markers, so a contract test pins
 // WHERE a call sits (drain exit vs signal handler), not just that it exists.
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     let s = source
@@ -154,7 +154,7 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &rest[..e]
 }
 
-// WO-127: pins the Rust convention the edge now matches: std sign-extends the
+// WO-127@v4: pins the Rust convention the edge now matches: std sign-extends the
 // 32-bit Darwin dev_t into the u64 key, so a negative devfs dev stays a stable key.
 #[cfg(target_os = "macos")]
 #[test]
@@ -172,7 +172,7 @@ fn rust_dev_key_is_the_sign_extended_darwin_dev_t() {
     );
 }
 
-// WO-127: an edge that died by a signal after the child finished used to be
+// WO-127@v4: an edge that died by a signal after the child finished used to be
 // reported as a normal run; the supervisor must name it and fail.
 #[test]
 fn rust_supervisor_reports_abnormal_edge_exit_after_child_exit() {
@@ -238,6 +238,7 @@ fn ci_compiles_macos_rust_and_documents_swift_link_check() {
     }
 }
 
+// WO-41@v1: require the hardware harness to exercise sealed allow-list behavior.
 #[test]
 fn allowlist_gate_has_sealed_hardware_harness() {
     let source = repo_file("macos-es-proof/verify-allowlist-gate.sh");

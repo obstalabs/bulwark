@@ -129,13 +129,15 @@ impl DispatchReceipt<'_> {
     }
 }
 
-/// WO-147/154@v1: capacity of each per-decision log queue. The permission loop
+/// WO-154@v1: capacity of each per-decision log queue. The permission loop
 /// can enqueue up to this many records while a writer thread is slow; past that
 /// it drops and counts for that sink instead of blocking.
 const LOG_QUEUE_CAPACITY: usize = 4096;
 
 /// Per-sink counters so `submitted == written + dropped` holds for EACH sink,
 /// and a stalled consumer loses nothing silently (a lost line is always counted).
+// WO-154@v1: account for every off-loop receipt enqueue without blocking opens.
+// WO-155@v1: expose output loss when a terminal or file sink stalls.
 #[derive(Default)]
 struct SinkCounters {
     submitted: AtomicU64,
@@ -143,21 +145,25 @@ struct SinkCounters {
     dropped: AtomicU64,
 }
 
-/// WO-147/154@v1 (P2): a message to the receipts-file writer. `Line` is one
+/// WO-154@v1: a message to the receipts-file writer. `Line` is one
 /// decision record; `Summary` is the final accounting line — formed by the
 /// writer itself against the then-drained counters, so it is always the LAST
 /// line and its file numbers balance exactly.
+// WO-154@v1: separate ordinary receipt records from the terminal accounting message.
+// WO-155@v1: make the writer close the audit stream with bounded accounting.
 enum FileMsg {
     Line(String),
     Summary,
 }
 
-/// WO-147/154@v1 (P2): a non-blocking, cloneable handle into BOTH log sinks —
+/// WO-154@v1: a non-blocking, cloneable handle into BOTH log sinks —
 /// the receipts file (JSON, when configured) and stderr (human lines). The
 /// permission loop, and any helper threads (e.g. a consent worker), enqueue
 /// owned records and return immediately; two separate writer threads perform
 /// the actual `write(2)`, so a stalled stderr reader can never delay the
 /// receipts file (and vice versa). Cloning shares both queues and all counters.
+// WO-154@v1: enqueue gate output without blocking the permission loop.
+// WO-155@v1: isolate file and terminal sinks so either may stall independently.
 pub struct LogSink {
     file_tx: SyncSender<FileMsg>,
     stderr_tx: SyncSender<String>,
@@ -165,7 +171,11 @@ pub struct LogSink {
     stderr_counters: Arc<SinkCounters>,
 }
 
+// WO-154@v1: share bounded output queues with helper threads.
+// WO-155@v1: preserve per-sink accounting across cloned handles.
 impl Clone for LogSink {
+    // WO-154@v1: clone senders rather than writer handles for off-loop output.
+    // WO-155@v1: share counters across every producer of gate output.
     fn clone(&self) -> Self {
         LogSink {
             file_tx: self.file_tx.clone(),
@@ -177,6 +187,7 @@ impl Clone for LogSink {
 }
 
 /// Build the human stderr line for a decision receipt.
+// WO-155@v1: format human output before it reaches the terminal writer.
 fn human_decision_line(decision: Decision, r: &Receipt) -> String {
     format!(
         "[bulwark] {} pid={} dev={} ino={} path={} ancestry={}\n",
@@ -193,6 +204,8 @@ fn human_decision_line(decision: Decision, r: &Receipt) -> String {
 /// receipts-file line (absent for warn/note diagnostics, which have no receipt).
 /// A failed enqueue (queue full or a gone writer) is counted as dropped for that
 /// sink immediately, so `submitted == written + dropped` stays exact.
+// WO-154@v1: route each record through bounded queues outside the permission loop.
+// WO-155@v1: count sink loss instead of waiting on blocked output.
 fn route(
     file_tx: &SyncSender<FileMsg>,
     stderr_tx: &SyncSender<String>,
@@ -219,8 +232,12 @@ fn route(
     }
 }
 
+// WO-154@v1: expose nonblocking output operations to gate helper threads.
+// WO-155@v1: keep file and terminal accounting independent.
 impl LogSink {
     /// Record one decision. Enqueued to both sinks, never written synchronously.
+    // WO-154@v1: enqueue decisions without delaying permission responses.
+    // WO-155@v1: send each decision to independently bounded sinks.
     pub fn record(&self, r: &Receipt) {
         route(
             &self.file_tx,
@@ -234,6 +251,8 @@ impl LogSink {
 
     /// Queue a warning line (no file receipt). The gate's own error paths use
     /// this so their stderr output cannot block the permission loop either.
+    // WO-154@v1: keep gate warnings off the permission loop.
+    // WO-155@v1: drop and count warnings when terminal output stalls.
     pub fn warn(&self, line: &str) {
         route(
             &self.file_tx,
@@ -250,12 +269,14 @@ impl LogSink {
 /// bounded in-memory queue and a writer thread that OWNS its handle (the file
 /// writer owns the receipts `File`; no shared lock, no shared handle).
 ///
-/// WO-147/154@v1: the permission loop must never block on output, and the
+/// WO-154@v1: the permission loop must never block on output, and the
 /// receipts FILE must never wait on stderr. Two independent queues/writers
 /// provide both: `record` enqueues to each and returns immediately, each writer
 /// drains its own queue, and when a queue is full that record is dropped and
 /// counted for that sink. On teardown the summary is enqueued as each writer's
 /// LAST message and Drop waits only a bounded time before returning regardless.
+// WO-154@v1: own the bounded writers that keep output off the permission loop.
+// WO-155@v1: bound sink teardown and account for every dropped line.
 pub struct ReceiptLog {
     file_tx: Option<SyncSender<FileMsg>>,
     stderr_tx: Option<SyncSender<String>>,
@@ -270,6 +291,7 @@ pub struct ReceiptLog {
 /// `/tmp` → `/private/tmp`, `/var` → `/private/var`). This stops an untrusted
 /// workspace from redirecting root's receipts create/append to an arbitrary
 /// directory via an intermediate symlink (WO-156).
+// WO-156@v2: pin every receipts-path component and refuse unsafe aliases.
 fn open_receipts_file(path: &Path) -> Result<std::fs::File> {
     // A relative path is walked from the process's REAL cwd, opened once as a
     // directory fd (".", O_DIRECTORY|O_CLOEXEC) so the walk is pinned to the cwd
@@ -440,6 +462,7 @@ fn open_receipts_file(path: &Path) -> Result<std::fs::File> {
 /// A symlinked directory component may be FOLLOWED only when the link itself is
 /// root-owned and sits in a root-owned directory that is not group/other-writable
 /// (the macOS `/tmp` → `/private/tmp` and `/var` → `/private/var` system links).
+// WO-156@v2: allow only immutable system-owned links in the receipts path.
 fn system_symlink_ok_stat(dirfd: libc::c_int, lst: &libc::stat) -> Result<bool> {
     let link_root = lst.st_uid == 0;
     let mut dst: libc::stat = unsafe { std::mem::zeroed() };
@@ -451,7 +474,13 @@ fn system_symlink_ok_stat(dirfd: libc::c_int, lst: &libc::stat) -> Result<bool> 
     Ok(link_root && dir_root && dir_not_writable)
 }
 
+// WO-154@v1: construct and expose bounded off-loop receipt writers.
+// WO-155@v1: own bounded writer shutdown and final accounting.
+// WO-156@v2: open the receipts file through pinned directory descriptors.
 impl ReceiptLog {
+    // WO-154@v1: start independent file and terminal writer threads.
+    // WO-155@v1: fail if either writer cannot be created.
+    // WO-156@v2: validate the receipts target before gate enforcement starts.
     pub fn new(path: Option<&Path>) -> Result<Self> {
         // The receipts file is opened here — before the permission loop — by the
         // component-wise walk, so the loop itself never opens a path.
@@ -502,6 +531,8 @@ impl ReceiptLog {
     /// consent worker) that log on the gate's behalf. The clone's senders are
     /// dropped when that thread ends, so each writer sees channel-close only
     /// once the gate AND its helper threads are done.
+    // WO-154@v1: give helper threads bounded access to both output queues.
+    // WO-155@v1: keep all producers inside shared sink accounting.
     pub fn sink(&self) -> LogSink {
         LogSink {
             file_tx: self.file_tx.as_ref().expect("file sender present").clone(),
@@ -516,12 +547,16 @@ impl ReceiptLog {
     }
 
     /// Record one decision. Enqueued to both sinks, never written synchronously.
+    // WO-154@v1: enqueue gate decisions outside the permission loop.
+    // WO-155@v1: account for each file and terminal delivery independently.
     pub fn record(&mut self, r: &Receipt) {
         self.route(Some(r.to_json_line()), human_decision_line(r.decision, r));
     }
 
     /// Record one dispatch-time hivebus key handoff (fingerprints only — never
     /// seed bytes). Enqueued like any other line.
+    // WO-29@v1: record key-handoff fingerprints without persisting seed material.
+    // WO-154@v1: enqueue dispatch receipts through the bounded output path.
     pub fn record_dispatch(&mut self, r: &DispatchReceipt) {
         let human = format!(
             "[bulwark] hivebus dispatch target={} worker_fp={} architect_fp={}\n",
@@ -534,16 +569,22 @@ impl ReceiptLog {
 
     /// Queue a warning line (no file receipt). The gate's own error paths use
     /// this so their stderr output cannot block the permission loop either.
+    // WO-154@v1: keep warning output away from the permission loop.
+    // WO-155@v1: count warnings dropped by a stalled terminal sink.
     pub fn warn(&mut self, line: &str) {
         self.route(None, format!("[bulwark] WARN {line}\n"));
     }
 
     /// Queue a plain informational line (no file receipt). Used for the loop's
     /// own status messages, which must also never block on output.
+    // WO-154@v1: enqueue gate status without delaying permission responses.
+    // WO-155@v1: bound informational output when the terminal stalls.
     pub fn note(&mut self, line: &str) {
         self.route(None, format!("[bulwark] {line}\n"));
     }
 
+    // WO-154@v1: funnel gate output through the bounded queue pair.
+    // WO-155@v1: preserve independent accounting for both sinks.
     fn route(&self, json: Option<String>, human: String) {
         route(
             self.file_tx.as_ref().expect("file sender present"),
@@ -556,7 +597,9 @@ impl ReceiptLog {
     }
 }
 
+// WO-155@v1: finish receipt accounting without letting a sink hold gate exit.
 impl Drop for ReceiptLog {
+    // WO-155@v1: bound file drain time and detach best-effort terminal output.
     fn drop(&mut self) {
         // Enqueue the summary as the file writer's LAST message, then drop our
         // senders so each writer drains exactly its queued messages and sees
@@ -599,6 +642,7 @@ const WRITER_DRAIN_WAIT: Duration = Duration::from_millis(2000);
 /// Wait up to `WRITER_DRAIN_WAIT` for a writer thread to finish. Returns true if
 /// it joined within the bound; false if it was abandoned (still running — the
 /// handle is dropped, detaching the thread) so the gate's exit never waits.
+// WO-155@v1: cap how long receipt shutdown may wait for the file writer.
 fn wait_bounded(writer: &mut Option<JoinHandle<()>>) -> bool {
     let Some(w) = writer.take() else {
         return true;
@@ -616,6 +660,7 @@ fn wait_bounded(writer: &mut Option<JoinHandle<()>>) -> bool {
 
 /// Enqueue a teardown line to the stderr sink (`try_send`; dropped and counted
 /// when full or gone). Teardown never blocks on stderr and never writes directly.
+// WO-155@v1: report teardown loss without writing synchronously to stderr.
 fn stderr_warn(tx: &Option<SyncSender<String>>, counters: &SinkCounters, line: &str) {
     let Some(tx) = tx else { return };
     let msg = format!("[bulwark] WARN {line}\n");
@@ -632,6 +677,7 @@ fn stderr_warn(tx: &Option<SyncSender<String>>, counters: &SinkCounters, line: &
 /// message, after it has drained every record, so the file counters balance
 /// exactly. The stderr state is a snapshot: `finished` when it balances at this
 /// instant, `timed_out` when it is still draining (or was abandoned).
+// WO-155@v1: close the receipt file with per-sink delivery accounting.
 fn summary_json(file_counters: &SinkCounters, stderr_counters: &SinkCounters) -> String {
     let (fs, fw, fd) = (
         file_counters.submitted.load(Ordering::SeqCst),
@@ -662,6 +708,8 @@ fn summary_json(file_counters: &SinkCounters, stderr_counters: &SinkCounters) ->
 /// and it is the last line. It never blocks on stderr — a failed summary write is
 /// reported through the bounded stderr queue (`try_send`, never a direct write) —
 /// so a stopped terminal still cannot delay the audit trail.
+// WO-154@v1: drain receipt records outside the permission loop.
+// WO-155@v1: write the final accounting record and report sink failures safely.
 fn file_writer_loop(
     rx: mpsc::Receiver<FileMsg>,
     mut file: Option<std::fs::File>,
@@ -717,6 +765,8 @@ fn file_writer_loop(
 /// The stderr writer thread: drains the human-line queue and writes each to
 /// stderr. It MAY block on a stopped consumer — deliberately, and only HERE
 /// (never the permission loop and never the file writer). Channel close ends it.
+// WO-154@v1: confine blocking terminal writes to a dedicated thread.
+// WO-155@v1: isolate a stopped terminal from gate enforcement and file receipts.
 fn stderr_writer_loop(rx: mpsc::Receiver<String>, counters: Arc<SinkCounters>) {
     while let Ok(human) = rx.recv() {
         if std::io::stderr().write_all(human.as_bytes()).is_ok() {
@@ -813,11 +863,14 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
     }
 
-    /// WO-154/155@v1: in a normal run the summary is the writer's LAST message —
+    /// WO-155@v1: in a normal run the summary is the writer's LAST message —
     /// enqueued after every record and formed from the drained counters — so it is
     /// the final line and its file numbers balance exactly. Uses the system temp
     /// dir, which on macOS traverses a system symlink (`/var` → `/private/var`),
     /// so this also exercises the WO-156 component walk's system-link allowance.
+    // WO-154@v1: prove normal output drains outside the permission loop.
+    // WO-155@v1: prove the accounting record is last and balanced.
+    // WO-156@v2: prove the pinned open accepts trusted system links.
     #[test]
     fn normal_run_writes_the_summary_last_and_balances() {
         let dir = std::env::temp_dir().join(format!(
@@ -858,7 +911,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// WO-156: a receipts path through a user-made symlinked ancestor is refused
+    /// WO-156@v2: a receipts path through a user-made symlinked ancestor is refused
     /// and nothing is created at the link target — the audit trail must not be
     /// redirectable by a workspace directory symlink.
     #[test]

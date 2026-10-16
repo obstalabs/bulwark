@@ -23,6 +23,8 @@ use crate::protect::ProtectedSet;
 
 /// Mirror of `gate::GateMode`. Same shape so `main` builds the same value on
 /// every platform; only the implementation behind `run` differs.
+// WO-28@v1: keep unsupported platforms behind a fail-closed gate surface.
+// WO-41@v1: mirror both deny-list and allow-list enforcement modes.
 pub enum GateMode<'a> {
     DenyList { protected: &'a ProtectedSet },
     AllowList { allow: &'a AllowList },
@@ -30,22 +32,29 @@ pub enum GateMode<'a> {
 
 /// Mirror of `gate::ConsentDecider`. The portable `consent::CachingProvider`
 /// implements this trait, so it must exist on every platform.
+// WO-28@v1: preserve the portable consent seam without running an ungated child.
+// WO-59@v1: mirror cgroup-scoped consent peer checks on every platform.
+// WO-154@v1: mirror bounded consent and nonblocking gate output hooks.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Mirror of the enforcing gates' trait (default: `decide`).
+    // WO-154@v1: keep the consent decision within the gate's absolute deadline.
     fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
         self.decide(req)
     }
 
     /// Mirror of the enforcing gates' trait so the shared `CachingProvider` impl
     /// type-checks on unsupported platforms. No-op (no enforcement here).
+    // WO-59@v1: carry the supervised cgroup identity into consent checks.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// Mirror of the enforcing gates' log-sink hook. No-op (no enforcement here).
+    // WO-154@v1: route consent output away from the permission loop.
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 
     /// Mirror of the Linux gate's deny-forever readback. Default empty.
+    // WO-154@v1: return persistent denials collected by the consent worker.
     fn deny_forever_paths(&self) -> Vec<String> {
         Vec::new()
     }
@@ -53,6 +62,7 @@ pub trait ConsentDecider {
 
 /// Result of a supervised run: the child's exit code plus the deny-forever
 /// paths the operator chose this session (for the caller to persist).
+// WO-154@v1: return both the child result and consent-worker denials.
 pub struct RunOutcome {
     pub exit_code: i32,
     pub deny_forever_paths: Vec<String>,
@@ -76,6 +86,8 @@ pub struct WorkerCreds {
 /// Fail-closed stand-in for `gate::run`. The real gate forks the command under
 /// a kernel read-gate; with no gate available on this platform we refuse rather
 /// than run the command unprotected.
+// WO-28@v1: refuse execution when no supported kernel gate is available.
+// WO-154@v1: keep the portable signature aligned with bounded consent output.
 pub fn run(
     _mode: GateMode,
     _consent: Option<Box<dyn ConsentDecider + Send>>,

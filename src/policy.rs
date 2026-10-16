@@ -163,6 +163,7 @@ pub enum PolicyDecision {
     Outside(OutsideWorkspace),
 }
 
+// WO-145@v2: keep host-home protection expansion inside the shared policy path.
 impl Policy {
     /// The shipped default profile. Protects the usual credential stores and
     /// secret-bearing filenames; the workspace allowlist is intentionally empty
@@ -271,13 +272,14 @@ impl Policy {
         true
     }
 
-    /// Decide what the policy says about `path`. WO-145@v3 (G2): a `~/` entry is
+    /// Decide what the policy says about `path`. WO-145@v2: a `~/` entry is
     /// matched under every home in `homes` (the same rule `run` applies), so
     /// `check` and the live gate agree. Protected takes precedence over
     /// workspace-allow: a protected file inside an allowed workspace is still
     /// protected.
+    // WO-145@v2: evaluate protected entries against the same host-home set as run.
     pub fn decide(&self, path: &str, homes: &[String]) -> PolicyDecision {
-        // WO-145@v4 (C): protected entries expand through run's own
+        // WO-145@v2: protected entries expand through run's own
         // expand_protect_entry — same home set, same cap, same relative-refusal —
         // so `check` and `run` cannot diverge.
         let protected_hit = |pat: &String| match expand_protect_entry(pat, homes) {
@@ -287,7 +289,7 @@ impl Policy {
         if self.protected.prompt.iter().any(protected_hit) {
             return PolicyDecision::Protected;
         }
-        // WO-145@v4 (D): a `~/` allow entry is NOT fanned out across homes (that
+        // WO-145@v2: a `~/` allow entry is NOT fanned out across homes (that
         // would widen a grant); it grants nothing and is reported by the caller.
         let allow_hit = |pat: &String| {
             if pat == "~" || pat.starts_with("~/") {
@@ -321,6 +323,7 @@ impl Policy {
 
     /// The protected patterns that contain wildcards (decision-time matching),
     /// expanded over `homes` the same way as the concrete ones (WO-145@v2).
+    // WO-145@v2: expand wildcard protection across every enumerated host home.
     pub fn protected_globs(&self, homes: &[String]) -> Result<Vec<String>> {
         Ok(self
             .expand_protected(homes)?
@@ -341,8 +344,9 @@ impl Policy {
     }
 }
 
-/// WO-145@v3 (G2): true if `path` matches an already-expanded (or as-written)
+/// WO-145@v2: true if `path` matches an already-expanded (or as-written)
 /// pattern, either by glob or as a concrete directory ancestor of `path`.
+// WO-145@v2: apply one matching rule to expanded protection paths.
 fn decide_path_matches(path: &str, pattern: &str) -> bool {
     if glob::matches(pattern, path) {
         return true;
@@ -516,6 +520,7 @@ mod tests {
         );
     }
 
+    // WO-145@v2: keep protected paths dominant over workspace grants.
     #[test]
     fn decide_protected_beats_workspace() {
         let mut p = Policy::default_profile();
@@ -525,9 +530,10 @@ mod tests {
         assert_eq!(d, PolicyDecision::Protected);
     }
 
+    // WO-145@v2: prevent home-relative allow entries from widening grants.
     #[test]
     fn decide_tilde_allow_grants_nothing() {
-        // WO-145@v4 (D): a `~/` allow entry is not fanned out across homes (that
+        // WO-145@v2: a `~/` allow entry is not fanned out across homes (that
         // would widen a grant); it grants nothing.
         let mut p = Policy::default_profile();
         p.add_allow("~/dev/**");
@@ -539,6 +545,7 @@ mod tests {
         );
     }
 
+    // WO-145@v2: preserve exact absolute workspace grants.
     #[test]
     fn decide_absolute_allow_is_granted() {
         // Control: a non-`~/` allow entry still grants.
@@ -548,6 +555,7 @@ mod tests {
         assert_eq!(d, PolicyDecision::AllowWorkspace);
     }
 
+    // WO-145@v2: keep unmatched paths under the configured outside policy.
     #[test]
     fn decide_outside_is_prompt_by_default() {
         let p = Policy::default_profile();
@@ -555,8 +563,9 @@ mod tests {
         assert_eq!(d, PolicyDecision::Outside(OutsideWorkspace::Prompt));
     }
 
-    // WO-145@v3 (G2): with HOME=/root, `~/.ssh` still matches a path under a
+    // WO-145@v2: with HOME=/root, `~/.ssh` still matches a path under a
     // DIFFERENT user's home, because decide expands `~/` over every home.
+    // WO-145@v2: cover each enumerated home without consulting HOME.
     #[test]
     fn decide_expands_tilde_over_every_home_not_sudo_home() {
         let p = Policy::default_profile();
@@ -577,6 +586,7 @@ mod tests {
         assert!(!p.add_protected("~/vault")); // now present
     }
 
+    // WO-145@v2: keep concrete and wildcard protection paths distinct.
     #[test]
     fn concrete_vs_glob_split() {
         let p = Policy::default_profile();
@@ -627,6 +637,7 @@ mod tests {
         assert!(expand_protect_entry("~/.ssh", &[]).unwrap().is_empty());
     }
 
+    // WO-145@v2: accept absolute protection and refuse ambiguous relative paths.
     #[test]
     fn absolute_entry_passes_through_and_relative_is_refused() {
         let homes = vec!["/home/alice".to_string()];
@@ -645,6 +656,7 @@ mod tests {
         assert!(expand_protect_entry(".ssh", &homes).is_err());
     }
 
+    // WO-145@v2: refuse expansion beyond the bounded host-home set.
     #[test]
     fn home_set_past_the_cap_is_refused() {
         let homes: Vec<String> = (0..=MAX_PROTECT_HOMES)

@@ -13,6 +13,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact pair that ships, build signed + notarized + stapled `.pkg` files, verify, upload),
   until CI signs macOS releases.
 
+### Changed
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v1 / WO-164@v1: source citations identify the current intent behind each attributed region. -->
+- Source comments cite the work order behind each function and test, so every change traces to its stated intent.
+  Code that shipped without a recorded work order was given a retroactive one that records its
+  behaviour, instead of a guessed id.
+
 ## [0.9.3] - 2026-10-15
 
 ### Security
@@ -74,7 +80,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry is protected exactly as written; any other relative entry is refused
   before the run starts. The run states the rule once. `--protect` on the
   command line is unaffected, the shell expands it.
-<!-- WO-145@v3: a known non-root agent uid with no enumerated home must refuse; check shares the home set; broken-home refusal names it. -->
+<!-- WO-145@v2: a known non-root agent uid with no enumerated home must refuse; check shares the home set; broken-home refusal names it. -->
 - The every-home `~` rule refuses to launch when the agent would run as a
   known non-root uid that owns none of the enumerated homes. An account served
   by LDAP/AD/SSSD, or with a home outside `/home`/`/Users`, would otherwise
@@ -96,7 +102,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   root cannot be made to chmod an attacker-chosen directory. Only the socket
   node is chowned (0600) to the invoking user under sudo; the answer client
   derives the same default node.
-<!-- WO-147@v3: the fixed socket path was not exclusive and a non-root client could not reach the root default. -->
+<!-- WO-147@v1: the fixed socket path was not exclusive and a non-root client could not reach the root default. -->
 - A consent socket path is now owned by exactly one run at a time. A second
   `bulwark run` on a path already in use is refused with a `--consent-socket
   <other path>` remedy rather than silently taking over the live node and its
@@ -107,7 +113,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consent` run as the invoking non-root user now answers a root gate's default
   socket at `/run/bulwark/consent.sock` with no `--socket`, and the runtime dir
   is forced to 0711 even under a restrictive `umask` so that traversal works.
-<!-- WO-154@v2: the permission loop wrote every decision to stderr synchronously. -->
+<!-- WO-154@v1: the permission loop wrote every decision to stderr synchronously. -->
 - The permission loop no longer performs blocking output. Every gate decision is
   enqueued and drained by a separate writer thread, so a stalled log reader
   drops lines (counted and reported at shutdown) instead of stalling the loop;
@@ -115,7 +121,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   past which a protected open is denied outright), so a pending prompt cannot
   delay unrelated opens on the same filesystem. The log writer never changes the
   inherited stderr's mode (it is shared with the operator and the agent).
-<!-- WO-147@v4: teardown could unlink a successor run's node; a relative socket path failed; the parent check covered only one ancestor. -->
+<!-- WO-147@v1: teardown could unlink a successor run's node; a relative socket path failed; the parent check covered only one ancestor. -->
 - Consent socket handoff and path validation are tightened. Teardown unlinks the
   node while still holding the run lock (never the lock file), a relative
   `--consent-socket` resolves against the working directory, every ancestor of
@@ -148,7 +154,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory through a directory fd (never by path as root), and the sun_path
   limit is read from the platform (`sockaddr_un`) and refused up front when a
   `--consent-socket` node would exceed it.
-<!-- WO-145@v4: a ~ allow entry must not widen a grant. -->
+<!-- WO-145@v2: a ~ allow entry must not widen a grant. -->
 - A `~/` workspace allow entry is no longer expanded across every home — that
   would widen a grant; it grants nothing and asks for an absolute path instead.
   `bulwark check` now previews protected paths through the same expansion as
