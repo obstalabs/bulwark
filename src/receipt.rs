@@ -129,7 +129,7 @@ impl DispatchReceipt<'_> {
     }
 }
 
-/// WO-147/154@v1: capacity of each per-decision log queue. The permission loop
+/// WO-154@v1: capacity of each per-decision log queue. The permission loop
 /// can enqueue up to this many records while a writer thread is slow; past that
 /// it drops and counts for that sink instead of blocking.
 const LOG_QUEUE_CAPACITY: usize = 4096;
@@ -145,7 +145,7 @@ struct SinkCounters {
     dropped: AtomicU64,
 }
 
-/// WO-147/154@v1 (P2): a message to the receipts-file writer. `Line` is one
+/// WO-154@v1: a message to the receipts-file writer. `Line` is one
 /// decision record; `Summary` is the final accounting line — formed by the
 /// writer itself against the then-drained counters, so it is always the LAST
 /// line and its file numbers balance exactly.
@@ -156,7 +156,7 @@ enum FileMsg {
     Summary,
 }
 
-/// WO-147/154@v1 (P2): a non-blocking, cloneable handle into BOTH log sinks —
+/// WO-154@v1: a non-blocking, cloneable handle into BOTH log sinks —
 /// the receipts file (JSON, when configured) and stderr (human lines). The
 /// permission loop, and any helper threads (e.g. a consent worker), enqueue
 /// owned records and return immediately; two separate writer threads perform
@@ -269,7 +269,7 @@ impl LogSink {
 /// bounded in-memory queue and a writer thread that OWNS its handle (the file
 /// writer owns the receipts `File`; no shared lock, no shared handle).
 ///
-/// WO-147/154@v1: the permission loop must never block on output, and the
+/// WO-154@v1: the permission loop must never block on output, and the
 /// receipts FILE must never wait on stderr. Two independent queues/writers
 /// provide both: `record` enqueues to each and returns immediately, each writer
 /// drains its own queue, and when a queue is full that record is dropped and
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
     }
 
-    /// WO-154/155@v1: in a normal run the summary is the writer's LAST message —
+    /// WO-155@v1: in a normal run the summary is the writer's LAST message —
     /// enqueued after every record and formed from the drained counters — so it is
     /// the final line and its file numbers balance exactly. Uses the system temp
     /// dir, which on macOS traverses a system symlink (`/var` → `/private/var`),

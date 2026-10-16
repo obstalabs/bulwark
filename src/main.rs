@@ -731,7 +731,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// WO-147@v3: the root-owned runtime consent socket path, shared by the
+/// WO-147@v1: the root-owned runtime consent socket path, shared by the
 /// root gate default and the non-root client's preference check.
 fn runtime_consent_socket() -> PathBuf {
     if cfg!(target_os = "macos") {
@@ -759,7 +759,7 @@ fn default_consent_socket() -> PathBuf {
     PathBuf::from("/tmp/bulwark-consent.sock")
 }
 
-/// WO-147@v3: the `bulwark consent` client default. A non-root operator
+/// WO-147@v1: the `bulwark consent` client default. A non-root operator
 /// answering a root gate (`sudo bulwark run`) must reach the same root-owned
 /// runtime socket, so prefer it when its node exists; otherwise keep the
 /// per-user default.
@@ -786,7 +786,7 @@ fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the user's home directory from `$HOME`. WO-145@v3 (G2): protect
+/// Resolve the user's home directory from `$HOME`. WO-145@v2: protect
 /// expansion no longer uses this (it uses the host home set); retained for any
 /// caller that wants one user's home.
 // WO-145@v2: isolate legacy single-home lookup from host-wide protect expansion.
@@ -795,7 +795,7 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
 }
 
-/// WO-145@v3 (G1): the enumerated homes owned by `uid`.
+/// WO-145@v2: the enumerated homes owned by `uid`.
 // WO-145@v2: require a non-root worker to own an enumerated host home.
 fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {
     use std::os::unix::fs::MetadataExt;
@@ -810,7 +810,7 @@ fn homes_owned_by_uid(homes: &[String], uid: u32) -> Vec<&str> {
         .collect()
 }
 
-/// WO-145@v3 (G3): the enumerated home `path` was expanded from, if any — the
+/// WO-145@v2: the enumerated home `path` was expanded from, if any — the
 /// longest home that equals `path` or is a directory ancestor of it.
 // WO-145@v2: retain the source home for expanded-path diagnostics.
 fn origin_home<'a>(path: &str, homes: &'a [String]) -> Option<&'a str> {
@@ -821,7 +821,7 @@ fn origin_home<'a>(path: &str, homes: &'a [String]) -> Option<&'a str> {
         .map(|s| s.as_str())
 }
 
-/// WO-145@v3 (G3): the two stat errors that prove a protect path is absent
+/// WO-145@v2: the two stat errors that prove a protect path is absent
 /// (NotFound, and ENOTDIR when a component is a regular file) — the same rule
 /// the lenient resolver applies, so the pre-flight stat agrees with it.
 // WO-145@v2: distinguish absent paths from protection errors that must refuse launch.
@@ -829,7 +829,7 @@ fn protect_stat_is_absent(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
 }
 
-/// WO-145@v3 (G3): the refusal message for an expanded protect path whose stat
+/// WO-145@v2: the refusal message for an expanded protect path whose stat
 /// failed with something other than "absent". Naming the origin home (and that
 /// it belongs to a different user) and pointing at absolute --protect turns a
 /// bare EACCES/EIO into a diagnosable failure.
@@ -2387,7 +2387,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 homes.len()
             );
         }
-        // WO-145@v3 (G1): when the agent will run as a KNOWN non-root uid, at
+        // WO-145@v2: when the agent will run as a KNOWN non-root uid, at
         // least one enumerated home must be owned by it, or `~/` entries do not
         // cover that user's own home (LDAP/AD/SSSD accounts and homes outside
         // /home|/Users are not enumerated). An explicit `--worker-uid` with no
@@ -2429,7 +2429,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 globs.join(", ")
             );
         }
-        // WO-145@v3 (G3): stat each expanded protect path once with its origin
+        // WO-145@v2: stat each expanded protect path once with its origin
         // home, so a non-absent failure names the home (and that it may belong
         // to another user) and points at absolute --protect. Stat only the
         // expanded paths — never readdir inside a home (which could trigger an
@@ -2796,7 +2796,7 @@ fn cmd_check(
     format: OutputFormat,
 ) -> Result<()> {
     use policy::{OutsideWorkspace, PolicyDecision};
-    // WO-145@v4 (D): a `~/` allow entry is not expanded across homes and grants
+    // WO-145@v2: a `~/` allow entry is not expanded across homes and grants
     // nothing; say so once so the operator reaches for an absolute path.
     let homes = policy::host_homes();
     let policy = load_policy(profile, policy_path)?;
@@ -3501,7 +3501,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
 
     #[test]
     fn gate_script_auto_worker_sends_numeric_uid_and_no_hidden_flag() {
-        // WO-145@v7: the hidden `run --auto-worker-uid` argument and its
+        // WO-145@v2: the hidden `run --auto-worker-uid` argument and its
         // serialization were removed. An anonymous worker dispatch resolves the
         // uid ssh-side and emits ONLY the numeric `--worker-uid <n>` — never
         // `--auto-worker-uid` nor any other argument v0.9.2's `run` does not
@@ -3707,7 +3707,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
     }
 
-    // WO-145@v3 (G1): the home-ownership predicate drives the refuse/pass call;
+    // WO-145@v2: the home-ownership predicate drives the refuse/pass call;
     // the anonymous-worker exemption is the passwd lookup.
     // WO-145@v2: prove target-uid ownership controls host-home eligibility.
     #[test]

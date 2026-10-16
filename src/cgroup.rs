@@ -54,7 +54,7 @@ impl CgroupScope {
     /// to the ancestry walk.
     // WO-59@v1: create a dedicated scope before the supervised process starts.
     pub fn create(supervisor_pid: i32) -> Option<Self> {
-        // WO-155@v1 (fault-injection): a test-only switch simulates a host with no
+        // WO-155@v1: fault-injection: a test-only switch simulates a host with no
         // writable cgroup-v2 scope (compiled in only under `fault-injection`).
         // It exercises the scope-less teardown and the default-mode refusal.
         #[cfg(feature = "fault-injection")]
@@ -149,7 +149,7 @@ impl CgroupScope {
     /// normal-exit with a lingering descendant, so a daemonized orphan never
     /// outlives the run.
     pub fn kill_all(&self) -> bool {
-        // WO-155@v1 (fault-injection): a test-only switch makes `cgroup.kill`
+        // WO-155@v1: fault-injection: a test-only switch makes `cgroup.kill`
         // fail, forcing the freeze + per-pid SIGKILL fallback (compiled in only
         // under `fault-injection`).
         #[cfg(feature = "fault-injection")]

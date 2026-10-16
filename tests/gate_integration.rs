@@ -50,11 +50,10 @@ fn run_gate(protect: &[&Path], cmd: &[&str], receipts: &Path) -> (String, String
     (stdout, stderr, recs)
 }
 
-// WO-145@v3 (G1): a SUDO_UID with no /etc/passwd entry (an LDAP/AD-style
+// WO-145@v2: a SUDO_UID with no /etc/passwd entry (an LDAP/AD-style
 // account) whose home sits outside /home must refuse before anything runs —
 // the default profile's `~/` entries cannot cover that user's own home. The
 // marker proves the agent never exec'd.
-// WO-145@v2: a SUDO_UID that owns no enumerated home refuses before anything runs.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn tilde_refuses_when_sudo_uid_owns_no_enumerated_home() {
@@ -101,7 +100,7 @@ fn tilde_refuses_when_sudo_uid_owns_no_enumerated_home() {
     let _ = fs::remove_dir_all(&ldap_home);
 }
 
-// WO-145@v4: an EXPLICIT --worker-uid with no passwd line and no enumerated
+// WO-145@v2: an EXPLICIT --worker-uid with no passwd line and no enumerated
 // home must REFUSE — the earlier exemption keyed on "no passwd line" wrongly
 // spared an LDAP/AD account. Nothing may run.
 #[test]
@@ -149,9 +148,9 @@ fn tilde_refuses_explicit_worker_uid_with_no_home() {
     let _ = fs::remove_dir_all(&home);
 }
 
-// WO-145@v4: an --auto-worker-uid anonymous worker (allocated by the remote
+// WO-145@v2: an --auto-worker-uid anonymous worker (allocated by the remote
 // --auto path, no account) OWNS no home, so it is exempt and must still run.
-// WO-145@v7: the hidden local-run exemption was removed — `run --worker-uid` with
+// WO-145@v2: the hidden local-run exemption was removed — `run --worker-uid` with
 // no enumerated home must REFUSE with no exemption path left.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
@@ -198,10 +197,9 @@ fn tilde_explicit_worker_uid_with_no_home_refuses_without_an_auto_exemption() {
     let _ = fs::remove_dir_all(&home);
 }
 
-// WO-145@v6 (F): a root agent with the default `~` profile still covers /root.
+// WO-145@v2: a root agent with the default `~` profile still covers /root.
 // Run-evidence assertions: the agent RAN (done marker + exit 0), the read shows a
 // kernel denial and not the secret, and the deny line names /root/.ssh/<fixture>.
-// WO-145@v2: a root agent's own /root home stays covered, without a different-user message.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn root_agent_home_is_covered_without_a_different_user_message() {
@@ -210,7 +208,7 @@ fn root_agent_home_is_covered_without_a_different_user_message() {
     let name = format!("r6_fixture_{}", std::process::id());
     let key = key_dir.join(&name);
     fs::write(&key, "R6_SECRET\n").unwrap();
-    // WO-145@v7 (c): read_out must live OUTSIDE any protected path, so the write
+    // WO-145@v2: read_out must live OUTSIDE any protected path, so the write
     // redirect itself is not denied — only the key READ is, which is what we assert.
     let scratch_dir = std::env::temp_dir().join(format!(
         "r6-scratch-{}-{}",
@@ -243,7 +241,7 @@ fn root_agent_home_is_covered_without_a_different_user_message() {
     let status = out.status;
     let read = fs::read_to_string(&read_out).unwrap_or_default();
 
-    // WO-145@v7 (c): clean up FIRST — remove the key and the scratch dir before
+    // WO-145@v2: clean up FIRST — remove the key and the scratch dir before
     // any assertion, so a failed assertion never leaves fixtures behind.
     let _ = fs::remove_file(&key);
     let _ = fs::remove_dir_all(&scratch_dir);

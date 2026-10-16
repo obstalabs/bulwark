@@ -32,7 +32,7 @@ use crate::receipt::LogSink;
 
 const ANCESTRY_MAX_DEPTH: usize = 16;
 
-/// WO-147/154@v1: the maximum length (bytes) of a verdict line accepted from the
+/// WO-154@v1: the maximum length (bytes) of a verdict line accepted from the
 /// operator. A longer reply is malformed — and a bounded read defeats a peer
 /// that trickles an unbounded line to hold the event open — so it is denied.
 const VERDICT_LINE_MAX: usize = 64;
@@ -130,7 +130,7 @@ pub fn bound_path(requested: &Path) -> PathBuf {
     std::path::PathBuf::from(dir).join("s")
 }
 
-/// WO-147@v3: a relative socket path is resolved against the current working
+/// WO-147@v1: a relative socket path is resolved against the current working
 /// directory, so the supervisor and the operator derive the same absolute node
 /// and the safe-path walk always starts from a real path.
 pub(crate) fn absolutize(path: &Path) -> PathBuf {
@@ -179,7 +179,7 @@ fn open_dir_nofollow(dir: &Path) -> Result<RawFd> {
     Ok(fd)
 }
 
-/// WO-147@v2: revalidate a just-opened consent socket dir fd and return its
+/// WO-147@v1: revalidate a just-opened consent socket dir fd and return its
 /// `fstat`. Refuses (closing the fd) unless the OPENED object is a real
 /// directory owned by `uid` with no group/other write. This is the check the
 /// whole rest of the bind depends on: `fchmod(fd)` and every later
@@ -207,7 +207,7 @@ fn verified_dir_fd(fd: RawFd, uid: u32, what: &Path) -> Result<libc::stat> {
     Ok(st)
 }
 
-/// WO-147@v3: the verified socket directory handed back by
+/// WO-147@v1: the verified socket directory handed back by
 /// [`prepare_socket_dir`]: the held `O_DIRECTORY|O_NOFOLLOW` fd plus its pinned
 /// dev/ino, so the provider can later refuse to act on a swapped-in replacement.
 struct PreparedDir {
@@ -232,7 +232,7 @@ fn prepare_socket_dir(dir: &Path) -> Result<PreparedDir> {
     // subsequent open of the same path must land on that object.
     let created: Option<(libc::dev_t, libc::ino_t)> =
         if unsafe { libc::mkdir(c.as_ptr(), mode) } == 0 {
-            // WO-147@v2: lstat the path IMMEDIATELY after a fresh mkdir and pin its
+            // WO-147@v1: lstat the path IMMEDIATELY after a fresh mkdir and pin its
             // dev/ino, so the opened fd can be required to name the same object.
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
             // SAFETY: lstat on the path; st is a valid out-param.
@@ -328,7 +328,7 @@ fn ensure_root_parent(parent: &Path) -> Result<()> {
             );
         }
     }
-    // WO-147@v3: fix the mode through a verified
+    // WO-147@v1: fix the mode through a verified
     // O_DIRECTORY|O_NOFOLLOW fd even on a fresh create — a permissive umask
     // (077) would otherwise leave a root-only 0700 dir the invoking user cannot
     // traverse to reach the chowned node.
@@ -344,7 +344,7 @@ fn ensure_root_parent(parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// WO-147@v3: a StrictModes-style safe-path check. Canonicalize the parent of
+/// WO-147@v1: a StrictModes-style safe-path check. Canonicalize the parent of
 /// `<sock>.d`, then walk every ancestor component from the filesystem root down;
 /// each must be a real directory owned by root or the effective uid and either
 /// have no group/other write or carry the sticky bit. Checking only the
@@ -406,10 +406,10 @@ pub struct SocketProvider {
     path: PathBuf,
     supervised_root: i32,
     timeout: Duration,
-    /// WO-147@v3: the exclusivity `flock` on `<sock>.d/lock`, held for
+    /// WO-147@v1: the exclusivity `flock` on `<sock>.d/lock`, held for
     /// the provider's lifetime so a second run on the same path is refused.
     lock_fd: RawFd,
-    /// WO-147@v3: the verified socket dir's dev/ino, pinned at bind.
+    /// WO-147@v1: the verified socket dir's dev/ino, pinned at bind.
     /// Drop must refuse to touch a replacement directory whose dev/ino differs,
     /// so a real-directory swap after bind leaves the replacement intact.
     dir_dev: libc::dev_t,
@@ -421,7 +421,7 @@ pub struct SocketProvider {
     /// `None` falls back to the ancestry check alone (macOS, or a v1 host).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     scope_rel: Option<String>,
-    /// WO-147/154@v1: the gate's log sink, attached once the gate has its log.
+    /// WO-154@v1: the gate's log sink, attached once the gate has its log.
     /// Peer-refusal and socket-error diagnostics go through it (never a
     /// synchronous stderr write) so the consent worker cannot stall on output.
     /// `None` until `attach_log`; the refusal is enforced regardless.
@@ -441,7 +441,7 @@ impl SocketProvider {
     /// (0600, to the invoking user under sudo), so the agent cannot rename or
     /// replace the node. Peer checks are unchanged.
     pub fn bind(path: &Path, supervised_root: i32, timeout: Duration) -> Result<Self> {
-        // WO-147@v3: resolve a relative request against the cwd before deriving
+        // WO-147@v1: resolve a relative request against the cwd before deriving
         // the node, so the supervisor and the client reach the same absolute path.
         let path = absolutize(path);
         let socket = bound_path(&path);
@@ -470,7 +470,7 @@ impl SocketProvider {
         // ensure the root-only runtime parent when root (no-op for
         // an explicit --consent-socket or a non-root run).
         ensure_root_parent(parent)?;
-        // WO-147@v3: the parent must be a directory root/euid cannot
+        // WO-147@v1: the parent must be a directory root/euid cannot
         // have renamed out from under us before mkdir of <sock>.d.
         check_parent(parent)?;
         let prepared = prepare_socket_dir(dir)?;
@@ -478,7 +478,7 @@ impl SocketProvider {
         let dir_ino = prepared.ino;
         let dirfd = prepared.fd;
 
-        // WO-147@v3: take an exclusive run lock inside <sock>.d before
+        // WO-147@v1: take an exclusive run lock inside <sock>.d before
         // ever unlinking a stale node, so a second run on the same path cannot
         // silently steal the first run's live socket and its verdicts. The lock
         // fd is held for the provider's lifetime.
@@ -757,7 +757,7 @@ impl SocketProvider {
 }
 
 impl Drop for SocketProvider {
-    // WO-147@v3: remove the consent node through its verified directory identity.
+    // WO-147@v1: remove the consent node through its verified directory identity.
     fn drop(&mut self) {
         // Unlink the node while still holding the run lock, then release the
         // lock last — so a racing second bind cannot publish its node while this
@@ -768,7 +768,7 @@ impl Drop for SocketProvider {
     }
 }
 
-/// WO-147@v3: unlink the node through the directory fd, never by path — and only
+/// WO-147@v1: unlink the node through the directory fd, never by path — and only
 /// after confirming that the directory the path now resolves to is still the one
 /// pinned at bind (`dir_dev`/`dir_ino`), so a real-directory swap is never
 /// touched. The lock file (and the directory) are left in place: the lock is a
@@ -829,7 +829,7 @@ impl SocketProvider {
     /// deadline, never blocked past it.
     // WO-154@v1: share one absolute deadline across accept, write, and read.
     fn request_for(&mut self, req: &ConsentRequest, timeout: Duration) -> (Verdict, Source) {
-        // WO-147/154@v1: ONE absolute deadline per request (arrival + timeout),
+        // WO-154@v1: ONE absolute deadline per request (arrival + timeout),
         // shared by accept, write and read and never reset per phase.
         let deadline = std::time::Instant::now() + timeout;
         let stream = match self.accept_operator_for(deadline) {
@@ -894,7 +894,7 @@ impl SocketProvider {
     }
 }
 
-/// WO-147/154@v1: poll `fd` for `events`, bounded by the absolute `deadline`.
+/// WO-154@v1: poll `fd` for `events`, bounded by the absolute `deadline`.
 /// True only when the event becomes ready before then; false at the deadline, on
 /// a real poll error, or on shutdown. Each poll slice stays ≤ 1 s (so a signal is
 /// noticed promptly) but the slices LOOP until the deadline — a slice expiring is
@@ -937,7 +937,7 @@ fn poll_ready(fd: RawFd, events: libc::c_short, deadline: std::time::Instant) ->
 /// request, and send the operator's verdict. One-shot (answers a single
 /// pending request). Returns the verdict string sent.
 pub fn answer_once(socket: &Path, verdict: Option<Verdict>) -> Result<String> {
-    // WO-147@v3: resolve a relative request against the cwd (the supervisor
+    // WO-147@v1: resolve a relative request against the cwd (the supervisor
     // does the same in `bind`), then both sides derive the same on-disk node.
     let socket = absolutize(socket);
     let node = bound_path(&socket);
@@ -946,7 +946,7 @@ pub fn answer_once(socket: &Path, verdict: Option<Verdict>) -> Result<String> {
     // supervisor is not yet accepting), or just after binding. A short backoff
     // makes the client robust instead of failing the race.
     let stream = connect_with_retry(&node, Duration::from_secs(5))?;
-    // WO-147@v3: a bounded read timeout, so the client can never block forever
+    // WO-147@v1: a bounded read timeout, so the client can never block forever
     // if the gate does not answer (a stale or foreign node).
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -1063,12 +1063,12 @@ mod tests {
         assert!(parse_request("allow-once\n").is_none());
     }
 
-    // WO-147@v2 (P1): verified_dir_fd must refuse an opened directory it cannot
+    // WO-147@v1: verified_dir_fd must refuse an opened directory it cannot
     // prove is owned by the claimed uid with no group/other write. Hand it an fd
     // of a directory the process owns but claim a different owner: the fstat is
     // of a directory not owned by that uid, so the verified-open path refuses.
     #[test]
-    // WO-147@v3: reject a directory fd whose ownership does not match the claim.
+    // WO-147@v1: reject a directory fd whose ownership does not match the claim.
     fn verified_dir_fd_refuses_a_dir_not_owned_by_the_claimed_uid() {
         let base = std::path::PathBuf::from(format!(
             "/tmp/bulwark-verified-{}-{}",
@@ -1251,7 +1251,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147@v3: cleanup must not touch a swapped-in REAL directory. After bind,
+    // WO-147@v1: cleanup must not touch a swapped-in REAL directory. After bind,
     // rename <sock>.d away and create a fresh directory at the same name holding
     // its own `s`; drop must leave both files intact. Red on the old cleanup,
     // which compares against a fresh open (a real swap then matches itself and
@@ -1299,7 +1299,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147@v3: bind must refuse a parent of <sock>.d that is a directory
+    // WO-147@v1: bind must refuse a parent of <sock>.d that is a directory
     // group/other-writable WITHOUT the sticky bit (a non-sticky 0777 here), so no
     // one can rename <sock>.d away between its verification and the bind.
     #[test]
@@ -1336,7 +1336,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147@v3: a run on a path another provider already bound must be refused —
+    // WO-147@v1: a run on a path another provider already bound must be refused —
     // not silently take over the live node — and the first provider must keep
     // answering. Red when the second bind replaces the first (the old unlink-then-
     // bind), green once the exclusivity lock is held for the provider's lifetime.
@@ -1374,7 +1374,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("bind after the first dropped must succeed: {e}"));
     }
 
-    // WO-147@v3: teardown must never unlink the run lock. Red when drop removed
+    // WO-147@v1: teardown must never unlink the run lock. Red when drop removed
     // the lock file (so a successor run's lock could vanish under it); green once
     // the lock is a permanent sibling and only `s` is unlinked.
     #[test]
@@ -1404,7 +1404,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147@v3: the safe-path walk must catch a writable ANCESTOR, not just the
+    // WO-147@v1: the safe-path walk must catch a writable ANCESTOR, not just the
     // immediate parent. Here the immediate parent (`inner`, 0755 owned by us) is
     // safe, but its parent (`base`, 0777 non-sticky) is not — red when only the
     // immediate parent was checked and the bind proceeded.
@@ -1441,7 +1441,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147@v3: a relative socket path resolves against the cwd before the
+    // WO-147@v1: a relative socket path resolves against the cwd before the
     // `<sock>.d` derivation, so bind no longer fails on the empty parent. Scoped
     // to an euid-owned temp dir (and the cwd restored) so it passes under both
     // root and non-root runs.
@@ -1534,7 +1534,7 @@ mod tests {
         assert_eq!(source, Source::Timeout);
     }
 
-    // WO-147/154@v1: ONE absolute deadline per consent request, shared by the
+    // WO-154@v1: ONE absolute deadline per consent request, shared by the
     // accept, write and read phases. A peer that connects when only a sliver of
     // the consent window remains, then stalls its reply, must not stretch the
     // wait past that deadline (plus scheduling slack) — under the old per-phase
@@ -1594,7 +1594,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147/154@v1: a peer that trickles bytes one at a time (no verdict line)
+    // WO-154@v1: a peer that trickles bytes one at a time (no verdict line)
     // must not hold the event past the absolute deadline — poll() bounds every
     // read, so `remaining == 0` denies instead of a per-syscall timeout re-arming
     // on each trickled byte.
@@ -1647,7 +1647,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147/154@v1: when the operator's window is already spent by the accept,
+    // WO-154@v1: when the operator's window is already spent by the accept,
     // the write/read phases must deny at once (remaining <= 0), never block.
     #[test]
     // WO-154@v1: deny immediately when no consent window remains.
@@ -1693,7 +1693,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // WO-147/154@v1: an operator who answers past one second (the old poll slice
+    // WO-154@v1: an operator who answers past one second (the old poll slice
     // cap) must still be heard — the read loop slices until the absolute deadline,
     // never denying on an expired 1 s slice.
     #[test]

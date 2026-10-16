@@ -58,7 +58,7 @@ pub struct ObjId {
     pub generation: Option<u64>,
 }
 
-/// WO-130@v2: the generation of the object at `path`, through the same
+/// WO-130@v1: the generation of the object at `path`, through the same
 /// `FS_IOC_GETVERSION` read the allow-list snapshot uses. The path is opened
 /// read-only and FOLLOWS a top-level symlink to its target, so it matches
 /// `ProtectedSet::resolve` (which resolves via `fs::metadata`, i.e. follows).
@@ -1111,7 +1111,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // WO-130@v2: generation_of must report the generation of the object ACTUALLY
+    // WO-130@v1: generation_of must report the generation of the object ACTUALLY
     // protected. ProtectedSet resolves with fs::metadata, which follows a
     // top-level symlink to its target; generation_of must do the same, or a
     // symlinked protect entry records None and drift collapses to (dev, ino) —

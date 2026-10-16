@@ -117,7 +117,7 @@ pub trait ConsentProvider {
     // WO-59@v1: reject consent peers that belong to the supervised cgroup.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
-    /// WO-147/154@v1: attach the gate's log sink so this provider's diagnostics
+    /// WO-154@v1: attach the gate's log sink so this provider's diagnostics
     /// (e.g. a refused off-band peer) line through the bounded queue instead of
     /// a synchronous stderr write that could stall the consent worker. Default:
     /// no-op (the static-deny floor, and providers with no diagnostics).

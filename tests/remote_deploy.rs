@@ -181,7 +181,7 @@ fn deploy_dist_fetches_and_runs() {
         combined.contains("fetching bulwark") || combined.contains("from dist"),
         "dist deploy should announce a fetch; got:\n{combined}"
     );
-    // WO-145@v7: the launcher must exit successfully (the gate ran to completion),
+    // WO-145@v2: the launcher must exit successfully (the gate ran to completion),
     // and the denial must be the gate's actual deny line attributing the open to
     // the command — not a bare "deny" substring (which the word "deny" in
     // "--auto deny" or usage text would satisfy vacuously).
@@ -435,7 +435,7 @@ fn deploy_never_without_binary_errors_clearly() {
     let secret = dir.join("secret.env");
     fs::write(&secret, "x\n").unwrap();
 
-    // WO-147@v2: the "no bulwark" error is the ONLY thing this test
+    // WO-147@v1: the "no bulwark" error is the ONLY thing this test
     // asserts, so it must not report ok when the remote HAS bulwark and the error
     // path is never exercised (a vacuous pass on a product failure is a bug, not a
     // pass). Fail the precondition loudly instead of an eprintln + early return.

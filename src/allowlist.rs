@@ -275,7 +275,7 @@ impl AllowList {
             if prefix.is_empty() {
                 continue;
             }
-            // WO-137@v1 (F1): the symlink check must see the real final
+            // WO-137@v1: the symlink check must see the real final
             // component. `link/.` and `link/` both lstat as the target because
             // the kernel resolves the link to reach `.` or the trailing slash,
             // so the check runs on the lexically normalized prefix. Only the
@@ -290,7 +290,7 @@ impl AllowList {
             };
             match fs::symlink_metadata(&anchor) {
                 Ok(m) if m.file_type().is_symlink() => {
-                    // WO-137@v1 (F3): say why the grant is empty and what to
+                    // WO-137@v1: say why the grant is empty and what to
                     // grant instead. On macOS /tmp, /var and /etc are symlinks,
                     // so `--allow /tmp/**` would otherwise fail silently.
                     // canonicalize is a read-only realpath for the message.
@@ -500,7 +500,7 @@ fn concrete_prefix(g: &str) -> &str {
     }
 }
 
-/// WO-137@v1 (F1): the path whose final component the symlink check must
+/// WO-137@v1: the path whose final component the symlink check must
 /// lstat, derived lexically from a concrete prefix: trailing `/` and `.`
 /// components are dropped (`link/.` and `link/` both anchor on `link`), and a
 /// prefix whose final component is `..` yields `None` because `..` can step
@@ -707,7 +707,7 @@ mod inode_tests {
         assert_eq!(concrete_prefix("/*"), "/");
     }
 
-    // WO-137@v1 (F1): lexical anchor for the symlink check.
+    // WO-137@v1: lexical anchor for the symlink check.
     // WO-137@v1: pin lexical anchors used by the symlink-root refusal.
     #[test]
     fn prefix_anchor_cases() {
@@ -840,7 +840,7 @@ mod inode_tests {
         );
     }
 
-    // WO-137@v1 (F1): the symlink check must see the real final component.
+    // WO-137@v1: the symlink check must see the real final component.
     // `link/./**` has the concrete prefix `link/.` and `link/**` written with a
     // trailing slash has `link/`; lstat resolves `link` for both, so the target
     // tree was snapshotted through the back door. A `..`-terminated prefix is

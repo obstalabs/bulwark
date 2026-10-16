@@ -128,7 +128,7 @@ fn pending_consent_does_not_delay_outside_opens() {
     let _ = gate.wait();
 }
 
-/// WO-147/154@v1: the receipts FILE must never wait on stderr. Two bounded
+/// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded
 /// queues/writers drain independently: with stderr stalled on a never-read pipe,
 /// the file still receives every one of the 6000 receipts (its own queue never
 /// drops), and the per-sink summary balances exactly — `submitted == written +
@@ -1020,7 +1020,7 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
     );
 }
 
-/// WO-147/155@v1 (fault-injection): in a DEFAULT build (feature OFF) the
+/// WO-155@v1: fault-injection: in a DEFAULT build (feature OFF) the
 /// test-only reaping switches are not compiled in, so setting BOTH
 /// `BULWARK_TEST_NO_CGROUP` and `BULWARK_TEST_NO_PDEATHSIG` must be ignored and
 /// the agent must still die with the gate. Compiled only when the feature is
@@ -1783,7 +1783,7 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
     assert!(!leak.exists(), "no protected read may have succeeded");
 }
 
-/// WO-155@v1 (P3): a SIGTERM-cooperative child (a TERM trap that writes a marker
+/// WO-155@v1: a SIGTERM-cooperative child (a TERM trap that writes a marker
 /// and exits) must observe the forwarded SIGTERM and exit BEFORE the reap
 /// escalates to SIGKILL — the marker proves the child got SIGTERM, not SIGKILL.
 // WO-155@v1: give cooperative children a bounded graceful exit before reaping.
@@ -1924,7 +1924,7 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// WO-155@v1 (P2): on a successful cgroup.kill the watcher must NOT exit until it
+/// WO-155@v1: on a successful cgroup.kill the watcher must NOT exit until it
 /// can positively confirm the scope is empty. With the cgroup.events reads failing
 /// indefinitely (injected), a hard SIGKILL of the supervisor must leave the watcher
 /// ALIVE after 2 s — it cannot prove empty, so it keeps holding the fanotify fd and
@@ -2014,7 +2014,7 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
     // The guard reaps the still-alive watcher on drop (also on an assertion failure).
 }
 
-/// WO-155@v1 (P2): on a successful cgroup.kill the watcher polls cgroup.events for
+/// WO-155@v1: on a successful cgroup.kill the watcher polls cgroup.events for
 /// positive proof. With the events forced to report `populated 1` for N reads
 /// (injected), the watcher must STAY ALIVE during those reads and exit only once a
 /// later read reports `populated 0`. Exercises the kill-success polling rule.
@@ -2082,7 +2082,7 @@ fn the_watcher_stays_alive_while_events_report_populated() {
     guard.watchers_exited(deadline);
 }
 
-/// WO-155@v1 (P1): a SUPERVISOR PANIC must not release the watcher — a
+/// WO-155@v1: a SUPERVISOR PANIC must not release the watcher — a
 /// panic-unwind drop of the guard closes the pipe, so the watcher REAPS the tree
 /// rather than exiting unwatched. The fault-injection switch arms a SIGUSR2
 /// handler; the test signals the supervisor once the grandchild is live. The
@@ -2173,7 +2173,7 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
     guard.watchers_exited(watcher_deadline);
 }
 
-/// WO-155@v1 (P2): a file writer blocked indefinitely (fault-injection) AND a
+/// WO-155@v1: a file writer blocked indefinitely (fault-injection) AND a
 /// stderr pipe nobody drains must not delay the gate's exit — Drop enqueues the
 /// summary, waits only a bounded time, and returns regardless, so the gate
 /// finishes within the bound + 1 s and its integrity state is clean.

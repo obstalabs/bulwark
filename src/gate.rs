@@ -60,7 +60,7 @@ pub(crate) struct DeferredConsent {
 /// unbounded queue would let a flood pin an unbounded number of open fds.
 const CONSENT_QUEUE_CAP: usize = 256;
 
-/// WO-147/155@v1 (fault-injection): test-only switches that disable one reaping
+/// WO-155@v1: fault-injection: test-only switches that disable one reaping
 /// layer so each can be proven independently. Compiled in ONLY under the
 /// `fault-injection` cargo feature — without it these symbols (and the reads
 /// below) do not exist, so a release binary cannot have its reaping layers
@@ -123,14 +123,14 @@ fn begin_draining() {
     DRAINING.store(true, Ordering::SeqCst);
 }
 
-/// WO-155@v1 (fault-injection): set by a SIGUSR2 handler to make the supervisor
+/// WO-155@v1: fault-injection: set by a SIGUSR2 handler to make the supervisor
 /// PANIC in the event loop, so a test can prove a panic-unwind drop of the
 /// watcher guard leaves the watcher REAPING (never releasing). Compiled in ONLY
 /// under the `fault-injection` feature — a release binary has no such trigger.
 #[cfg(feature = "fault-injection")]
 static TEST_PANIC: AtomicBool = AtomicBool::new(false);
 
-/// WO-155@v1 (fault-injection): async-signal-safe; the event loop does the actual
+/// WO-155@v1: fault-injection: async-signal-safe; the event loop does the actual
 /// panic, where unwinding is safe.
 #[cfg(feature = "fault-injection")]
 // WO-155@v1: exercise panic teardown without adding a production trigger.
@@ -177,7 +177,7 @@ fn install_shutdown_handlers() {
             libc::sigaction(sig, &action, std::ptr::null_mut());
         }
     }
-    // WO-155@v1 (fault-injection): arm the supervisor-panic trigger (SIGUSR2),
+    // WO-155@v1: fault-injection: arm the supervisor-panic trigger (SIGUSR2),
     // only when the test sets the switch — a stray SIGUSR2 never panics an
     // unrelated fault-injection build.
     #[cfg(feature = "fault-injection")]
@@ -215,7 +215,7 @@ pub trait ConsentDecider {
     // WO-71@v1: authenticate consent against the gate's cgroup membership boundary.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
-    /// WO-147/154@v1: attach the gate's log sink so this decider's diagnostics
+    /// WO-154@v1: attach the gate's log sink so this decider's diagnostics
     /// (e.g. a refused off-band peer) go through the bounded queue instead of a
     /// synchronous stderr write that could stall the consent worker. Default:
     /// no-op (the static-deny floor, and providers with no peer diagnostics).
@@ -683,7 +683,7 @@ fn event_loop(
     let mut sigterm_sent = false;
 
     loop {
-        // WO-155@v1 (fault-injection): the SIGUSR2 handler set this; panic HERE
+        // WO-155@v1: fault-injection: the SIGUSR2 handler set this; panic HERE
         // (the main loop), so the unwind is safe but observable — the dropped
         // watcher guard must leave the watcher reaping, and a still-held
         // grandchild read must never be released as allowed.
@@ -1403,7 +1403,7 @@ impl WatcherGuard {
 /// until `cgroup.events` reports `populated 0`. Returns the write end (guarded)
 /// for the supervisor to hold; `None` when there is no cgroup scope.
 fn spawn_watcher(scope: Option<&crate::cgroup::CgroupScope>) -> Result<Option<WatcherGuard>> {
-    // WO-147/155@v1 (fault-injection): a test-only switch disables the watcher so
+    // WO-155@v1: fault-injection: a test-only switch disables the watcher so
     // a test can prove the direct-child parent-death signal alone. Compiled in
     // only under the `fault-injection` feature.
     #[cfg(feature = "fault-injection")]
@@ -1415,7 +1415,7 @@ fn spawn_watcher(scope: Option<&crate::cgroup::CgroupScope>) -> Result<Option<Wa
         None => return Ok(None),
     };
 
-    // WO-155@v1 (fault-injection): read before fork so the watcher's raw-libc
+    // WO-155@v1: fault-injection: read before fork so the watcher's raw-libc
     // body needs no getenv. `kill_write_fails` makes the cgroup.kill write fail;
     // `events_read_failures` fails the first N cgroup.events reads; `no_procs_events`
     // makes the membership/status files unopenable (a refusal host). Together they
@@ -1452,7 +1452,7 @@ fn spawn_watcher(scope: Option<&crate::cgroup::CgroupScope>) -> Result<Option<Wa
     // open() pathnames itself. Each fd is CLOEXEC so the agent's exec drops
     // them; the watcher child never execs, so it keeps its copies.
     let kill_fd = {
-        // WO-155@v1 (fault-injection): the "no cgroup.kill" switch applies to the
+        // WO-155@v1: fault-injection: the "no cgroup.kill" switch applies to the
         // watcher too — on a host without cgroup.kill the watcher must use the
         // freeze + SIGKILL sweep, not silently fail.
         #[cfg(feature = "fault-injection")]
@@ -1602,7 +1602,7 @@ const WATCHER_RETRY: libc::timespec = libc::timespec {
 /// is reaped, and that fd only closes on the final `_exit`. It exits ONLY on
 /// positive proof the scope is empty; on any doubt it sleeps and retries, so it
 /// may stay alive indefinitely — a frozen tree is the fail-closed outcome.
-/// WO-155@v1 (fault-injection): the injected faults the crash watcher honors,
+/// WO-155@v1: fault-injection: the injected faults the crash watcher honors,
 /// read before fork and passed in by value — the post-fork body takes no env
 /// reads, and bundling them keeps the argument list to the four fds.
 #[derive(Clone, Copy)]
