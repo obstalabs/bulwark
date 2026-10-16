@@ -21,6 +21,7 @@ const MAX_RECURSION_DEPTH: usize = 64;
 /// (the descendant check still covers the rest). Logged when hit.
 const MAX_SNAPSHOT_ENTRIES: usize = 200_000;
 
+// WO-3@v1: key protected Linux objects by stable device and inode identity.
 /// A device+inode pair uniquely identifying a file on the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InodeKey {

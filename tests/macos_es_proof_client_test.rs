@@ -2,6 +2,8 @@ use std::fs;
 use std::path::Path;
 
 // WO-38/WO-39: source-invariant tests for the macOS ES proof scripts.
+// WO-38@v1: load proof sources for deterministic bundle-seal invariants.
+// WO-39@v1: load the proof client for responder and concurrency invariants.
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))

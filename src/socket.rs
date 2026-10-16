@@ -37,6 +37,7 @@ const ANCESTRY_MAX_DEPTH: usize = 16;
 /// that trickles an unbounded line to hold the event open — so it is denied.
 const VERDICT_LINE_MAX: usize = 64;
 
+// WO-8@v1: authenticate Linux operator peers by kernel-reported process identity.
 /// Read the peer PID of a connected Unix socket via `SO_PEERCRED`.
 #[cfg(target_os = "linux")]
 fn peer_pid(stream: &UnixStream) -> Option<i32> {

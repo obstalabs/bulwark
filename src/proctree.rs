@@ -15,6 +15,7 @@ pub struct ProcNode {
     pub comm: String,
 }
 
+// WO-3@v1: derive Linux process ancestry from procfs for gate attribution.
 /// Read `(comm, ppid)` from `/proc/<pid>/stat`.
 ///
 /// `comm` may contain spaces and parentheses, so parse from the LAST ')' —
@@ -65,6 +66,7 @@ fn read_stat(pid: i32) -> Option<(String, i32)> {
     Some((comm, info.pbi_ppid as i32))
 }
 
+// WO-24@v1: keep ancestry lookup portable where Linux procfs and macOS libproc are absent.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn read_stat(_pid: i32) -> Option<(String, i32)> {
     None

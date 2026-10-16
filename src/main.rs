@@ -31,12 +31,15 @@ mod remote;
 // Linux uses fanotify. macOS uses Endpoint Security. Other platforms keep a
 // fail-closed stub with the same public surface so the portable core builds
 // without ever running a command ungated.
+// WO-28@v1: isolate Linux enforcement behind the platform gate boundary.
 #[cfg(target_os = "linux")]
 #[path = "gate.rs"]
 mod gate;
+// WO-23@v1: wire the macOS Endpoint Security backend into the portable gate seam.
 #[cfg(target_os = "macos")]
 #[path = "gate_macos.rs"]
 mod gate;
+// WO-28@v1: keep unsupported platforms fail closed through the gate stub.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[path = "gate_stub.rs"]
 mod gate;
@@ -1101,6 +1104,7 @@ impl HivebusDispatch<'_> {
     }
 }
 
+// WO-25@v1: carry hardened remote dispatch options without a positional argument list.
 /// Arguments for `bulwark ssh`. A struct (not a long positional list) because the
 /// command grew several modes — deny-list consent, hivebus handoff, worker-uid
 /// drop, and the WO-25 hardened floor.
@@ -1612,6 +1616,7 @@ fn run_remote_quiet(target: &str, remote_cmd: &str, stdin_data: Option<&str>) ->
     Ok(())
 }
 
+// WO-50@v1: return the anonymous worker uid selected on the remote host.
 /// Run a one-shot remote command over ssh and return its trimmed stdout. Like
 /// `run_remote_quiet` but captures stdout (used to read a value back from the
 /// remote, e.g. the WO-50 picked uid). Errors on a non-zero remote exit.
@@ -2149,6 +2154,7 @@ fn hardened_worker_creds(
     }
 }
 
+// WO-49@v1: validate worker credentials before dropping the supervised child.
 fn resolve_worker_creds(
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,

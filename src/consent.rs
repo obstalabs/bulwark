@@ -126,6 +126,7 @@ pub trait ConsentProvider {
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 }
 
+// WO-8@v1: deny immediately when no off-band operator channel is configured.
 /// The default open-core provider: deny everything, immediately. This is the
 /// graceful-degradation floor when no interactive channel is configured, and
 /// reproduces the WO-3 MVP behavior exactly.
