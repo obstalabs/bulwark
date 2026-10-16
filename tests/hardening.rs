@@ -13,10 +13,12 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+// WO-12@v1: drive the built binary so fail-closed shutdown is tested as shipped.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-12@v1: isolate each supervisor-kill and bind-mount scenario's files.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,6 +197,7 @@ fn worker_uid_drops_agent_and_gate_still_denies() {
     );
 }
 
+// WO-49@v1: a dropped worker cannot kill the root supervisor to force a fail-open.
 /// WO-49 headline: an unprivileged dropped agent CANNOT `SIGKILL` the root
 /// supervisor, so it cannot force the fanotify fail-open. The agent reads its own
 /// parent pid, tries `kill -9` on it (must fail with EPERM), then reads the

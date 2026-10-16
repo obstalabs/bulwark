@@ -10,6 +10,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+// WO-8@v1: drive the built binary so the off-band consent socket is tested end to end.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
@@ -106,6 +107,7 @@ fn scenario(tag: &str, verdict: &str) -> (String, String) {
     (read, recs)
 }
 
+// WO-8@v1: an operator deny over the socket blocks the read and is receipted as operator.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn operator_deny_blocks_read_with_operator_source() {
@@ -120,6 +122,7 @@ fn operator_deny_blocks_read_with_operator_source() {
     );
 }
 
+// WO-8@v1: an operator allow-once lets exactly that read through, receipted as operator.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn operator_allow_once_lets_read_through_with_operator_source() {

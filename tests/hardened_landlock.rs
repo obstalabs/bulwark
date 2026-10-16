@@ -11,10 +11,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+// WO-14@v1: drive the built binary so the Landlock floor is tested as shipped.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-14@v1: give each hardened scenario its own grant and out-of-grant files.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -26,6 +28,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-14@v1: run one command under the hardened floor and return what it printed.
 fn run_hardened(grant: &str, cmd: &[&str]) -> String {
     let mut c = Command::new(bin());
     c.args(["run", "--hardened", "--allow", grant, "--"]);
@@ -36,6 +39,7 @@ fn run_hardened(grant: &str, cmd: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+// WO-14@v1: the kernel floor still lets the agent read its grant and execute.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_floor_allows_grant_and_executes() {
@@ -51,6 +55,7 @@ fn hardened_floor_allows_grant_and_executes() {
     );
 }
 
+// WO-14@v1: the kernel floor denies credentials outside the grant with no supervisor.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_floor_denies_credentials_outside_grant() {
@@ -74,6 +79,7 @@ fn hardened_floor_denies_credentials_outside_grant() {
     );
 }
 
+// WO-14@v1: the kernel floor keeps system secrets like /etc/shadow out of reach.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_floor_denies_etc_shadow() {
