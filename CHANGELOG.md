@@ -14,10 +14,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Changed
-<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v1 / WO-164@v1: source citations identify the current intent behind each attributed region. -->
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
   Code that shipped without a recorded work order was given a retroactive one that records its
   behaviour, instead of a guessed id.
+<!-- WO-172@v1: helpers kept only for tests now compile only into tests. -->
+- Helpers used only by unit tests are compiled only into test builds, instead of being
+  kept in the shipped binary with dead-code warnings silenced.
+<!-- WO-172@v1: the ES proof source checks existed but nothing ran them. -->
+- CI runs the macOS ES proof source checks: the seal checks on every push, the proof
+  client checks in the macOS job.
+
+### Removed
+<!-- WO-172@v1: no caller remained after inode-membership grants replaced path roots. -->
+- The unused macOS path-root grant resolver, superseded by inode-membership grants, and an
+  unused single-home lookup. Neither had a caller; behaviour is unchanged.
 
 ## [0.9.3] - 2026-10-15
 

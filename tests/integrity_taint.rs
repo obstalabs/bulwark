@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+// WO-13@v1: drive the built binary so taint detection is tested across real restarts.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-13@v1: give each restart scenario its own protected file and state record.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -49,6 +51,7 @@ fn run_gate(secret: &Path, state: &Path, cmd: &[&str]) -> String {
 
 const TAINT_MARK: &str = "INTEGRITY TAINTED";
 
+// WO-13@v1: a clean shutdown and unchanged identity must not raise a false taint.
 #[test]
 #[ignore = "needs root (fanotify); run under sudo on Linux"]
 fn clean_restart_is_not_tainted() {

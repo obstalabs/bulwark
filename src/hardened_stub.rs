@@ -11,6 +11,7 @@
 
 use anyhow::{bail, Result};
 
+// WO-25@v1: keep remote hardened capability checks portable across build targets.
 /// Mirror of `hardened::abi_version` for the cfg-split surface. No Landlock off
 /// Linux, so the ABI is always absent.
 pub fn abi_version() -> Option<i32> {

@@ -21,6 +21,7 @@ const MAX_RECURSION_DEPTH: usize = 64;
 /// (the descendant check still covers the rest). Logged when hit.
 const MAX_SNAPSHOT_ENTRIES: usize = 200_000;
 
+// WO-3@v1: key protected Linux objects by stable device and inode identity.
 /// A device+inode pair uniquely identifying a file on the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InodeKey {
@@ -28,6 +29,7 @@ pub struct InodeKey {
     pub ino: u64,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl InodeKey {
     // WO-24@v1: derive the inode identity shared with the macOS gate.
     pub(crate) fn of(meta: &fs::Metadata) -> Self {
@@ -79,6 +81,7 @@ fn is_absent(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl ProtectedSet {
     /// Resolve each path to its inode. A directory contributes its own inode and
     /// is recorded as a protected directory, then is walked recursively (bounded
@@ -153,11 +156,10 @@ impl ProtectedSet {
 
     /// True if this inode is in the launch snapshot (open should be denied).
     /// Prefer [`ProtectedSet::protects`], which also covers descendants of a
-    /// protected directory; this exact-inode check is retained for callers that
-    /// already hold the identity (e.g. macOS ES seeding) and as the snapshot
-    /// probe in tests; the Linux gate now decides via `protects`.
+    /// protected directory; this exact-inode check is the snapshot probe in
+    /// tests; the gates decide via `protects`.
     // WO-69@v1: retain exact launch-snapshot membership for inode-based callers.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn contains(&self, key: &InodeKey) -> bool {
         self.inodes.contains(key)
     }
@@ -202,10 +204,12 @@ impl ProtectedSet {
         false
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     pub fn len(&self) -> usize {
         self.inodes.len()
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     pub fn is_empty(&self) -> bool {
         self.inodes.is_empty()
     }

@@ -11,13 +11,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 IDENTITY="${SIGNING_IDENTITY:?set SIGNING_IDENTITY to your 'Developer ID Application: NAME (TEAMID)'}"
 # Pin to login.keychain: the Developer ID key lives there, and pinning makes the
 # build deterministic regardless of keychain search order (a stale locked
 # keychain earlier in the search list caused an ad-hoc fallback otherwise).
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 KEYCHAIN="${SIGNING_KEYCHAIN:-login.keychain-db}"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 BIN="es_proof"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 SRC="es_proof.swift"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 ENT="es_proof.entitlements"
 
 echo "==> compiling $SRC universal (arm64 + x86_64) — runs on the M2 AND the Intel test Mac"

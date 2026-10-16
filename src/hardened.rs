@@ -71,6 +71,7 @@ fn open_no_symlinks(cpath: &CString) -> RawFd {
     rc as RawFd
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 #[repr(C)]
 struct RulesetAttr {
     handled_access_fs: u64,
@@ -78,12 +79,14 @@ struct RulesetAttr {
     scoped: u64,
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 #[repr(C)]
 struct PathBeneathAttr {
     allowed_access: u64,
     parent_fd: i32,
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 fn create_ruleset(attr: Option<&RulesetAttr>, flags: u32) -> i64 {
     let (ptr, size) = match attr {
         Some(a) => (
@@ -95,6 +98,7 @@ fn create_ruleset(attr: Option<&RulesetAttr>, flags: u32) -> i64 {
     unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, ptr, size, flags) }
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 fn add_rule(ruleset_fd: RawFd, attr: &PathBeneathAttr) -> i64 {
     unsafe {
         libc::syscall(
@@ -107,10 +111,12 @@ fn add_rule(ruleset_fd: RawFd, attr: &PathBeneathAttr) -> i64 {
     }
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 fn restrict_self(ruleset_fd: RawFd) -> i64 {
     unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0u32) }
 }
 
+// WO-14@v1: install a kernel-enforced Landlock read floor before exec.
 /// The Landlock ABI version the running kernel supports, or `None` if Landlock
 /// is unavailable.
 pub fn abi_version() -> Option<i32> {

@@ -213,6 +213,7 @@ pub struct RunContext {
     pub objects: Vec<ObjId>,
 }
 
+// WO-13@v1: preserve the concrete reason an integrity check tainted a run.
 /// Why a run is tainted. Carried into the audit receipt so the operator sees the
 /// concrete reason, not just a flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +241,7 @@ pub enum TaintReason {
     Persisted,
 }
 
+// WO-13@v1: render integrity failures without exposing protected content.
 impl TaintReason {
     /// One-line, audit-safe description (no file content, only identity).
     // WO-117@v1: describe policy digest drift without exposing policy bytes.
@@ -277,6 +279,7 @@ impl TaintReason {
     }
 }
 
+// WO-13@v1: distinguish clean runs from runs requiring operator acknowledgement.
 /// Verdict of an integrity evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Integrity {
@@ -284,12 +287,15 @@ pub enum Integrity {
     Tainted(TaintReason),
 }
 
+// WO-13@v1: expose whether an integrity evaluation activated tainted mode.
 impl Integrity {
+    // WO-13@v1: identify the tainted result used to tighten consent behavior.
     pub fn is_tainted(&self) -> bool {
         matches!(self, Integrity::Tainted(_))
     }
 }
 
+// WO-13@v1: persist run identity, shutdown state, and sticky integrity taint.
 /// On-disk state. One run's recorded integrity context plus a sticky taint flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
@@ -310,6 +316,7 @@ pub struct State {
     pub tainted: Option<String>,
 }
 
+// WO-13@v1: detect unclean restarts and protected-object identity drift.
 /// Pure evaluation: given the prior recorded state (if any) and the context of
 /// the run being started, decide whether this run is tainted. No filesystem or
 /// clock access, so it is fully unit-testable.
@@ -371,6 +378,7 @@ pub fn evaluate(prior: Option<&State>, current: &RunContext) -> Integrity {
     Integrity::Clean
 }
 
+// WO-13@v1: mediate all reads and writes of persistent integrity state.
 /// Owns the persistent state file and mediates reads/writes to it.
 pub struct Store {
     path: PathBuf,
@@ -379,7 +387,9 @@ pub struct Store {
     state: Option<State>,
 }
 
+// WO-13@v1: manage the integrity state lifecycle around each supervised run.
 impl Store {
+    // WO-13@v1: load prior integrity state or establish a first-run baseline.
     /// Load the state file, or start fresh if it does not exist. A
     /// corrupt/unreadable file is treated as absent but reported, so a damaged
     /// state never silently disables the circuit-breaker.
@@ -401,11 +411,13 @@ impl Store {
         Store { path, state }
     }
 
+    // WO-13@v1: expose the prior state used by the pure integrity evaluation.
     /// The prior recorded state, for `evaluate`. `None` on the first run.
     pub fn prior(&self) -> Option<&State> {
         self.state.as_ref()
     }
 
+    // WO-13@v1: persist a new run before the supervised process starts.
     /// Begin a new run: bump the generation, clear the clean marker, and record
     /// this run's context. If the run is tainted, the reason is made sticky so it
     /// survives until `bulwark reset`.
@@ -444,6 +456,7 @@ impl Store {
         Ok(generation)
     }
 
+    // WO-13@v1: mark only normally completed supervision as clean shutdown.
     /// Record a clean shutdown. Called by the supervisor on any normal exit
     /// (child exited or a trapped termination signal). A hard kill skips this, so
     /// the next run sees an unclean restart.
@@ -454,11 +467,13 @@ impl Store {
         self.save()
     }
 
+    // WO-13@v1: expose sticky taint until the operator acknowledges it.
     /// The sticky taint description, if any.
     pub fn taint_reason(&self) -> Option<&str> {
         self.state.as_ref().and_then(|s| s.tainted.as_deref())
     }
 
+    // WO-13@v1: clear only the acknowledged taint while retaining the baseline.
     /// Clear the taint marker only (what `bulwark reset` calls). Narrow by
     /// design: it does not reset the generation, the recorded objects, or the
     /// clean marker — only the operator acknowledgement.
@@ -469,6 +484,7 @@ impl Store {
         self.save()
     }
 
+    // WO-13@v1: persist the current integrity record before returning to callers.
     /// Persist the current state (no-op if there is nothing recorded yet),
     /// creating the parent directory if needed.
     fn save(&self) -> Result<()> {
@@ -487,6 +503,7 @@ impl Store {
     }
 }
 
+// WO-13@v1: verify restart, drift, persistence, and taint precedence.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,12 +598,14 @@ mod tests {
         verdict
     }
 
+    // WO-13@v1: establish a clean baseline when no prior state exists.
     #[test]
     fn first_run_is_clean() {
         let c = ctx(1, vec![obj("/s", 1, 10)]);
         assert_eq!(evaluate(None, &c), Integrity::Clean);
     }
 
+    // WO-13@v1: keep an unchanged identity clean after graceful shutdown.
     #[test]
     fn clean_shutdown_same_identity_is_clean() {
         let prior = clean_prior(1, vec![obj("/s", 1, 10)]);
@@ -594,6 +613,7 @@ mod tests {
         assert_eq!(evaluate(Some(&prior), &c), Integrity::Clean);
     }
 
+    // WO-13@v1: taint a run when the prior clean-shutdown marker is absent.
     #[test]
     fn missing_clean_marker_is_unclean_restart() {
         let mut prior = clean_prior(1, vec![obj("/s", 1, 10)]);
@@ -683,6 +703,7 @@ mod tests {
         assert!(!text.contains("generation"), "{text}");
     }
 
+    // WO-13@v1: detect a protected object moving to another device.
     #[test]
     fn changed_device_is_object_drift() {
         let prior = clean_prior(1, vec![obj("/s", 1, 10)]);
@@ -708,6 +729,7 @@ mod tests {
         );
     }
 
+    // WO-13@v1: keep taint sticky across otherwise clean restarts.
     #[test]
     fn persisted_taint_survives_clean_restart() {
         let mut prior = clean_prior(1, vec![obj("/s", 1, 10)]);
@@ -720,6 +742,7 @@ mod tests {
         );
     }
 
+    // WO-13@v1: report an unclean restart before lower-priority drift.
     #[test]
     fn unclean_outranks_drift() {
         // An unclean restart is reported before drift is even checked.
@@ -732,6 +755,7 @@ mod tests {
         );
     }
 
+    // WO-13@v1: avoid treating a newly protected path as identity drift.
     #[test]
     fn new_protected_path_alone_is_not_drift() {
         // Adding a brand-new protected path (not present last run) is a policy

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// Minimal flat view of one receipt line. We extract only the fields we render,
 /// using the same hand-rolled approach as the writer (no serde_json dep).
 struct Row {
@@ -22,6 +23,7 @@ struct Row {
     ancestry: String,
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// Extract a string value for `key` from a flat JSON object line.
 fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{key}\":");
@@ -50,6 +52,7 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 fn parse_row(line: &str) -> Option<Row> {
     Some(Row {
         ts_ms: field(line, "ts_ms")
@@ -65,6 +68,7 @@ fn parse_row(line: &str) -> Option<Row> {
     })
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// Render the receipt log at `path` to stdout. When `json` is true, emit one
 /// machine-readable object (counts + per-decision records) for agent
 /// consumption; otherwise a human table. Returns (allow, deny, skipped).
@@ -126,6 +130,7 @@ pub fn render(path: &Path, json: bool) -> Result<(usize, usize, usize)> {
     Ok((allow, deny, skipped))
 }
 
+// WO-20@v1: emit machine-readable audit fields without invalid JSON.
 /// Escape a string for a JSON double-quoted value (same minimal rules as the
 /// receipt writer — no serde_json dependency).
 fn json_escape(s: &str) -> String {
@@ -144,10 +149,12 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn field_extracts_string_and_number() {
         let line = r#"{"ts_ms":123,"pid":42,"decision":"deny","path":"/x/secret.env","ancestry":"cat(42) <- bash(7)","reason":"protected inode"}"#;
@@ -158,6 +165,7 @@ mod tests {
         assert_eq!(field(line, "ancestry"), Some("cat(42) <- bash(7)"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn field_handles_escaped_quote_in_value() {
         let line = r#"{"path":"/x/\"weird\".env","decision":"allow"}"#;
@@ -165,6 +173,7 @@ mod tests {
         assert_eq!(field(line, "decision"), Some("allow"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn parse_row_round_trips_a_written_receipt() {
         // Mirror what receipt::to_json_line produces.

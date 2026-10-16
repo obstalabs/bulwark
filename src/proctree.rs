@@ -8,6 +8,7 @@
 #[cfg(target_os = "linux")]
 use std::fs;
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// One node in an ancestry chain.
 #[derive(Debug, Clone)]
 pub struct ProcNode {
@@ -15,6 +16,7 @@ pub struct ProcNode {
     pub comm: String,
 }
 
+// WO-3@v1: derive Linux process ancestry from procfs for gate attribution.
 /// Read `(comm, ppid)` from `/proc/<pid>/stat`.
 ///
 /// `comm` may contain spaces and parentheses, so parse from the LAST ')' —
@@ -65,11 +67,13 @@ fn read_stat(pid: i32) -> Option<(String, i32)> {
     Some((comm, info.pbi_ppid as i32))
 }
 
+// WO-24@v1: keep ancestry lookup portable where Linux procfs and macOS libproc are absent.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn read_stat(_pid: i32) -> Option<(String, i32)> {
     None
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Build the ancestry chain for `pid`, nearest first: `[pid, parent, ...]`,
 /// stopping at pid 1 or after `max_depth` hops.
 pub fn ancestry(pid: i32, max_depth: usize) -> Vec<ProcNode> {
@@ -89,6 +93,7 @@ pub fn ancestry(pid: i32, max_depth: usize) -> Vec<ProcNode> {
     chain
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Render an ancestry chain as `comm(pid) <- comm(pid) <- ...`.
 pub fn render(chain: &[ProcNode]) -> String {
     chain
@@ -98,6 +103,7 @@ pub fn render(chain: &[ProcNode]) -> String {
         .join(" <- ")
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// True if `pid` is `root` or has `root` somewhere in its ancestry — i.e. it
 /// belongs to the supervised process tree.
 pub fn is_descendant_of(pid: i32, root: i32, max_depth: usize) -> bool {
@@ -128,6 +134,7 @@ pub fn is_descendant_of(pid: i32, root: i32, max_depth: usize) -> bool {
 mod tests {
     use super::*;
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn ancestry_of_self_is_nonempty_and_starts_with_self() {
         let me = std::process::id() as i32;
@@ -136,12 +143,14 @@ mod tests {
         assert_eq!(chain[0].pid, me, "nearest node should be self");
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn self_is_descendant_of_self() {
         let me = std::process::id() as i32;
         assert!(is_descendant_of(me, me, 16));
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn self_is_descendant_of_parent() {
         let me = std::process::id() as i32;
@@ -153,6 +162,7 @@ mod tests {
         }
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn unrelated_low_pid_is_not_descendant() {
         let me = std::process::id() as i32;

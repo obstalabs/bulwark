@@ -18,10 +18,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+// WO-18@v1: drive the built binary that auto-deploy ships to the remote host.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-18@v1: give each remote ssh scenario its own protected file and output.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -82,6 +84,7 @@ fn auto_allow_session_lets_second_read_through() {
     );
 }
 
+// WO-18@v1: the operator answers the remote prompt locally and the grant flows back.
 /// Interactive local relay: a scripted operator answers `a` (allow-session) on
 /// the local stdin of `bulwark ssh`. The prompt is rendered locally and the
 /// grant flows back over the verdict lane.
@@ -423,6 +426,7 @@ fn hivebus_accepts_bulwark_seed_and_derives_same_fingerprint() {
     );
 }
 
+// WO-18@v1: refusing to deploy must fail loudly, never run the agent unprotected.
 /// `--deploy never` with no remote binary fails with a clear message rather than
 /// silently running unprotected.
 #[test]

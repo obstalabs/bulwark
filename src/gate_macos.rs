@@ -10,7 +10,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -23,6 +23,8 @@ use crate::consent::{ConsentRequest, Source, Verdict};
 use crate::protect::{InodeKey, ProtectedSet};
 use crate::receipt::{Decision, Receipt, ReceiptLog};
 
+// WO-23@v1: the operator can point the CLI at a specific signed edge binary.
+// WO-163@v2: when set, this override wins over auto-discovery.
 const ES_EDGE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 const EDGE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -44,6 +46,7 @@ pub enum GateMode<'a> {
 /// startup consent decisions from its config, then answers AUTH_OPEN from memory.
 // WO-23@v1: preserve the Linux gate contract on the Endpoint Security surface.
 pub trait ConsentDecider {
+    // WO-23@v1: enforce protected inode decisions through the macOS ES edge.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Decide with a caller-chosen deadline (default: `decide`). Kept for API
@@ -83,6 +86,7 @@ pub struct RunOutcome {
     pub deny_forever_paths: Vec<String>,
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 pub(crate) fn shutdown_requested() -> bool {
     false
 }
@@ -97,6 +101,7 @@ pub(crate) fn draining() -> bool {
     false
 }
 
+// WO-49@v1: drop the supervised worker below the privileged gate.
 /// Credentials to drop the supervised child to before exec. The supervisor and
 /// the Endpoint Security edge stay root; only the agent child becomes
 /// unprivileged, so it cannot `SIGKILL` the edge and exploit the kernel's
@@ -251,6 +256,7 @@ pub fn run(
 
 /// Path inside the gate bundle to the edge executable, relative to a directory that
 /// contains `bulwark_es_gate.app`.
+// WO-163@v2: the bundle-relative path discovery probes under libexec and beside the binary.
 const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
 
 /// Resolve the ES edge binary. Order:
@@ -266,7 +272,7 @@ const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
 /// Resolve the ES edge path (env override, then auto-discovery) without erroring —
 /// for `doctor`, which reports presence rather than failing. `None` means neither the
 /// env var nor discovery found an edge.
-// WO-163@v1: the env override wins; otherwise discover the gate next to the installed CLI.
+// WO-163@v2: the env override wins; otherwise discover the gate next to the installed CLI.
 pub fn resolve_edge_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(ES_EDGE_ENV) {
         return Some(PathBuf::from(value));
@@ -274,7 +280,7 @@ pub fn resolve_edge_path() -> Option<PathBuf> {
     discover_edge()
 }
 
-// WO-163@v1: a missing gate is an error that names the packaged location and the override.
+// WO-163@v2: a missing gate is an error that names the packaged location and the override.
 fn edge_path() -> Result<PathBuf> {
     resolve_edge_path().ok_or_else(|| {
         anyhow!(
@@ -287,7 +293,7 @@ fn edge_path() -> Result<PathBuf> {
 
 /// Look for the gate bundle relative to the current executable. Returns the first
 /// candidate that exists; `None` if discovery comes up empty (caller errors).
-// WO-163@v1: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
+// WO-163@v2: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
 fn discover_edge() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Canonicalize to resolve a Homebrew bin symlink to the real Cellar path.
@@ -301,6 +307,7 @@ fn discover_edge() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn ensure_executable(path: &Path) -> Result<()> {
     let meta = fs::metadata(path).with_context(|| format!("stat ES edge {}", path.display()))?;
     if !meta.is_file() {
@@ -312,11 +319,13 @@ fn ensure_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 struct GateTemp {
     config: PathBuf,
     ready: PathBuf,
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 enum EdgePolicy<'a> {
     DenyList {
         protected: &'a ProtectedSet,
@@ -334,7 +343,9 @@ struct EdgeDecisionSeeds {
     allow_session: Vec<InodeKey>, // WO-24: session-cache operator grants
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 impl GateTemp {
+    // WO-23@v1: enforce protected inode decisions through the macOS ES edge.
     fn new() -> Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -409,6 +420,7 @@ fn write_config(
     fs::write(path, body).with_context(|| format!("write ES edge config {}", path.display()))
 }
 
+// WO-41@v1: apply macOS default-deny grants without broadening the runtime base.
 fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
     if value.contains('\n') || value.contains('\r') {
         bail!("ES edge config value for {key} contains a newline");
@@ -420,55 +432,7 @@ fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-// Superseded by inode-membership grants (`allow_inode`); retained for a possible
-// recursive grant-root layer (the macOS analog of Linux move-in tracking).
-// WO-72@v1: retain the superseded path-root representation only as inert support.
-#[allow(dead_code)]
-struct AllowGrantRoot {
-    dev: u64,        // WO-41: root device identity
-    ino: u64,        // WO-41: root inode identity
-    recursive: bool, // WO-41: directory grants cover descendants
-    path: PathBuf,   // WO-41: canonical root path for the ES edge
-}
-
-// WO-72@v1: keep retired path-root resolution isolated from active inode grants.
-#[allow(dead_code)]
-fn resolve_allow_grant_roots(grants: &[String]) -> Result<Vec<AllowGrantRoot>> {
-    let mut out = Vec::new();
-    for grant in grants {
-        let (root, recursive) = concrete_grant_root(grant)?;
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("resolve macOS allow grant {}", root.display()))?;
-        let meta = fs::metadata(&root)
-            .with_context(|| format!("metadata macOS allow grant {}", root.display()))?;
-        out.push(AllowGrantRoot {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            recursive: recursive || meta.is_dir(),
-            path: root,
-        });
-    }
-    Ok(out)
-}
-
-// WO-72@v1: reject wildcard roots if the retired resolver is ever reused.
-#[allow(dead_code)]
-fn concrete_grant_root(grant: &str) -> Result<(PathBuf, bool)> {
-    let recursive = grant.ends_with("/**");
-    let root = grant.strip_suffix("/**").unwrap_or(grant);
-    if root.contains('*') || root.contains('?') || root.contains('[') {
-        bail!("macOS allow grants must be concrete paths or trailing /** globs: {grant}");
-    }
-    if let Some(rest) = root.strip_prefix("~/") {
-        let Some(home) = std::env::var_os("HOME") else {
-            bail!("HOME is not set for macOS allow grant {grant}");
-        };
-        return Ok((PathBuf::from(home).join(rest), recursive));
-    }
-    Ok((PathBuf::from(root), recursive))
-}
-
+// WO-24@v1: keep macOS deny-list decisions aligned with the portable CLI.
 fn seed_denylist_decisions(
     protected: &ProtectedSet,
     consent: &mut dyn ConsentDecider,
@@ -492,6 +456,7 @@ fn seed_denylist_decisions(
     seeds
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 struct StoppedChild {
     pid: libc::pid_t,
 }
@@ -530,6 +495,7 @@ fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<Stop
     Ok(StoppedChild { pid })
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn wait_until_stopped(pid: libc::pid_t) -> Result<()> {
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
@@ -542,6 +508,7 @@ fn wait_until_stopped(pid: libc::pid_t) -> Result<()> {
     bail!("child exited before ES edge was ready")
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
     let start = SystemTime::now();
     loop {
@@ -643,6 +610,7 @@ fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) 
     }
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn try_wait(pid: libc::pid_t) -> Result<Option<i32>> {
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
@@ -661,6 +629,7 @@ fn try_wait(pid: libc::pid_t) -> Result<Option<i32>> {
     Ok(None)
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn terminate_edge(edge: &mut Child) -> Result<()> {
     if edge
         .try_wait()
@@ -686,6 +655,7 @@ fn terminate_edge(edge: &mut Child) -> Result<()> {
     Ok(())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn kill_pid(pid: libc::pid_t, sig: libc::c_int) -> Result<()> {
     let rc = unsafe { libc::kill(pid, sig) };
     if rc == 0 {

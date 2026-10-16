@@ -10,10 +10,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+// WO-15@v1: drive the built binary so allow-list dispatch is tested end to end.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-15@v1: give each allow-list scenario its own grant and decoy directory.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -36,6 +38,7 @@ fn run_allowlist(grant: &str, cmd: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+// WO-15@v1: a dispatched agent can read its one granted path and still execute.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn triage_agent_reads_granted_log_and_executes() {
@@ -52,6 +55,7 @@ fn triage_agent_reads_granted_log_and_executes() {
     );
 }
 
+// WO-15@v1: default-deny blocks credentials that sit outside the grant.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn triage_agent_denied_credentials_and_data_outside_grant() {
@@ -76,6 +80,7 @@ fn triage_agent_denied_credentials_and_data_outside_grant() {
     );
 }
 
+// WO-15@v1: the runtime base set never widens to system secrets like /etc/shadow.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn triage_agent_denied_etc_shadow() {

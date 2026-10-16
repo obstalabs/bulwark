@@ -2,11 +2,14 @@ use std::fs;
 use std::path::Path;
 
 // WO-38/WO-39: source-invariant tests for the macOS ES proof scripts.
+// WO-38@v1: load proof sources for deterministic bundle-seal invariants.
+// WO-39@v1: load the proof client for responder and concurrency invariants.
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
 }
 
+// WO-39@v1: keep ES proof callbacks free of cross-queue mutable state.
 #[test]
 fn es_proof_client_has_no_callback_timer_shared_state() {
     let source = repo_file("macos-es-proof/es_proof.swift");
@@ -41,6 +44,7 @@ fn es_proof_client_has_no_callback_timer_shared_state() {
     );
 }
 
+// WO-38@v1: seal proof output only from a validated notarized app bundle.
 #[test]
 fn prove_script_seals_only_validated_app_bundle() {
     let source = repo_file("macos-es-proof/prove.sh");

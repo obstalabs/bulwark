@@ -10,10 +10,12 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+// WO-9@v1: drive the built binary as the remote gate whose decisions are relayed.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-9@v1: give each remote-consent scenario its own lane FIFOs and protected file.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -27,6 +29,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-9@v1: model the prompt and verdict lanes as owner-only FIFOs, as over SSH.
 /// Make a FIFO at `path` via `mkfifo`.
 fn mkfifo(path: &std::path::Path) {
     let ok = Command::new("mkfifo")

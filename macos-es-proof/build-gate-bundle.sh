@@ -10,13 +10,21 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 IDENTITY="${SIGNING_IDENTITY:?set SIGNING_IDENTITY to your 'Developer ID Application: NAME (TEAMID)'}"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 KEYCHAIN="${SIGNING_KEYCHAIN:-login.keychain-db}"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 BIN="bulwark_es_gate"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 SRC="es_gate.swift"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 ENT="es_proof.entitlements"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 PROFILE="bulwark_es_gate.provisionprofile"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 APP="bulwark_es_gate.app"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 INFO="GateInfo.plist"
 
 [ -f "$PROFILE" ] || {
@@ -53,14 +61,19 @@ codesign -dv --entitlements - "$APP" 2>&1 | grep -E "TeamIdentifier|endpoint-sec
 # runs against the production artifact, not a dev-only signed bundle). A locally
 # signed bundle DOES run under AMFI for dev iteration (embedded profile + no
 # quarantine), but closure proof requires the notarized+stapled artifact.
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 NOTARY_RECEIPT="bulwark_es_gate.notarization.receipt"
 echo "==> notarizing $APP"
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 ZIP="bulwark_es_gate-notarize.zip"
 rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
 xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1 | tee notarize-gate.out
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 STATUS=$(grep -E '^\s*status:' notarize-gate.out | tail -1 | awk '{print $2}')
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 SUBMISSION_ID=$(grep -oE 'id: [0-9a-f-]+' notarize-gate.out | head -1 | awk '{print $2}')
 [ "$STATUS" = "Accepted" ] || { echo "!! notarization not Accepted ($STATUS)"; exit 2; }
 {

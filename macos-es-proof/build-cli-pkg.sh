@@ -18,11 +18,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 VERSION="${VERSION:-0.7.0}"
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 INSTALLER_ID="${INSTALLER_ID:?set INSTALLER_ID to your 'Developer ID Installer: NAME (TEAMID)'}"
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 APP_ID="${APP_ID:?set APP_ID to your 'Developer ID Application: NAME (TEAMID)'}"
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 KEYCHAIN="${SIGNING_KEYCHAIN:-login.keychain-db}"
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
+# WO-17@v1: produce a signed notarized CLI installer for macOS distribution.
 OUT="${OUT:-/tmp/bulwark-pkg}"
 mkdir -p "$OUT"
 

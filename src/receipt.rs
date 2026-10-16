@@ -20,13 +20,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
     Deny,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl Decision {
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     fn as_str(self) -> &'static str {
         match self {
             Decision::Allow => "allow",
@@ -35,6 +38,7 @@ impl Decision {
     }
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// One audit record for a single gated open().
 pub struct Receipt<'a> {
     pub pid: i32,
@@ -49,6 +53,7 @@ pub struct Receipt<'a> {
     pub source: &'a str,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Escape a string for embedding in a JSON double-quoted value.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -66,6 +71,7 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 fn now_unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -73,7 +79,9 @@ fn now_unix_millis() -> u128 {
         .unwrap_or(0)
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl Receipt<'_> {
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     /// Serialize to a single JSON line (no trailing newline).
     pub fn to_json_line(&self) -> String {
         format!(
@@ -107,7 +115,9 @@ pub struct DispatchReceipt<'a> {
     pub worker_uid: Option<u32>,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl DispatchReceipt<'_> {
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// Serialize to a single JSON line (no trailing newline). Fingerprints only.
     pub fn to_json_line(&self) -> String {
         let fp = |o: Option<&str>| match o {
@@ -777,10 +787,12 @@ fn stderr_writer_loop(rx: mpsc::Receiver<String>, counters: Arc<SinkCounters>) {
     }
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn json_line_has_expected_fields() {
         let r = Receipt {
@@ -803,6 +815,7 @@ mod tests {
         assert!(line.contains(r#""ancestry":"cat(42) <- bash(7)""#));
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     #[test]
     fn dispatch_receipt_has_fingerprints_never_seed() {
         // A plausible base64 seed value that MUST NOT leak into a receipt.
@@ -830,6 +843,7 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     #[test]
     fn dispatch_receipt_null_when_absent() {
         let r = DispatchReceipt {
@@ -844,6 +858,7 @@ mod tests {
         assert!(line.contains(r#""worker_uid":null"#));
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     #[test]
     fn json_escapes_quotes_and_newlines() {
         let r = Receipt {

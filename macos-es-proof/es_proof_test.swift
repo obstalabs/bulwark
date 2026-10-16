@@ -5,6 +5,7 @@ let testPath = URL(fileURLWithPath: #filePath)
 let sourcePath = testPath.deletingLastPathComponent().appendingPathComponent("es_proof.swift")
 let source = try String(contentsOf: sourcePath, encoding: .utf8)
 
+// WO-39@v1: stop the deadline-safety source check with a named failure.
 func expect(_ condition: Bool, _ message: String) {
     if !condition {
         fputs("es_proof_test.swift: \(message)\n", stderr)

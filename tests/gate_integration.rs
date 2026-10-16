@@ -13,11 +13,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// WO-3@v1: drive the built binary so the fanotify read gate is tested end to end.
 /// Path to the built binary under test (Cargo sets CARGO_BIN_EXE_<name>).
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-3@v1: isolate each gate scenario's protected files and receipts.
 /// Make a unique scratch dir under /tmp for one test.
 fn scratch(tag: &str) -> PathBuf {
     let pid = std::process::id();
@@ -30,6 +32,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-3@v1: run one gated command and return its output with the decision receipts.
 /// Run `bulwark run --protect <protect...> --receipts <r> -- <cmd...>`.
 /// Returns (child_stdout, child_stderr, receipts_contents).
 fn run_gate(protect: &[&Path], cmd: &[&str], receipts: &Path) -> (String, String, String) {
@@ -274,6 +277,7 @@ fn root_agent_home_is_covered_without_a_different_user_message() {
     );
 }
 
+// WO-3@v1: unprotected files stay readable while the gate is active.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn allowed_file_open_succeeds() {
@@ -291,6 +295,7 @@ fn allowed_file_open_succeeds() {
     );
 }
 
+// WO-3@v1: a protected open is refused before any content reaches the reader.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn denied_protected_open_blocks_with_eperm() {
@@ -312,6 +317,7 @@ fn denied_protected_open_blocks_with_eperm() {
     );
 }
 
+// WO-3@v1: protection follows the inode, so a benign-named symlink cannot reach it.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn symlink_with_benign_name_is_still_denied_by_inode() {
@@ -335,6 +341,7 @@ fn symlink_with_benign_name_is_still_denied_by_inode() {
     );
 }
 
+// WO-3@v1: the gate covers the whole supervised tree, grandchildren included.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn child_process_inherits_the_gate() {
@@ -356,6 +363,7 @@ fn child_process_inherits_the_gate() {
     );
 }
 
+// WO-3@v1: a deny receipt names the process chain that attempted the open.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn deny_receipt_carries_ancestry_attribution() {
@@ -377,6 +385,7 @@ fn deny_receipt_carries_ancestry_attribution() {
     );
 }
 
+// WO-3@v1: renaming a protected file does not escape its inode protection.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn renamed_protected_file_same_inode_still_denied() {

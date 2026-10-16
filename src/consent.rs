@@ -14,6 +14,7 @@
 
 use crate::protect::InodeKey;
 
+// WO-8@v1: represent one operator decision for a protected open.
 /// The operator's (or a provider's) answer for one open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -27,12 +28,15 @@ pub enum Verdict {
     DenyForever,
 }
 
+// WO-8@v1: expose decision semantics and their wire representation.
 impl Verdict {
+    // WO-8@v1: distinguish the two decisions that permit an open.
     /// True if the open should be permitted.
     pub fn allows(self) -> bool {
         matches!(self, Verdict::AllowOnce | Verdict::AllowSession)
     }
 
+    // WO-8@v1: serialize operator decisions for sockets and receipts.
     /// Wire string form (socket protocol + receipts).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -43,6 +47,7 @@ impl Verdict {
         }
     }
 
+    // WO-8@v1: reject unknown operator decisions received over the socket.
     /// Parse the wire string form. Unknown strings parse to `None`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
@@ -55,6 +60,7 @@ impl Verdict {
     }
 }
 
+// WO-8@v1: carry identity and provenance without exposing protected content.
 /// Context handed to a provider for one consent request. Never contains file
 /// content — only identity and provenance.
 #[derive(Debug, Clone)]
@@ -66,6 +72,7 @@ pub struct ConsentRequest {
     pub reason: String,
 }
 
+// WO-8@v1: record whether a decision came from an operator, cache, or fallback.
 /// How a verdict was reached, for the receipt log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -79,7 +86,9 @@ pub enum Source {
     Static,
 }
 
+// WO-8@v1: serialize decision sources for receipt records.
 impl Source {
+    // WO-8@v1: expose the stable wire label for each decision source.
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Operator => "operator",
@@ -90,8 +99,10 @@ impl Source {
     }
 }
 
+// WO-8@v1: abstract deadline-bounded off-band operator decisions.
 /// A source of consent verdicts.
 pub trait ConsentProvider {
+    // WO-8@v1: require providers to return a verdict and its source promptly.
     /// Request a verdict for one open. Implementations MUST be deadline-bounded
     /// and return `Verdict::Deny` (with [`Source::Timeout`]) rather than block
     /// indefinitely — the kernel is holding the open. Returns the verdict and
@@ -126,17 +137,21 @@ pub trait ConsentProvider {
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 }
 
+// WO-8@v1: deny immediately when no off-band operator channel is configured.
 /// The default open-core provider: deny everything, immediately. This is the
 /// graceful-degradation floor when no interactive channel is configured, and
 /// reproduces the WO-3 MVP behavior exactly.
 pub struct StaticDeny;
 
+// WO-8@v1: implement the fail-closed fallback through the consent interface.
 impl ConsentProvider for StaticDeny {
+    // WO-8@v1: deny every open immediately when no operator channel exists.
     fn request(&mut self, _req: &ConsentRequest) -> (Verdict, Source) {
         (Verdict::Deny, Source::Static)
     }
 }
 
+// WO-8@v1: cache scoped operator decisions without weakening permanent denials.
 /// Wraps a provider with the session decision cache. Inodes the operator
 /// allowed for the session short-circuit to allow; inodes denied forever
 /// short-circuit to deny. Everything else falls through to the inner provider.
@@ -155,7 +170,9 @@ pub struct CachingProvider<P: ConsentProvider> {
     tainted: bool,
 }
 
+// WO-8@v1: apply reusable operator decisions around any consent provider.
 impl<P: ConsentProvider> CachingProvider<P> {
+    // WO-8@v1: initialize empty allow and deny caches around a provider.
     pub fn new(inner: P) -> Self {
         CachingProvider {
             inner,
@@ -166,6 +183,7 @@ impl<P: ConsentProvider> CachingProvider<P> {
         }
     }
 
+    // WO-13@v1: bypass cached allows while integrity taint remains set.
     /// Mark this provider as operating in a tainted session: the allow-session
     /// cache is bypassed so every protected open re-prompts. Deny-forever is
     /// unaffected.
@@ -225,7 +243,9 @@ impl<P: ConsentProvider> CachingProvider<P> {
     }
 }
 
+// WO-8@v1: connect cached operator decisions to the gate decision interface.
 impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
+    // WO-8@v1: resolve gate decisions through the consent cache.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         CachingProvider::decide(self, req)
     }
@@ -261,10 +281,12 @@ impl<P: ConsentProvider> crate::gate::ConsentDecider for CachingProvider<P> {
     }
 }
 
+// WO-8@v1: verify consent wire forms and cache behavior.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // WO-8@v1: build deterministic protected-open requests for consent tests.
     fn req(ino: u64) -> ConsentRequest {
         ConsentRequest {
             pid: 100,
@@ -275,15 +297,19 @@ mod tests {
         }
     }
 
+    // WO-8@v1: supply deterministic operator verdict sequences to cache tests.
     /// A scripted provider that returns a fixed sequence of verdicts.
     struct Scripted(std::cell::RefCell<Vec<Verdict>>);
+    // WO-8@v1: expose scripted verdicts through the provider interface.
     impl ConsentProvider for Scripted {
+        // WO-8@v1: return each scripted operator verdict exactly once.
         fn request(&mut self, _r: &ConsentRequest) -> (Verdict, Source) {
             let v = self.0.borrow_mut().remove(0);
             (v, Source::Operator)
         }
     }
 
+    // WO-8@v1: prove only allow verdicts permit the protected open.
     #[test]
     fn verdict_allows_only_allow_variants() {
         assert!(Verdict::AllowOnce.allows());
@@ -292,6 +318,7 @@ mod tests {
         assert!(!Verdict::DenyForever.allows());
     }
 
+    // WO-8@v1: preserve all operator decisions across the socket wire form.
     #[test]
     fn verdict_wire_round_trip() {
         for v in [
@@ -305,6 +332,7 @@ mod tests {
         assert_eq!(Verdict::parse("nonsense"), None);
     }
 
+    // WO-8@v1: prove the fallback provider denies without operator input.
     #[test]
     fn static_deny_denies() {
         let mut p = StaticDeny;
@@ -313,6 +341,7 @@ mod tests {
         assert_eq!(s, Source::Static);
     }
 
+    // WO-8@v1: prove reusable allows are served from the consent cache.
     #[test]
     fn allow_session_is_cached_not_reasked() {
         // First call asks (allow-session); second call for same inode is cached.
@@ -341,6 +370,7 @@ mod tests {
         assert_eq!(paths, vec!["/x/9".to_string()]);
     }
 
+    // WO-13@v1: prove integrity taint bypasses cached allow decisions.
     #[test]
     fn tainted_bypasses_allow_session_cache() {
         // In a tainted session every protected open re-asks: allow-session is
@@ -357,6 +387,7 @@ mod tests {
         assert_eq!(c.decide(&req(5)), (Verdict::AllowSession, Source::Operator));
     }
 
+    // WO-13@v1: prove integrity taint never weakens a permanent denial.
     #[test]
     fn tainted_still_honors_deny_forever() {
         // A standing deny-forever is never weakened by taint.
@@ -367,6 +398,7 @@ mod tests {
         assert_eq!(c.decide(&req(8)), (Verdict::DenyForever, Source::Cache));
     }
 
+    // WO-8@v1: prove one-shot allows never enter the reusable cache.
     #[test]
     fn allow_once_is_not_cached() {
         // allow-once must re-ask the next time for the same inode.

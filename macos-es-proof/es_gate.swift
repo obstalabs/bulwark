@@ -11,22 +11,26 @@ import Dispatch
 import EndpointSecurity
 import Foundation
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 struct InodeKey: Hashable {
     let dev: UInt64
     let ino: UInt64
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 struct GrantRoot {
     let key: InodeKey // WO-41: inode identity of the operator-granted root
     let recursive: Bool // WO-41: directory grants cover descendants
     let path: String // WO-41: canonical path used for symlink-safe boundary checks
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 enum GateMode: String {
     case denylist
     case allowlist
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 struct GateConfig {
     let mode: GateMode // WO-41: deny-list vs default-deny allow-list behavior
     let rootPid: pid_t
@@ -39,6 +43,7 @@ struct GateConfig {
     let allowRoots: [GrantRoot] // WO-41: operator grants pinned to root identity
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func parseInode(_ value: Substring) -> InodeKey? {
     let parts = value.split(separator: ":", maxSplits: 1)
     guard parts.count == 2, let dev = UInt64(parts[0]), let ino = UInt64(parts[1]) else {
@@ -47,6 +52,7 @@ func parseInode(_ value: Substring) -> InodeKey? {
     return InodeKey(dev: dev, ino: ino)
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 func parseGrantRoot(_ value: Substring) -> GrantRoot? {
     let parts = value.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false)
     guard
@@ -72,6 +78,7 @@ func parseGrantRoot(_ value: Substring) -> GrantRoot? {
     )
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func loadConfig(_ path: String) throws -> GateConfig {
     let body = try String(contentsOfFile: path, encoding: .utf8)
     var mode = GateMode.denylist
@@ -162,10 +169,12 @@ func loadConfig(_ path: String) throws -> GateConfig {
     )
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func pidFromAuditToken(_ token: audit_token_t) -> pid_t {
     audit_token_to_pid(token)
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func inodeKey(_ file: UnsafePointer<es_file_t>) -> InodeKey {
     let st = file.pointee.stat
     // WO-127@v4: dev_t is Int32 on Darwin and devfs reports a negative value
@@ -176,6 +185,7 @@ func inodeKey(_ file: UnsafePointer<es_file_t>) -> InodeKey {
     return InodeKey(dev: UInt64(bitPattern: Int64(st.st_dev)), ino: UInt64(st.st_ino))
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func tokenPath(_ token: es_string_token_t) -> String {
     guard token.length > 0, let data = token.data else {
         return ""
@@ -185,6 +195,7 @@ func tokenPath(_ token: es_string_token_t) -> String {
     return String(decoding: bytes, as: UTF8.self)
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func parentPid(_ pid: pid_t) -> pid_t? {
     var info = proc_bsdinfo()
     let size = proc_pidinfo(
@@ -201,6 +212,7 @@ func parentPid(_ pid: pid_t) -> pid_t? {
     return pid_t(truncatingIfNeeded: info.pbi_ppid)
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func processName(_ pid: pid_t) -> String {
     var name = [CChar](repeating: 0, count: 128)
     let rc = proc_name(pid, &name, UInt32(name.count))
@@ -212,6 +224,7 @@ func processName(_ pid: pid_t) -> String {
     return String(decoding: bytes, as: UTF8.self)
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func ancestry(_ pid: pid_t, maxDepth: Int = 16) -> String {
     var parts: [String] = []
     var current = pid
@@ -264,6 +277,7 @@ func hasAncestor(_ pid: pid_t, root: pid_t, maxDepth: Int = 16) -> Bool {
     ancestryOf(pid, root: root, maxDepth: maxDepth) == .inTree
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func jsonEscape(_ value: String) -> String {
     var out = ""
     out.reserveCapacity(value.count)
@@ -285,10 +299,12 @@ func jsonEscape(_ value: String) -> String {
     return out
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func nowMillis() -> UInt64 {
     UInt64(Date().timeIntervalSince1970 * 1000)
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 func pathMatchesGlob(_ path: String, _ glob: String) -> Bool {
     if let prefix = glob.dropSuffix("/**") {
         return path == prefix || path.hasPrefix(prefix + "/")
@@ -299,6 +315,7 @@ func pathMatchesGlob(_ path: String, _ glob: String) -> Bool {
     return wildcardMatch(Array(path.utf8), Array(glob.utf8), 0, 0)
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 func canonicalPath(_ path: String) -> String? {
     var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
     return path.withCString { ptr in
@@ -314,6 +331,7 @@ func canonicalPath(_ path: String) -> String? {
     }
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func inodeKey(at path: String) -> InodeKey? {
     do {
         let attrs = try FileManager.default.attributesOfItem(atPath: path)
@@ -329,6 +347,7 @@ func inodeKey(at path: String) -> InodeKey? {
     }
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 func pathIsUnder(_ path: String, root: String) -> Bool {
     path == root || path.hasPrefix(root + "/")
 }
@@ -346,6 +365,7 @@ func grantRootAllows(_ root: GrantRoot, key: InodeKey, canonicalPath: String) ->
     return pathIsUnder(canonicalPath, root: root.path)
 }
 
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 func wildcardMatch(_ path: [UInt8], _ glob: [UInt8], _ pi: Int, _ gi: Int) -> Bool {
     if gi == glob.count {
         return pi == path.count
@@ -383,6 +403,7 @@ func wildcardMatch(_ path: [UInt8], _ glob: [UInt8], _ pi: Int, _ gi: Int) -> Bo
 }
 
 extension String {
+    // WO-41@v1: prove macOS default-deny allow-list behavior end to end.
     func dropSuffix(_ suffix: String) -> String? {
         guard hasSuffix(suffix) else {
             return nil
@@ -391,6 +412,7 @@ extension String {
     }
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func allowlistAllows(_ key: InodeKey, path: String, config: GateConfig) -> Bool {
     if config.allowed.contains(key) {
         return true
@@ -429,6 +451,7 @@ let receiptFd: Int32 = {
 }()
 let receiptQueue = DispatchQueue(label: "dev.obstalabs.bulwark.es.receipts")
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func appendReceipt(_ line: String) {
     guard receiptFd >= 0 else {
         return
@@ -474,6 +497,7 @@ func flushForExit() -> Bool {
     return drained
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 func receiptLine(
     pid: pid_t,
     key: InodeKey,
@@ -745,7 +769,9 @@ guard res == ES_NEW_CLIENT_RESULT_SUCCESS, let client else {
 // this because it only gates the protected inode set, not the edge's own files.)
 // es_mute_process excludes our pid from ALL events, by audit token. Obtain our
 // own audit token via task_info(TASK_AUDIT_TOKEN) on mach_task_self.
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 var selfToken = audit_token_t()
+// WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 var tokenCount = mach_msg_type_number_t(MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size)
 let kr = withUnsafeMutablePointer(to: &selfToken) { tokenPtr in
     tokenPtr.withMemoryRebound(to: integer_t.self, capacity: Int(tokenCount)) { intPtr in

@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex};
 use crate::consent::{ConsentProvider, ConsentRequest, Source, Verdict};
 use crate::protect::InodeKey;
 
+// WO-9@v1: scope remote grants to object, identity, session, and policy state.
 /// A scoped allow grant. The key is deliberately NOT a bare inode: it binds the
 /// inode to the requester identity, the session, and the policy epoch, so a
 /// grant cannot over-authorize a different process or a stale policy.
@@ -64,7 +65,9 @@ pub struct GrantKey {
     pub policy_epoch: u64,
 }
 
+// WO-9@v1: encode and recover grants carried across the remote control lanes.
 impl GrantKey {
+    // WO-9@v1: bind each grant to the requesting identity and supervised run.
     /// Build a grant key from an inode + the scope of the current request.
     pub fn scoped(key: InodeKey, uid: u32, session_id: u64, policy_epoch: u64) -> Self {
         GrantKey {
@@ -76,6 +79,7 @@ impl GrantKey {
         }
     }
 
+    // WO-9@v1: serialize scoped grants for the remote verdict lane.
     /// Wire form for the verdict lane: `<dev>:<ino>:<uid>:<session>:<epoch>`.
     pub fn wire(&self) -> String {
         format!(
@@ -84,6 +88,7 @@ impl GrantKey {
         )
     }
 
+    // WO-9@v1: reject malformed scoped grants received from the operator lane.
     /// Parse the wire form.
     pub fn parse_wire(s: &str) -> Option<Self> {
         let mut p = s.split(':');
@@ -102,6 +107,7 @@ impl GrantKey {
     }
 }
 
+// WO-9@v1: share session grants between gate decisions and verdict intake.
 /// Scoped grants shared between the gate (reader) and the verdict-intake thread
 /// (writer). The gate consults it on the prompt lane; the operator's replies,
 /// arriving asynchronously on the verdict lane, populate it.
@@ -112,26 +118,32 @@ pub struct RemoteCache {
     prompts_emitted: Arc<AtomicU64>,
 }
 
+// WO-9@v1: expose synchronized operations over the remote session grant set.
 impl RemoteCache {
+    // WO-9@v1: initialize an empty grant cache for each remote gate session.
     pub fn new() -> Self {
         Self::default()
     }
 
+    // WO-9@v1: record an operator-approved scoped grant for later opens.
     pub fn allow(&self, key: GrantKey) {
         self.allow_session.lock().unwrap().insert(key);
     }
 
+    // WO-9@v1: decide remote opens only from an exact scoped grant match.
     fn is_allowed(&self, key: &GrantKey) -> bool {
         self.allow_session.lock().unwrap().contains(key)
     }
 
-    /// Number of prompts emitted this session (diagnostics + tests).
-    #[allow(dead_code)] // used by tests and the future operator-UI status line
+    // WO-9@v1: expose prompt counts for deterministic remote-gate verification.
+    /// Number of prompts emitted this session (tests).
+    #[cfg(test)]
     pub fn prompts_emitted(&self) -> u64 {
         self.prompts_emitted.load(Ordering::SeqCst)
     }
 }
 
+// WO-9@v1: bind a grant to the kernel identity that requested the remote open.
 /// Read the uid that owns a pid, from `/proc/<pid>/status` (`Uid:` line). Used
 /// to scope a grant to the requester identity. Falls back to `u32::MAX` (an
 /// identity nothing matches) on failure, so a grant is never mis-scoped to uid
@@ -152,6 +164,7 @@ fn uid_of_pid(pid: i32) -> u32 {
     u32::MAX
 }
 
+// WO-9@v1: deny uncached remote opens immediately while emitting operator prompts.
 /// The remote-side consent provider. On a protected open that is not already
 /// cached-allowed (scoped), it DENIES immediately and emits a prompt to the
 /// prompt lane. It never blocks: the kernel deadline is always met.
@@ -169,7 +182,9 @@ pub struct AsyncRemoteProvider<W: Write> {
     policy_epoch: u64,
 }
 
+// WO-9@v1: construct prompts and grant keys without blocking remote decisions.
 impl<W: Write> AsyncRemoteProvider<W> {
+    // WO-9@v1: bind the remote provider to one host, session, and policy epoch.
     pub fn new(
         cache: RemoteCache,
         prompt_out: W,
@@ -186,6 +201,7 @@ impl<W: Write> AsyncRemoteProvider<W> {
         }
     }
 
+    // WO-9@v1: derive the exact authorization scope for each protected open.
     /// The scoped grant key for a request: inode + requester uid + session +
     /// policy epoch.
     fn grant_key(&self, req: &ConsentRequest) -> GrantKey {
@@ -197,6 +213,7 @@ impl<W: Write> AsyncRemoteProvider<W> {
         )
     }
 
+    // WO-9@v1: emit structured prompts without changing the immediate deny decision.
     /// Emit one prompt line on the prompt lane. Tab-separated, never carries
     /// file content. The `grant` field is the SCOPED key the operator echoes
     /// back to authorize — so the operator authorizes exactly this
@@ -219,7 +236,9 @@ impl<W: Write> AsyncRemoteProvider<W> {
     }
 }
 
+// WO-9@v1: connect remote prompt splitting to the portable consent interface.
 impl<W: Write> ConsentProvider for AsyncRemoteProvider<W> {
+    // WO-9@v1: allow exact cached grants and deny first touches without waiting.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         let grant = self.grant_key(req);
         // Cached scoped-allow → pass immediately, no prompt.
@@ -234,14 +253,17 @@ impl<W: Write> ConsentProvider for AsyncRemoteProvider<W> {
     }
 }
 
+// WO-9@v1: use the remote provider directly as the gate decision source.
 /// The remote provider is itself the gate's decider — it does its own scoped
 /// caching, so it does not need the generic `CachingProvider` wrapper.
 impl<W: Write> crate::gate::ConsentDecider for AsyncRemoteProvider<W> {
+    // WO-9@v1: delegate gate decisions to the scoped remote consent path.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         self.request(req)
     }
 }
 
+// WO-9@v1: parse structured remote prompts for the local operator transport.
 /// Parse a `CONSENT\t...` prompt line into fields for the local operator client
 /// to display. Returns `None` for a non-prompt line. This is the seam the
 /// interactive local operator UI builds on (the prototype launcher auto-answers
@@ -257,6 +279,7 @@ pub fn parse_prompt(line: &str) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+// WO-18@v1: extract named prompt fields for the local operator display.
 /// Look up one field from a parsed prompt's key/value pairs.
 fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
     fields
@@ -265,6 +288,7 @@ fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+// WO-18@v1: render remote context for an interactive local decision.
 /// Render a parsed prompt for the local operator: host, path, and process
 /// ancestry on a single human-readable line. The scoped grant is control state,
 /// not shown — the operator decides on the path + who is asking. Pure (no I/O),
@@ -277,6 +301,7 @@ pub fn render_prompt(fields: &[(String, String)]) -> String {
     format!("[bulwark] consent needed on {host}: {path}  (via {ancestry})")
 }
 
+// WO-18@v1: preserve the remote grant token verbatim for the reply lane.
 /// The verbatim scoped grant string from a parsed prompt, which the operator
 /// echoes back unchanged on the verdict lane. Returns `None` if the prompt
 /// carried no grant (a malformed line).
@@ -284,6 +309,7 @@ pub fn prompt_grant(fields: &[(String, String)]) -> Option<&str> {
     field(fields, "grant")
 }
 
+// WO-18@v1: encode the local operator verdict for remote intake.
 /// Build a verdict-lane line from a verdict and the verbatim scoped grant string
 /// taken from the prompt. The grant is echoed unchanged so the authorization
 /// stays bound to that identity/session/epoch — never reconstructed locally.
@@ -292,6 +318,7 @@ pub fn verdict_line(verdict: Verdict, grant: &str) -> String {
     format!("{} {}", verdict.as_str(), grant)
 }
 
+// WO-9@v1: parse remote verdict replies without broadening their grant scope.
 /// A verdict reply from the operator, on the verdict lane back to the remote
 /// gate. Wire form: `allow-session <dev>:<ino>:<uid>:<session>:<epoch>` — the
 /// operator echoes the exact scoped grant from the prompt, so the authorization
@@ -304,6 +331,7 @@ pub fn parse_verdict_reply(line: &str) -> Option<(Verdict, GrantKey)> {
     Some((verdict, grant))
 }
 
+// WO-9@v1: apply asynchronous allow replies to the matching remote session cache.
 /// Read operator verdict replies from `reader` (the verdict lane) and apply
 /// `allow-session` decisions to `cache`. Runs until the lane closes; intended to
 /// run on a background thread on the remote gate.
@@ -321,6 +349,7 @@ pub fn intake_verdicts<R: BufRead>(reader: R, cache: RemoteCache) {
     }
 }
 
+// WO-9@v1: verify the remote decision and control-lane contract in one module.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +357,7 @@ mod tests {
     const SESSION: u64 = 42;
     const EPOCH: u64 = 1;
 
+    // WO-9@v1: build consistently scoped protected-open requests for remote tests.
     fn req(ino: u64) -> ConsentRequest {
         ConsentRequest {
             // pid 1 (init) reliably resolves uid 0 via /proc on a test host.
@@ -339,10 +369,12 @@ mod tests {
         }
     }
 
+    // WO-9@v1: construct a deterministic remote provider for decision tests.
     fn provider(cache: RemoteCache, out: &mut Vec<u8>) -> AsyncRemoteProvider<&mut Vec<u8>> {
         AsyncRemoteProvider::new(cache, out, "prod".into(), SESSION, EPOCH)
     }
 
+    // WO-9@v1: prove first touches deny promptly and emit a scoped prompt.
     #[test]
     fn first_touch_denies_immediately_and_prompts() {
         let cache = RemoteCache::new();
@@ -363,6 +395,7 @@ mod tests {
         assert_eq!(cache.prompts_emitted(), 1);
     }
 
+    // WO-9@v1: prove exact cached grants allow without another operator prompt.
     #[test]
     fn cached_scoped_allow_passes_without_prompt() {
         let cache = RemoteCache::new();
@@ -384,6 +417,7 @@ mod tests {
         assert!(out.is_empty(), "no prompt for a cached allow");
     }
 
+    // WO-9@v1: prevent grants from authorizing a different remote session.
     #[test]
     fn grant_for_different_scope_does_not_authorize() {
         // A grant for a DIFFERENT session must not pass — scoping prevents
@@ -408,6 +442,7 @@ mod tests {
         );
     }
 
+    // WO-9@v1: pin lossless serialization of the full remote grant scope.
     #[test]
     fn grant_wire_round_trip() {
         let g = GrantKey {
@@ -422,6 +457,7 @@ mod tests {
         assert!(GrantKey::parse_wire("garbage").is_none());
     }
 
+    // WO-9@v1: pin parsing of verdicts paired with scoped remote grants.
     #[test]
     fn verdict_reply_round_trip() {
         let (v, g) = parse_verdict_reply("allow-session 5:12:0:42:1").unwrap();
@@ -431,6 +467,7 @@ mod tests {
         assert!(parse_verdict_reply("garbage").is_none());
     }
 
+    // WO-9@v1: prove verdict intake caches allows and ignores deny replies.
     #[test]
     fn intake_applies_allow_session_to_cache() {
         let cache = RemoteCache::new();
@@ -459,6 +496,7 @@ mod tests {
         })); // deny ignored
     }
 
+    // WO-9@v1: preserve structured prompt fields across the remote lane.
     #[test]
     fn prompt_parse_round_trip() {
         let cache = RemoteCache::new();
@@ -480,6 +518,7 @@ mod tests {
         assert_eq!(get("path"), Some("/etc/secret-20".into()));
     }
 
+    // WO-18@v1: prove local prompt text carries host, path, and ancestry context.
     #[test]
     fn render_prompt_shows_host_path_ancestry() {
         let fields = vec![
@@ -496,6 +535,7 @@ mod tests {
         assert!(!s.contains("5:10:0:42:1"));
     }
 
+    // WO-18@v1: prove the local operator returns the exact remote grant token.
     #[test]
     fn prompt_grant_extracts_verbatim() {
         let fields =
@@ -503,6 +543,7 @@ mod tests {
         assert_eq!(prompt_grant(&fields), Some("5:10:0:42:1"));
     }
 
+    // WO-18@v1: prove local verdict lines round-trip through remote parsing.
     #[test]
     fn verdict_line_round_trips_with_parse() {
         // The line built for the verdict lane parses back to the same verdict +

@@ -14,36 +14,53 @@
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("the `fault-injection` feature is debug-only; do not enable it in a release build");
 
+// WO-15@v1: expose the default-deny allow-list policy surface.
 mod allowlist;
+// WO-5@v1: expose decision receipt rendering for policy commands.
 mod audit;
+// WO-8@v1: expose off-band consent providers to the command dispatcher.
 mod consent;
+// WO-18@v1: expose remote deployment selection for SSH dispatch.
 mod deploy;
+// WO-5@v1: expose policy glob matching to command execution.
 mod glob;
+// WO-29@v1: expose dispatch-time hivebus key placement.
 mod hivebus_keys;
+// WO-13@v1: expose persistent integrity state to supervised runs.
 mod integrity;
+// WO-5@v1: expose policy loading and decisions to the CLI.
 mod policy;
+// WO-3@v1: expose Linux process ancestry for gate attribution.
 mod proctree;
+// WO-3@v1: expose inode-based protected object resolution.
 mod protect;
+// WO-3@v1: expose gate decision receipt persistence.
 mod receipt;
+// WO-9@v1: expose remote prompt and verdict lane handling.
 mod remote;
 
 // WO-28/WO-23: split the platform gate behind cfg-gated modules.
 // Linux uses fanotify. macOS uses Endpoint Security. Other platforms keep a
 // fail-closed stub with the same public surface so the portable core builds
 // without ever running a command ungated.
+// WO-28@v1: isolate Linux enforcement behind the platform gate boundary.
 #[cfg(target_os = "linux")]
 #[path = "gate.rs"]
 mod gate;
+// WO-23@v1: wire the macOS Endpoint Security backend into the portable gate seam.
 #[cfg(target_os = "macos")]
 #[path = "gate_macos.rs"]
 mod gate;
+// WO-28@v1: keep unsupported platforms fail closed through the gate stub.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[path = "gate_stub.rs"]
 mod gate;
 
+// WO-14@v1: connect Linux Landlock enforcement to hardened runs.
 #[cfg(target_os = "linux")]
 #[path = "hardened.rs"]
 mod hardened;
+// WO-28@v1: keep hardened mode fail closed on unsupported platforms.
 #[cfg(not(target_os = "linux"))]
 #[path = "hardened_stub.rs"]
 mod hardened;
@@ -53,9 +70,11 @@ mod hardened;
 #[cfg(target_os = "linux")]
 mod cgroup;
 
+// WO-8@v1: connect supported platforms to off-band operator consent.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "socket.rs"]
 mod socket;
+// WO-28@v1: keep socket consent fail closed on unsupported platforms.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[path = "socket_stub.rs"]
 mod socket;
@@ -85,6 +104,7 @@ const POLICY_FILE: &str = "Bulwark.toml";
 const POLICY_FILE_CANDIDATES: &[&str] = &["Bulwark.toml", "bulwark.toml"];
 
 /// WO-24: environment variable that points at the signed macOS ES edge binary.
+// WO-163@v2: doctor honours the same override the gate does, before auto-discovery.
 #[cfg(target_os = "macos")]
 const MACOS_ES_GATE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 
@@ -94,6 +114,7 @@ const MACOS_MIN_MAJOR: u64 = 11;
 #[cfg(target_os = "macos")]
 const MACOS_MIN_VERSION: &str = "11.0";
 
+// WO-20@v1: encode machine-readable command output without another dependency.
 /// Escape a string for a JSON double-quoted value (minimal rules, no
 /// serde_json dependency — matches the receipt/audit writers).
 fn json_escape(s: &str) -> String {
@@ -112,6 +133,7 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+// WO-8@v1: locate the policy that backs an off-band consent run.
 /// Find an existing policy file in the current directory, trying both casings.
 fn find_policy_file() -> Option<PathBuf> {
     POLICY_FILE_CANDIDATES
@@ -154,6 +176,7 @@ fn run_policy_source(
     }))
 }
 
+// WO-20@v1: offer human and JSON output for agent-operable commands.
 /// Output format for commands that support machine-readable output. `human` is
 /// the default table/text; `json` is the agent interface (one JSON object).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -177,6 +200,7 @@ enum ConsentMode {
     Remote,
 }
 
+// WO-3@v1: parse the command-line entry point for supervised runs.
 #[derive(Parser)]
 #[command(
     name = "bulwark",
@@ -188,6 +212,7 @@ struct Cli {
     cmd: Cmd,
 }
 
+// WO-3@v1: dispatch the CLI operations that configure and run the gate.
 #[derive(Subcommand)]
 enum Cmd {
     /// Run a command under the read gate. Opens of protected inodes by the
@@ -540,6 +565,7 @@ enum Cmd {
     /// Preflight: check that this host can actually enforce — kernel version,
     /// root/`CAP_SYS_ADMIN` for fanotify, and Landlock for `--hardened`. Run it
     /// before relying on the gate. Exit 0 if everything required is present.
+    // WO-164@v2: a preflight an operator or orchestrating agent runs before relying on the gate.
     Doctor {
         /// Output format: `human` or `json` (per-check results as one object).
         #[arg(long = "format", value_name = "FMT", default_value = "human")]
@@ -784,15 +810,6 @@ fn cmd_consent(socket: Option<PathBuf>, verdict: Option<&str>) -> Result<()> {
     let sent = socket::answer_once(&sock, v)?;
     println!("sent: {sent}");
     Ok(())
-}
-
-/// Resolve the user's home directory from `$HOME`. WO-145@v2: protect
-/// expansion no longer uses this (it uses the host home set); retained for any
-/// caller that wants one user's home.
-// WO-145@v2: isolate legacy single-home lookup from host-wide protect expansion.
-#[allow(dead_code)]
-fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
 }
 
 /// WO-145@v2: the enumerated homes owned by `uid`.
@@ -1092,13 +1109,16 @@ struct HivebusDispatch<'a> {
     worker_seed_generate: bool,
 }
 
+// WO-29@v1: keep dispatch-time key handoff inert unless explicitly requested.
 impl HivebusDispatch<'_> {
+    // WO-29@v1: distinguish an untouched dispatch from either key handoff mode.
     /// True when no hivebus handoff was requested — the feature stays fully inert.
     fn is_inert(&self) -> bool {
         self.architect_pub.is_none() && !self.worker_seed_generate
     }
 }
 
+// WO-25@v1: carry hardened remote dispatch options without a positional argument list.
 /// Arguments for `bulwark ssh`. A struct (not a long positional list) because the
 /// command grew several modes — deny-list consent, hivebus handoff, worker-uid
 /// drop, and the WO-25 hardened floor.
@@ -1162,6 +1182,7 @@ fn remote_consent_worker_uid(
     Ok(uid)
 }
 
+// WO-9@v1: coordinate the remote gate and its prompt and verdict lanes.
 fn cmd_ssh(args: SshArgs) -> Result<i32> {
     use std::io::{BufRead, BufReader, Write};
 
@@ -1480,6 +1501,7 @@ fn cmd_ssh_hardened(
     Ok(status.code().unwrap_or(1))
 }
 
+// WO-29@v1: return only fingerprints for key material placed at dispatch.
 /// Fingerprints of the hivebus material placed on a remote, for the operator
 /// print + dispatch receipt. Never carries seed bytes.
 struct HivebusPlaced {
@@ -1574,6 +1596,7 @@ fn place_hivebus_material(
     })
 }
 
+// WO-29@v1: place remote hivebus material through standard input rather than argv.
 /// Run a one-shot remote command over ssh, optionally piping `stdin_data` to it.
 /// Used for hivebus placement: the data goes on STDIN so it never lands in argv.
 ///
@@ -1610,6 +1633,7 @@ fn run_remote_quiet(target: &str, remote_cmd: &str, stdin_data: Option<&str>) ->
     Ok(())
 }
 
+// WO-50@v1: return the anonymous worker uid selected on the remote host.
 /// Run a one-shot remote command over ssh and return its trimmed stdout. Like
 /// `run_remote_quiet` but captures stdout (used to read a value back from the
 /// remote, e.g. the WO-50 picked uid). Errors on a non-zero remote exit.
@@ -1659,6 +1683,7 @@ fn pick_remote_worker_uid(target: &str, run_id: u32) -> Result<u32> {
         .map_err(|_| anyhow::anyhow!("remote returned an unexpected worker-uid value: {out:?}"))
 }
 
+// WO-18@v1: collect the local operator decision for a remote consent prompt.
 /// Read one consent decision from the local controlling terminal. Defaults to
 /// deny on EOF or an unrecognized key, so a closed terminal never auto-allows.
 fn prompt_local_operator() -> Verdict {
@@ -1675,6 +1700,7 @@ fn prompt_local_operator() -> Verdict {
     }
 }
 
+// WO-9@v1: quote remote command arguments without changing their shell value.
 /// Single-quote a string for safe embedding in a remote shell command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -1779,6 +1805,7 @@ fn run_hardened(
         .with_context(|| format!("cannot exec {}", command[0]))
 }
 
+// WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
 /// Enumerate the mount points of every real filesystem from `/proc/mounts`, so
 /// allow-list mode can mark them all. Marking only `/` would miss separate
 /// mounts (tmpfs, a data volume, network shares) and silently allow reads
@@ -1840,6 +1867,7 @@ fn real_mount_points() -> Vec<PathBuf> {
     mounts
 }
 
+// WO-8@v1: carry consent and policy inputs into one supervised run.
 /// Arguments for a `run` invocation.
 struct RunArgs<'a> {
     protect: &'a [PathBuf],
@@ -1890,6 +1918,7 @@ struct LaunchPlan {
     command: Vec<String>, // WO-27: resolved command vector
 }
 
+// WO-27@v1: resolve the policy that defines a named launch profile.
 fn launch_policy_path(agent: &str, policy_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = policy_path {
         return Ok(path.to_path_buf());
@@ -1982,6 +2011,7 @@ fn cmd_launch(
     })
 }
 
+// WO-27@v1: initialize a named launch profile in the selected policy.
 fn cmd_launch_init(agent: &str, policy_path: &Path) -> Result<()> {
     let mut policy = if policy_path.exists() {
         Policy::load(policy_path)?
@@ -2031,6 +2061,7 @@ fn resolve_launch_plan(agent: &str, policy: &Policy) -> Result<LaunchPlan> {
     })
 }
 
+// WO-27@v1: map a launch profile decision to the portable consent mode.
 fn consent_mode_for_agent_decision(decision: AgentDecision) -> ConsentMode {
     match decision {
         AgentDecision::Deny | AgentDecision::Allow => ConsentMode::Static,
@@ -2147,6 +2178,7 @@ fn hardened_worker_creds(
     }
 }
 
+// WO-49@v1: validate worker credentials before dropping the supervised child.
 fn resolve_worker_creds(
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,
@@ -2599,6 +2631,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
     code
 }
 
+// WO-13@v1: record protected object identities for persistent integrity checks.
 /// Resolve each marked protected path to its current `(dev, ino)` for the
 /// integrity record. Paths that cannot be stat'd (absent on this host) are
 /// skipped — they contribute no identity to drift-check.
@@ -2631,6 +2664,7 @@ fn protected_object_ids(mark_paths: &[PathBuf]) -> Vec<integrity::ObjId> {
     out
 }
 
+// WO-13@v1: clear persistent integrity taint only through the explicit command.
 /// `bulwark reset`: clear the integrity taint marker after operator review.
 fn cmd_reset(state: Option<&Path>) -> Result<()> {
     let state_path = state
@@ -2842,6 +2876,7 @@ fn cmd_check(
     Ok(())
 }
 
+// WO-20@v1: create an editable starter policy through the agent-facing CLI.
 /// `bulwark init` — write a default policy file so the operator can edit what is
 /// protected. Refuses to clobber an existing file without `--force`.
 fn cmd_init(policy_path: Option<&Path>, profile: Option<&str>, force: bool) -> Result<()> {
@@ -2869,6 +2904,7 @@ fn cmd_init(policy_path: Option<&Path>, profile: Option<&str>, force: bool) -> R
 }
 
 /// One preflight check result.
+// WO-164@v2: each check is named and marked required or informational; only required ones gate the exit.
 struct DoctorCheck {
     name: &'static str,
     ok: bool,
@@ -2879,6 +2915,7 @@ struct DoctorCheck {
 
 /// `bulwark doctor` — report whether this host can enforce. Returns the process
 /// exit code: 0 when every REQUIRED check passes, 1 otherwise.
+// WO-164@v2: exit 0 only when every required check passes; render for humans or as JSON for agents.
 fn cmd_doctor(format: OutputFormat) -> i32 {
     let checks = run_doctor_checks();
     let failed_required = checks.iter().any(|c| c.required && !c.ok);
@@ -2949,6 +2986,7 @@ fn cmd_doctor(format: OutputFormat) -> i32 {
 }
 
 /// Collect the preflight checks. Kept separate from rendering so it is testable.
+// WO-164@v2: one collection point per platform, separate from rendering so the split is testable.
 fn run_doctor_checks() -> Vec<DoctorCheck> {
     #[cfg(target_os = "macos")]
     {
@@ -2965,6 +3003,7 @@ fn run_doctor_checks() -> Vec<DoctorCheck> {
     }
 }
 
+// WO-164@v2: Linux enforcement needs the OS and root or CAP_SYS_ADMIN; kernel and Landlock inform.
 fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
     // Linux is required — the gate is fanotify/Landlock.
     let is_linux = cfg!(target_os = "linux");
@@ -3019,6 +3058,7 @@ fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
     });
 }
 
+// WO-164@v2: report the Linux kernel version as an informational doctor check.
 /// Read the kernel release string via uname(2). Empty on failure or non-Linux.
 fn kernel_release() -> String {
     #[cfg(target_os = "linux")]
@@ -3038,6 +3078,7 @@ fn kernel_release() -> String {
     String::new()
 }
 
+// WO-164@v2: report whether this host can support hardened Landlock runs.
 /// Probe Landlock support by asking the kernel for the current ABI version.
 /// Returns true when ABI >= 1. Non-Linux always false.
 fn landlock_available() -> bool {
@@ -3060,6 +3101,7 @@ fn landlock_available() -> bool {
 }
 
 /// WO-24: macOS preflight checks for the root-launched Endpoint Security edge.
+// WO-164@v2: macOS enforcement needs the OS, root, the ES edge and its entitlement; FDA informs.
 #[cfg(target_os = "macos")]
 fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
     let version = macos_product_version();
@@ -3087,6 +3129,7 @@ fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
         },
     });
 
+    // WO-163@v2: report where the gate was found, mirroring the gate's own resolution.
     // Resolve the edge the same way the gate does: env override, then auto-discovery
     // relative to the CLI (so a packaged install reports green with no env var set).
     let env_set = std::env::var_os(MACOS_ES_GATE_ENV).is_some();
@@ -3147,12 +3190,14 @@ fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
     });
 }
 
+// WO-24@v1: read the host version used by the macOS enforcement preflight.
 #[cfg(target_os = "macos")]
 fn macos_product_version() -> String {
     command_output("/usr/bin/sw_vers", &["-productVersion"])
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+// WO-24@v1: enforce the minimum macOS version supported by the ES edge.
 #[cfg(target_os = "macos")]
 fn macos_version_supported(version: &str) -> bool {
     let Some(major) = version
@@ -3165,6 +3210,7 @@ fn macos_version_supported(version: &str) -> bool {
     major >= MACOS_MIN_MAJOR
 }
 
+// WO-24@v1: the es-edge-executable check requires a regular file with an execute bit.
 #[cfg(target_os = "macos")]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -3175,6 +3221,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+// WO-24@v1: inspect the ES edge entitlement before declaring enforcement ready.
 #[cfg(target_os = "macos")]
 fn codesign_entitlements(path: &Path) -> Option<String> {
     let out = std::process::Command::new("/usr/bin/codesign")
@@ -3191,6 +3238,7 @@ fn codesign_entitlements(path: &Path) -> Option<String> {
     }
 }
 
+// WO-24@v1: capture host-tool output for deterministic macOS preflight checks.
 #[cfg(target_os = "macos")]
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new(program)
@@ -3203,6 +3251,7 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+// WO-5@v1: load explicit, named, discovered, or built-in policy in precedence order.
 /// Load the policy for a `run`: `--policy` file wins, then a named `--profile`,
 /// then `./Bulwark.toml` if present, else the built-in default profile.
 fn load_policy(profile: Option<&str>, policy_path: Option<&Path>) -> Result<Policy> {
@@ -3264,6 +3313,7 @@ fn snapshot_policy(source: &integrity::PolicySource) -> Result<PolicySnapshot> {
     Ok(PolicySnapshot { policy, record })
 }
 
+// WO-5@v1: select whether a policy mutation adds an allow or deny rule.
 enum Mutate {
     Allow,
     Deny,
@@ -3321,6 +3371,7 @@ pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+// WO-20@v1: verify command output and policy dispatch at the CLI boundary.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3377,6 +3428,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // WO-20@v1: preserve valid JSON escaping for machine-readable output.
     #[test]
     fn json_escape_handles_quotes_and_controls() {
         assert_eq!(json_escape(r#"a"b\c"#), r#"a\"b\\c"#);
@@ -3430,12 +3482,14 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         );
     }
 
+    // WO-29@v1: prove key handoff remains inert with no dispatch option.
     #[test]
     fn hivebus_dispatch_default_is_inert() {
         let h = HivebusDispatch::default();
         assert!(h.is_inert(), "no flags set => fully inert, no key handoff");
     }
 
+    // WO-29@v1: prove either key option activates dispatch-time handoff.
     #[test]
     fn hivebus_dispatch_not_inert_when_either_flag_set() {
         let p = std::path::Path::new("/x.pub");
@@ -3692,16 +3746,19 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
+    // WO-49@v1: preserve the absence of a credential drop without worker flags.
     #[test]
     fn resolve_worker_creds_none_is_none() {
         assert!(resolve_worker_creds(None, None).unwrap().is_none());
     }
 
+    // WO-49@v1: refuse an explicit worker identity that remains root.
     #[test]
     fn resolve_worker_creds_rejects_uid_zero() {
         assert!(resolve_worker_creds(Some(0), None).is_err());
     }
 
+    // WO-49@v1: refuse an incomplete worker identity containing only a gid.
     #[test]
     fn resolve_worker_creds_rejects_gid_without_uid() {
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
@@ -3741,7 +3798,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
-    // WO-164@v1: doctor marks the checks enforcement depends on as required, on both platforms.
+    // WO-164@v2: doctor marks the checks enforcement depends on as required, on both platforms.
     // WO-24@v1: on macOS the required set includes the ES edge and its entitlement.
     #[test]
     fn doctor_always_reports_the_required_checks() {
@@ -3770,6 +3827,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         }
     }
 
+    // WO-27@v1: prove named launch profiles resolve their command and policy.
     #[test]
     fn launch_resolves_configured_agent_profile() {
         let policy = Policy::default_profile();
@@ -3786,6 +3844,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         }
     }
 
+    // WO-27@v1: give unknown launch profiles an initialization path.
     #[test]
     fn launch_refuses_unknown_agent_with_init_hint() {
         let policy = Policy::default_profile();
@@ -3795,6 +3854,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         ));
     }
 
+    // WO-27@v1: refuse launch profiles that define no enforcement boundary.
     #[test]
     fn launch_refuses_profile_without_policy_boundary() {
         let mut policy = Policy::default_profile();

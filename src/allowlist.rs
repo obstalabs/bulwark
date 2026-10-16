@@ -371,6 +371,7 @@ impl AllowList {
         }
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     /// Drop the runtime base set (only safe for a static binary that opens
     /// nothing beyond its grants — rare; the agent will fail to start
     /// otherwise).
@@ -379,6 +380,7 @@ impl AllowList {
         self
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     /// Every allow glob this list permits, base set first, in order.
     pub fn allowed_globs(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -391,7 +393,7 @@ impl AllowList {
 
     /// WO-41: operator grants only, excluding the platform runtime base set.
     #[cfg(target_os = "macos")]
-    #[allow(dead_code)] // retained for diagnostics / a future recursive-witness layer
+    #[cfg(test)]
     pub fn grant_globs(&self) -> &[String] {
         &self.grants
     }
@@ -421,11 +423,10 @@ impl AllowList {
     }
 
     /// Path-only allow check: true if `path` matches the base set or a grant
-    /// glob. Retained for grant/base-set listing and policy preview; the live
-    /// gate decides with [`AllowList::allows_open`], which also gates grants on
-    /// inode identity.
+    /// glob. Test oracle for the grant and base-set globs; the live gate decides
+    /// with [`AllowList::allows_open`], which also gates grants on inode identity.
     // WO-41@v1: evaluate the default-deny path policy without an open-file identity.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn allows(&self, path: &str) -> bool {
         if self.include_base && RUNTIME_BASE_SET.iter().any(|g| glob::matches(g, path)) {
             return true;
@@ -531,12 +532,14 @@ fn prefix_anchor(prefix: &str) -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[test]
     fn grant_is_allowed() {
         let a = AllowList::new(vec!["/var/log/clickhouse/**".into()]);
         assert!(a.allows("/var/log/clickhouse/clickhouse-server.log"));
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[cfg(target_os = "linux")]
     #[test]
     fn runtime_base_lets_a_program_execute() {
@@ -549,6 +552,7 @@ mod tests {
         assert!(a.allows("/dev/tty"));
     }
 
+    // WO-41@v1: apply macOS default-deny grants without broadening the runtime base.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_runtime_base_is_darwin_specific() {
@@ -560,6 +564,7 @@ mod tests {
         assert!(!a.allows("/etc/shadow"));
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[test]
     fn sensitive_paths_outside_grant_are_denied() {
         let a = AllowList::new(vec!["/var/log/clickhouse/**".into()]);
@@ -571,6 +576,7 @@ mod tests {
         assert!(!a.allows("/home/deploy/.aws/credentials"));
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[test]
     fn etc_shadow_is_denied_even_though_etc_passwd_is_allowed() {
         // /etc/passwd is in the base set (name lookups); /etc/shadow is NOT.
@@ -579,6 +585,7 @@ mod tests {
         assert!(!a.allows("/etc/shadow"));
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[test]
     fn without_base_denies_runtime_paths() {
         let a = AllowList::new(vec!["/data/**".into()]).without_base();
@@ -586,6 +593,7 @@ mod tests {
         assert!(!a.allows("/lib/aarch64-linux-gnu/libc.so.6"));
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[test]
     fn allowed_globs_lists_base_then_grants() {
         let a = AllowList::new(vec!["/g1".into(), "/g2".into()]);
@@ -595,6 +603,7 @@ mod tests {
         assert_eq!(globs[globs.len() - 1], "/g2");
     }
 
+    // WO-15@v1: limit default-deny dispatches to the runtime base and explicit grants.
     #[cfg(target_os = "macos")]
     #[test]
     fn exposes_base_and_grants_separately() {
