@@ -541,6 +541,7 @@ enum Cmd {
     /// Preflight: check that this host can actually enforce — kernel version,
     /// root/`CAP_SYS_ADMIN` for fanotify, and Landlock for `--hardened`. Run it
     /// before relying on the gate. Exit 0 if everything required is present.
+    // WO-164@v2: a preflight an operator or orchestrating agent runs before relying on the gate.
     Doctor {
         /// Output format: `human` or `json` (per-check results as one object).
         #[arg(long = "format", value_name = "FMT", default_value = "human")]
@@ -2870,6 +2871,7 @@ fn cmd_init(policy_path: Option<&Path>, profile: Option<&str>, force: bool) -> R
 }
 
 /// One preflight check result.
+// WO-164@v2: each check is named and marked required or informational; only required ones gate the exit.
 struct DoctorCheck {
     name: &'static str,
     ok: bool,
@@ -2880,6 +2882,7 @@ struct DoctorCheck {
 
 /// `bulwark doctor` — report whether this host can enforce. Returns the process
 /// exit code: 0 when every REQUIRED check passes, 1 otherwise.
+// WO-164@v2: exit 0 only when every required check passes; render for humans or as JSON for agents.
 fn cmd_doctor(format: OutputFormat) -> i32 {
     let checks = run_doctor_checks();
     let failed_required = checks.iter().any(|c| c.required && !c.ok);
@@ -2950,6 +2953,7 @@ fn cmd_doctor(format: OutputFormat) -> i32 {
 }
 
 /// Collect the preflight checks. Kept separate from rendering so it is testable.
+// WO-164@v2: one collection point per platform, separate from rendering so the split is testable.
 fn run_doctor_checks() -> Vec<DoctorCheck> {
     #[cfg(target_os = "macos")]
     {
@@ -2966,6 +2970,7 @@ fn run_doctor_checks() -> Vec<DoctorCheck> {
     }
 }
 
+// WO-164@v2: Linux enforcement needs the OS and root or CAP_SYS_ADMIN; kernel and Landlock inform.
 fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
     // Linux is required — the gate is fanotify/Landlock.
     let is_linux = cfg!(target_os = "linux");
@@ -3061,6 +3066,7 @@ fn landlock_available() -> bool {
 }
 
 /// WO-24: macOS preflight checks for the root-launched Endpoint Security edge.
+// WO-164@v2: macOS enforcement needs the OS, root, the ES edge and its entitlement; FDA informs.
 #[cfg(target_os = "macos")]
 fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
     let version = macos_product_version();
@@ -3167,6 +3173,7 @@ fn macos_version_supported(version: &str) -> bool {
     major >= MACOS_MIN_MAJOR
 }
 
+// WO-24@v1: the es-edge-executable check requires a regular file with an execute bit.
 #[cfg(target_os = "macos")]
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -3743,7 +3750,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
     }
 
-    // WO-164@v1: doctor marks the checks enforcement depends on as required, on both platforms.
+    // WO-164@v2: doctor marks the checks enforcement depends on as required, on both platforms.
     // WO-24@v1: on macOS the required set includes the ES edge and its entitlement.
     #[test]
     fn doctor_always_reports_the_required_checks() {
