@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Changed
-<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v1 / WO-164@v1: source citations identify the current intent behind each attributed region. -->
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
   Code that shipped without a recorded work order was given a retroactive one that records its
   behaviour, instead of a guessed id.

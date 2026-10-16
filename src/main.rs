@@ -85,6 +85,7 @@ const POLICY_FILE: &str = "Bulwark.toml";
 const POLICY_FILE_CANDIDATES: &[&str] = &["Bulwark.toml", "bulwark.toml"];
 
 /// WO-24: environment variable that points at the signed macOS ES edge binary.
+// WO-163@v2: doctor honours the same override the gate does, before auto-discovery.
 #[cfg(target_os = "macos")]
 const MACOS_ES_GATE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 
@@ -3087,6 +3088,7 @@ fn collect_macos_doctor_checks(out: &mut Vec<DoctorCheck>) {
         },
     });
 
+    // WO-163@v2: report where the gate was found, mirroring the gate's own resolution.
     // Resolve the edge the same way the gate does: env override, then auto-discovery
     // relative to the CLI (so a packaged install reports green with no env var set).
     let env_set = std::env::var_os(MACOS_ES_GATE_ENV).is_some();

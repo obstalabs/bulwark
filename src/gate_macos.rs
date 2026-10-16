@@ -23,6 +23,8 @@ use crate::consent::{ConsentRequest, Source, Verdict};
 use crate::protect::{InodeKey, ProtectedSet};
 use crate::receipt::{Decision, Receipt, ReceiptLog};
 
+// WO-23@v1: the operator can point the CLI at a specific signed edge binary.
+// WO-163@v2: when set, this override wins over auto-discovery.
 const ES_EDGE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 const EDGE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -251,6 +253,7 @@ pub fn run(
 
 /// Path inside the gate bundle to the edge executable, relative to a directory that
 /// contains `bulwark_es_gate.app`.
+// WO-163@v2: the bundle-relative path discovery probes under libexec and beside the binary.
 const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
 
 /// Resolve the ES edge binary. Order:
@@ -266,7 +269,7 @@ const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
 /// Resolve the ES edge path (env override, then auto-discovery) without erroring —
 /// for `doctor`, which reports presence rather than failing. `None` means neither the
 /// env var nor discovery found an edge.
-// WO-163@v1: the env override wins; otherwise discover the gate next to the installed CLI.
+// WO-163@v2: the env override wins; otherwise discover the gate next to the installed CLI.
 pub fn resolve_edge_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(ES_EDGE_ENV) {
         return Some(PathBuf::from(value));
@@ -274,7 +277,7 @@ pub fn resolve_edge_path() -> Option<PathBuf> {
     discover_edge()
 }
 
-// WO-163@v1: a missing gate is an error that names the packaged location and the override.
+// WO-163@v2: a missing gate is an error that names the packaged location and the override.
 fn edge_path() -> Result<PathBuf> {
     resolve_edge_path().ok_or_else(|| {
         anyhow!(
@@ -287,7 +290,7 @@ fn edge_path() -> Result<PathBuf> {
 
 /// Look for the gate bundle relative to the current executable. Returns the first
 /// candidate that exists; `None` if discovery comes up empty (caller errors).
-// WO-163@v1: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
+// WO-163@v2: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
 fn discover_edge() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Canonicalize to resolve a Homebrew bin symlink to the real Cellar path.
