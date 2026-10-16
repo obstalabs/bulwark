@@ -29,6 +29,7 @@ pub struct InodeKey {
     pub ino: u64,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl InodeKey {
     // WO-24@v1: derive the inode identity shared with the macOS gate.
     pub(crate) fn of(meta: &fs::Metadata) -> Self {
@@ -80,6 +81,7 @@ fn is_absent(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl ProtectedSet {
     /// Resolve each path to its inode. A directory contributes its own inode and
     /// is recorded as a protected directory, then is walked recursively (bounded
@@ -203,10 +205,12 @@ impl ProtectedSet {
         false
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     pub fn len(&self) -> usize {
         self.inodes.len()
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     pub fn is_empty(&self) -> bool {
         self.inodes.is_empty()
     }

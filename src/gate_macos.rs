@@ -46,6 +46,7 @@ pub enum GateMode<'a> {
 /// startup consent decisions from its config, then answers AUTH_OPEN from memory.
 // WO-23@v1: preserve the Linux gate contract on the Endpoint Security surface.
 pub trait ConsentDecider {
+    // WO-23@v1: enforce protected inode decisions through the macOS ES edge.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Decide with a caller-chosen deadline (default: `decide`). Kept for API
@@ -85,6 +86,7 @@ pub struct RunOutcome {
     pub deny_forever_paths: Vec<String>,
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 pub(crate) fn shutdown_requested() -> bool {
     false
 }
@@ -99,6 +101,7 @@ pub(crate) fn draining() -> bool {
     false
 }
 
+// WO-49@v1: drop the supervised worker below the privileged gate.
 /// Credentials to drop the supervised child to before exec. The supervisor and
 /// the Endpoint Security edge stay root; only the agent child becomes
 /// unprivileged, so it cannot `SIGKILL` the edge and exploit the kernel's
@@ -304,6 +307,7 @@ fn discover_edge() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn ensure_executable(path: &Path) -> Result<()> {
     let meta = fs::metadata(path).with_context(|| format!("stat ES edge {}", path.display()))?;
     if !meta.is_file() {
@@ -315,11 +319,13 @@ fn ensure_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 struct GateTemp {
     config: PathBuf,
     ready: PathBuf,
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 enum EdgePolicy<'a> {
     DenyList {
         protected: &'a ProtectedSet,
@@ -337,7 +343,9 @@ struct EdgeDecisionSeeds {
     allow_session: Vec<InodeKey>, // WO-24: session-cache operator grants
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 impl GateTemp {
+    // WO-23@v1: enforce protected inode decisions through the macOS ES edge.
     fn new() -> Result<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -412,6 +420,7 @@ fn write_config(
     fs::write(path, body).with_context(|| format!("write ES edge config {}", path.display()))
 }
 
+// WO-41@v1: apply macOS default-deny grants without broadening the runtime base.
 fn push_config_line(body: &mut String, key: &str, value: &str) -> Result<()> {
     if value.contains('\n') || value.contains('\r') {
         bail!("ES edge config value for {key} contains a newline");
@@ -472,6 +481,7 @@ fn concrete_grant_root(grant: &str) -> Result<(PathBuf, bool)> {
     Ok((PathBuf::from(root), recursive))
 }
 
+// WO-24@v1: keep macOS deny-list decisions aligned with the portable CLI.
 fn seed_denylist_decisions(
     protected: &ProtectedSet,
     consent: &mut dyn ConsentDecider,
@@ -495,6 +505,7 @@ fn seed_denylist_decisions(
     seeds
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 struct StoppedChild {
     pid: libc::pid_t,
 }
@@ -533,6 +544,7 @@ fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<Stop
     Ok(StoppedChild { pid })
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn wait_until_stopped(pid: libc::pid_t) -> Result<()> {
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
@@ -545,6 +557,7 @@ fn wait_until_stopped(pid: libc::pid_t) -> Result<()> {
     bail!("child exited before ES edge was ready")
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
     let start = SystemTime::now();
     loop {
@@ -646,6 +659,7 @@ fn supervise(child_pid: libc::pid_t, edge: &mut Child, receipts: Option<&Path>) 
     }
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn try_wait(pid: libc::pid_t) -> Result<Option<i32>> {
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
@@ -664,6 +678,7 @@ fn try_wait(pid: libc::pid_t) -> Result<Option<i32>> {
     Ok(None)
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn terminate_edge(edge: &mut Child) -> Result<()> {
     if edge
         .try_wait()
@@ -689,6 +704,7 @@ fn terminate_edge(edge: &mut Child) -> Result<()> {
     Ok(())
 }
 
+// WO-23@v1: enforce protected inode decisions through the macOS ES edge.
 fn kill_pid(pid: libc::pid_t, sig: libc::c_int) -> Result<()> {
     let rc = unsafe { libc::kill(pid, sig) };
     if rc == 0 {

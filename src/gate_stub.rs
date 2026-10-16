@@ -36,6 +36,7 @@ pub enum GateMode<'a> {
 // WO-59@v1: mirror cgroup-scoped consent peer checks on every platform.
 // WO-154@v1: mirror bounded consent and nonblocking gate output hooks.
 pub trait ConsentDecider {
+    // WO-28@v1: fail closed on platforms without a native gate implementation.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Mirror of the enforcing gates' trait (default: `decide`).
@@ -68,6 +69,7 @@ pub struct RunOutcome {
     pub deny_forever_paths: Vec<String>,
 }
 
+// WO-28@v1: fail closed on platforms without a native gate implementation.
 /// Whether a graceful-termination signal has been received. On platforms
 /// without the fanotify supervisor there is no event loop to fail closed, so
 /// this is always false; it exists to match `gate::shutdown_requested`.
@@ -75,6 +77,7 @@ pub(crate) fn shutdown_requested() -> bool {
     false
 }
 
+// WO-49@v1: drop the supervised worker below the privileged gate.
 /// Credentials to drop the supervised child to before exec. Present to match the
 /// Linux/macOS gate surface; unused here (this stub never launches a child).
 #[derive(Clone, Copy)]

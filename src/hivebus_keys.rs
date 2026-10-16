@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 /// 32-byte ed25519 seed / public key length. Named, not magic (RFC 8032).
 const ED25519_LEN: usize = 32;
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 /// A freshly generated worker identity for one dispatch.
 pub struct WorkerKey {
     /// Raw 32-byte seed. Secret — base64-encoded for the remote, NEVER logged.
@@ -40,7 +41,9 @@ pub struct WorkerKey {
     public: [u8; ED25519_LEN],
 }
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 impl WorkerKey {
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// Generate a fresh worker identity from the OS CSPRNG. Freshness per dispatch
     /// IS the security property — no key is ever reused across substrates, so this
     /// must draw new entropy every call (`getrandom` = the OS source directly).
@@ -55,12 +58,14 @@ impl WorkerKey {
         Ok(WorkerKey { seed, public })
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// The seed as hivebus `--signing-key` accepts it: base64 StdEncoding of the
     /// 32-byte seed. This is the SECRET to place on the remote (mode 0600).
     pub fn seed_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(self.seed)
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// The pinnable fingerprint of the worker public key — the operator pins THIS
     /// on the hivebus side before first contact. Matches hivebus byte-for-byte.
     /// The worker's public key is surfaced ONLY as this fingerprint (its base64
@@ -71,13 +76,16 @@ impl WorkerKey {
     }
 }
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 /// The architect public key relayed to the remote (loaded from a local file).
 pub struct ArchitectKey {
     /// Raw 32-byte public key.
     public: [u8; ED25519_LEN],
 }
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 impl ArchitectKey {
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// Load + validate an architect public key from a base64 file (the form
     /// hivebus emits via `--print-public-key` / `--public-key-file`). Rejects
     /// anything that is not exactly a 32-byte ed25519 public key, so a malformed
@@ -106,18 +114,21 @@ impl ArchitectKey {
         Ok(ArchitectKey { public })
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// Re-encode the validated public key as base64 StdEncoding for placement on
     /// the remote (canonical form, independent of incidental file whitespace).
     pub fn public_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(self.public)
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     /// Fingerprint of the architect key (for the dispatch receipt).
     pub fn fingerprint(&self) -> String {
         fingerprint(&self.public)
     }
 }
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 /// Lowercase hex of sha256 over a raw 32-byte ed25519 public key. Pinned to match
 /// the hivebus answer-key fingerprint byte-for-byte. Hex is hand-rolled to keep the
 /// dependency surface minimal for a security binary.
@@ -131,10 +142,12 @@ fn fingerprint(public: &[u8; ED25519_LEN]) -> String {
     out
 }
 
+// WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     #[test]
     fn fresh_seed_per_dispatch() {
         let a = WorkerKey::generate().unwrap();
@@ -145,6 +158,7 @@ mod tests {
         assert_ne!(a.fingerprint(), b.fingerprint());
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     #[test]
     fn fingerprint_matches_hivebus_derivation_for_known_key() {
         // Cross-repo pin: a known all-zero seed derives a fixed ed25519 public key
@@ -171,6 +185,7 @@ mod tests {
         );
     }
 
+    // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
     #[test]
     fn seed_base64_roundtrips_to_32_bytes() {
         let k = WorkerKey::generate().unwrap();

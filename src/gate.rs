@@ -98,6 +98,7 @@ pub struct RunOutcome {
 /// its Landlock floor regardless.
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+// WO-12@v1: stop permission decisions when gate shutdown begins.
 /// True once a graceful-termination signal has been received. Other modules
 /// (e.g. the consent socket wait) consult this to abandon a blocking wait and
 /// fail closed.
@@ -158,6 +159,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// in the same pass, so a cooperative child gets its SIGTERM grace.
 const SIGTERM_TO_KILL: Duration = Duration::from_secs(2);
 
+// WO-12@v1: stop permission decisions when gate shutdown begins.
 /// Async-signal-safe handler: only flips the atomic. The event loop does the
 /// actual deny-and-exit work, where it is safe to touch the fanotify fd.
 extern "C" fn on_shutdown_signal(_sig: libc::c_int) {
@@ -197,6 +199,7 @@ fn install_shutdown_handlers() {
 /// (wrapped in `main`) so the gate stays agnostic to the transport.
 // WO-154@v1: define the worker-owned consent contract used off the event loop.
 pub trait ConsentDecider {
+    // WO-8@v1: keep consent decisions off the supervised process's channel.
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Decide with a caller-chosen deadline (shorter than the provider's
@@ -454,11 +457,13 @@ pub fn run(
 
 // ---- fanotify FFI wrapper ---------------------------------------------------
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Owned fanotify file descriptor.
 struct FanFd {
     fd: RawFd,
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl FanFd {
     // WO-66@v1: prevent bounded fanotify queue overflow from releasing reads.
     fn init() -> Result<Self> {
@@ -487,6 +492,7 @@ impl FanFd {
         Ok(FanFd { fd })
     }
 
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     /// Mark the whole filesystem containing `path` for `FAN_OPEN_PERM`.
     ///
     /// We use `FAN_MARK_FILESYSTEM` rather than `FAN_MARK_MOUNT` deliberately: a
@@ -514,7 +520,9 @@ impl FanFd {
     }
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 impl Drop for FanFd {
+    // WO-3@v1: key the Linux permission gate to stable inode identity.
     fn drop(&mut self) {
         unsafe {
             libc::close(self.fd);
@@ -522,6 +530,7 @@ impl Drop for FanFd {
     }
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Resolve the `(dev, ino)` and observed path of an event's file descriptor.
 fn inode_of_fd(fd: RawFd) -> Option<(InodeKey, String)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1198,6 +1207,7 @@ fn decide_denylist(
     }
 }
 
+// WO-8@v1: keep consent decisions off the supervised process's channel.
 /// Human-readable reason for a verdict, for the receipt.
 fn verdict_reason(v: Verdict) -> &'static str {
     match v {
@@ -1208,12 +1218,14 @@ fn verdict_reason(v: Verdict) -> &'static str {
     }
 }
 
+// WO-8@v1: keep consent decisions off the supervised process's channel.
 fn source_str(s: Source) -> &'static str {
     s.as_str()
 }
 
 // ---- child process management ----------------------------------------------
 
+// WO-49@v1: drop the supervised worker below the privileged gate.
 /// Credentials to drop the supervised child to before exec. The supervisor stays
 /// root (it holds the fanotify fd); only the agent child becomes unprivileged, so
 /// it cannot signal — and therefore cannot `SIGKILL` — the supervisor. That makes
@@ -1769,6 +1781,7 @@ unsafe fn scope_removed() -> bool {
     e == libc::ENODEV || e == libc::ENOENT
 }
 
+// WO-3@v1: key the Linux permission gate to stable inode identity.
 /// Non-blocking reap. Returns Some(exit_code) once the child has terminated.
 fn try_wait(child: libc::pid_t) -> Result<Option<i32>> {
     let mut status: libc::c_int = 0;

@@ -9,6 +9,7 @@
 //! Matching is deterministic and case-sensitive — determinism over heuristic,
 //! as the policy demands. A pattern with no wildcards is an exact-path match.
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// Expand a leading `~/` (or bare `~`) in `pat` using `home`.
 pub fn expand_home(pat: &str, home: &str) -> String {
     if pat == "~" {
@@ -21,12 +22,14 @@ pub fn expand_home(pat: &str, home: &str) -> String {
     pat.to_string()
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// True if `path` matches glob `pattern`. Both should be absolute, normalized
 /// strings (the caller expands `~/` first via [`expand_home`]).
 pub fn matches(pattern: &str, path: &str) -> bool {
     glob_match(pattern.as_bytes(), path.as_bytes())
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 /// Recursive glob matcher over bytes. Semantics:
 ///
 /// - `**/` matches zero or more complete path segments (including the trailing
@@ -137,6 +140,7 @@ pub fn is_landlock_faithful(glob: &str) -> bool {
     false
 }
 
+// WO-5@v1: make policy matching and decision audit output deterministic.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,12 +170,14 @@ mod tests {
         assert!(!is_landlock_faithful("/**")); // prefix empty -> whole fs
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn exact_match() {
         assert!(matches("/home/u/.ssh", "/home/u/.ssh"));
         assert!(!matches("/home/u/.ssh", "/home/u/.aws"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn single_star_within_segment() {
         assert!(matches("/x/*.env", "/x/prod.env"));
@@ -180,6 +186,7 @@ mod tests {
         assert!(!matches("/x/*.env", "/x/sub/prod.env"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn question_mark() {
         assert!(matches("/x/a?c", "/x/abc"));
@@ -187,6 +194,7 @@ mod tests {
         assert!(!matches("/x/a?c", "/x/ac"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn double_star_spans_segments() {
         assert!(matches("**/.env", "/a/b/c/.env"));
@@ -195,6 +203,7 @@ mod tests {
         assert!(matches("/root/**/secret", "/root/secret"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn double_star_substring_patterns() {
         assert!(matches("**/*secret*", "/home/u/app/db_secret_key"));
@@ -203,6 +212,7 @@ mod tests {
         assert!(!matches("**/*secret*", "/home/u/notes.txt"));
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn home_expansion() {
         assert_eq!(expand_home("~/.ssh", "/home/u"), "/home/u/.ssh");
@@ -212,6 +222,7 @@ mod tests {
         assert_eq!(expand_home("~/.aws", "/home/u/"), "/home/u/.aws");
     }
 
+    // WO-5@v1: make policy matching and decision audit output deterministic.
     #[test]
     fn star_does_not_match_across_slash_but_double_does() {
         assert!(!matches("/a/*", "/a/b/c"));

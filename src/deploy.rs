@@ -43,6 +43,7 @@ pub enum DeployMode {
     Dist,
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 impl DeployMode {
     /// Parse the `--deploy` flag value. Unknown values return `None`.
     // WO-86@v1: recognize every selectable remote delivery rung.
@@ -59,6 +60,7 @@ impl DeployMode {
     }
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// The remote host's OS and CPU arch, as reported by `uname -s -m`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePlatform {
@@ -141,7 +143,9 @@ impl RemoteBulwark {
     }
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 impl RemotePlatform {
+    // WO-18@v1: select and deploy a compatible remote binary before execution.
     /// Parse the output of `uname -s -m` (e.g. `"Linux x86_64"`).
     pub fn parse_uname(s: &str) -> Option<Self> {
         let mut parts = s.split_whitespace();
@@ -163,12 +167,14 @@ pub fn target_triple(arch: &str) -> Result<&'static str> {
     }
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// The dist release tarball name for a version + arch, matching the asset names
 /// published by `release.yml` (`bulwark-<version>-<target>.tar.gz`).
 pub fn dist_asset(version: &str, arch: &str) -> Result<String> {
     Ok(format!("bulwark-{version}-{}.tar.gz", target_triple(arch)?))
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// The full download URL for a dist release asset.
 pub fn dist_url(version: &str, asset: &str) -> String {
     format!("https://github.com/{DIST_REPO}/releases/download/v{version}/{asset}")
@@ -201,6 +207,7 @@ const SSH_OPTS: &[&str] = &[
     "BatchMode=yes",
 ];
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// Run `ssh <target> <remote_cmd>` and return trimmed stdout. Errors if ssh
 /// itself fails to run; a non-zero remote exit yields an empty-ish result the
 /// caller interprets.
@@ -230,6 +237,7 @@ fn ssh_capture_with_payload(
         .with_context(|| format!("cannot ssh to {target}"))
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// Detect the remote OS + arch via `uname -s -m`.
 pub fn detect_platform(target: &str) -> Result<RemotePlatform> {
     let out = ssh_capture(target, "uname -s -m")?;
@@ -244,6 +252,7 @@ pub fn detect_platform(target: &str) -> Result<RemotePlatform> {
         .ok_or_else(|| anyhow!("unexpected `uname -s -m` output: {:?}", s.trim()))
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 /// Whether the remote already has a runnable `bulwark` on `PATH`. Returns the
 /// resolved command name (`"bulwark"`) if so.
 fn remote_has_bulwark(target: &str) -> bool {
@@ -748,6 +757,7 @@ pub fn resolve_remote_bulwark(
     }
 }
 
+// WO-18@v1: select and deploy a compatible remote binary before execution.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +774,7 @@ mod tests {
         assert_eq!(DeployMode::parse("nonsense"), None);
     }
 
+    // WO-18@v1: select and deploy a compatible remote binary before execution.
     #[test]
     fn parse_uname_splits_os_and_arch() {
         let p = RemotePlatform::parse_uname("Linux x86_64").unwrap();
@@ -884,6 +895,7 @@ mod tests {
         assert_eq!(r.cleanup_dir(), Some(expected_cleanup.as_str()));
     }
 
+    // WO-18@v1: select and deploy a compatible remote binary before execution.
     #[test]
     fn local_can_scp_rejects_cross_os() {
         // A macOS host can never scp-and-run on Linux, regardless of arch.
