@@ -14,6 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Fixed
+<!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->
+- Corrupt or unreadable integrity state now starts tainted and is preserved before an
+  atomic replacement; only an absent state file starts clean.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read.
 

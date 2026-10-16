@@ -26,7 +26,18 @@
 //! operator explicitly acknowledges it with `bulwark reset`; there is no silent
 //! auto-clear. Safe by default, recoverable only by explicit acknowledgement.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::{CString, OsString},
+    fs::File,
+    io::Write,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::{OsStrExt, OsStringExt},
+    },
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -36,6 +47,9 @@ use sha2::{Digest, Sha256};
 /// runs as root. Deliberately NOT under `$XDG_RUNTIME_DIR`, which is wiped on
 /// reboot — that would silently erase taint across a power cycle.
 pub const DEFAULT_STATE_PATH: &str = "/var/lib/bulwark/state.toml";
+
+// WO-151@v1: produce numeric, process-monotonic suffixes for evidence and temp files.
+static STATE_FILE_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
 
 /// Identity of one protected object at decision time. The pair `(dev, ino)` is
 /// the same identity the gate decides by; `path` is how the object was named so
@@ -218,6 +232,9 @@ pub struct RunContext {
 /// concrete reason, not just a flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaintReason {
+    // WO-151@v1: never mistake unreadable or malformed persisted state for first use.
+    /// The integrity state could not be trusted and was preserved for inspection.
+    UncleanState(String),
     /// The previous run did not record a clean shutdown.
     UncleanRestart,
     /// A protected object's identity changed since the last run.
@@ -248,6 +265,7 @@ impl TaintReason {
     // WO-130@v1: include inode generation when object identity changes.
     pub fn describe(&self) -> String {
         match self {
+            TaintReason::UncleanState(reason) => reason.clone(),
             TaintReason::UncleanRestart => "unclean restart (no clean-shutdown marker)".to_string(),
             TaintReason::ObjectDrift {
                 path,
@@ -329,7 +347,11 @@ pub fn evaluate(prior: Option<&State>, current: &RunContext) -> Integrity {
 
     // A taint that was never acknowledged outranks everything: it persists across
     // any number of clean restarts until `bulwark reset`.
-    if prior.tainted.is_some() {
+    if let Some(reason) = &prior.tainted {
+        // WO-151@v1: retain the specific unclean-state reason across restarts.
+        if reason.starts_with("unclean-state:") {
+            return Integrity::Tainted(TaintReason::UncleanState(reason.clone()));
+        }
         return Integrity::Tainted(TaintReason::Persisted);
     }
 
@@ -385,30 +407,229 @@ pub struct Store {
     /// The prior recorded state. `None` on the first run (no file yet), so it is
     /// never mistaken for an unclean restart.
     state: Option<State>,
+    // WO-151@v1: prevent a failed evidence rename from being overwritten later.
+    save_blocked: Option<String>,
+}
+
+// WO-151@v1: make each generated filename suffix a unique numeric timestamp.
+fn next_state_file_timestamp() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64;
+    let mut prior = STATE_FILE_TIMESTAMP.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(prior.saturating_add(1));
+        match STATE_FILE_TIMESTAMP.compare_exchange_weak(
+            prior,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(actual) => prior = actual,
+        }
+    }
+}
+
+// WO-151@v1: pin state renames and replacements to the opened parent directory.
+fn open_state_parent(path: &Path) -> Result<(File, PathBuf, OsString)> {
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("state path {} has no file name", path.display()))?
+        .to_os_string();
+    let parent_c = CString::new(parent.as_os_str().as_bytes())
+        .with_context(|| format!("state directory {} contains a NUL byte", parent.display()))?;
+    // SAFETY: parent_c is NUL-terminated; the returned descriptor is immediately
+    // owned by File and remains open while all relative operations run.
+    let fd = unsafe {
+        libc::open(
+            parent_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot open state directory {}", parent.display()));
+    }
+    // SAFETY: fd is a newly opened descriptor owned by this File.
+    Ok((unsafe { File::from_raw_fd(fd) }, parent, name))
+}
+
+// WO-151@v1: rename damaged evidence through a pinned directory descriptor.
+fn preserve_damaged_state(path: &Path) -> Result<PathBuf> {
+    let (dir, parent, name) = open_state_parent(path)?;
+    let mut backup_bytes = name.as_bytes().to_vec();
+    backup_bytes.extend_from_slice(format!(".corrupt-{}", next_state_file_timestamp()).as_bytes());
+    let backup_name = OsString::from_vec(backup_bytes);
+    let name_c = CString::new(name.as_bytes()).context("state file name contains a NUL byte")?;
+    let backup_c =
+        CString::new(backup_name.as_bytes()).context("state backup name contains a NUL byte")?;
+    // SAFETY: both names are NUL-terminated and relative to the live directory fd.
+    let rc = unsafe {
+        libc::renameat(
+            dir.as_raw_fd(),
+            name_c.as_ptr(),
+            dir.as_raw_fd(),
+            backup_c.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "cannot preserve damaged state {} as {}",
+                path.display(),
+                parent.join(&backup_name).display()
+            )
+        });
+    }
+    dir.sync_all().with_context(|| {
+        format!(
+            "cannot sync state directory {} after preserving damaged state",
+            parent.display()
+        )
+    })?;
+    Ok(parent.join(backup_name))
+}
+
+// WO-151@v1: replace state only after a durable same-directory temporary write.
+fn atomic_write_state(path: &Path, body: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create state dir {}", parent.display()))?;
+    }
+    let (dir, parent, name) = open_state_parent(path)?;
+    let mut temp_bytes = b".".to_vec();
+    temp_bytes.extend_from_slice(name.as_bytes());
+    temp_bytes.extend_from_slice(format!(".tmp-{}", next_state_file_timestamp()).as_bytes());
+    let temp_name = OsString::from_vec(temp_bytes);
+    let temp_c =
+        CString::new(temp_name.as_bytes()).context("state temp name contains a NUL byte")?;
+    let name_c = CString::new(name.as_bytes()).context("state file name contains a NUL byte")?;
+    // SAFETY: temp_c is NUL-terminated and openat is pinned to the parent fd.
+    let temp_fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            temp_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if temp_fd < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "cannot create temporary state file {}",
+                parent.join(&temp_name).display()
+            )
+        });
+    }
+    // SAFETY: temp_fd is newly opened and ownership transfers to temp.
+    let mut temp = unsafe { File::from_raw_fd(temp_fd) };
+    let result = (|| -> Result<()> {
+        temp.write_all(body)
+            .context("cannot write temporary integrity state")?;
+        temp.sync_all()
+            .context("cannot sync temporary integrity state")?;
+        drop(temp);
+        // SAFETY: both names are NUL-terminated and relative to the same live fd.
+        let rc = unsafe {
+            libc::renameat(
+                dir.as_raw_fd(),
+                temp_c.as_ptr(),
+                dir.as_raw_fd(),
+                name_c.as_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("cannot replace state file {}", path.display()));
+        }
+        dir.sync_all().with_context(|| {
+            format!(
+                "cannot sync state directory {} after replacing state",
+                parent.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        // SAFETY: temp_c is relative to dir; failure is best-effort cleanup only.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), temp_c.as_ptr(), 0) };
+    }
+    result
+}
+
+// WO-151@v1: synthesize sticky taint only after damaged evidence is set aside.
+fn damaged_state(path: PathBuf, cause: &dyn std::fmt::Display) -> Store {
+    let reason = format!(
+        "unclean-state: integrity state {} was unreadable or invalid",
+        path.display()
+    );
+    let (save_blocked, preserved) = match preserve_damaged_state(&path) {
+        Ok(backup) => (None, Some(backup)),
+        Err(error) => (
+            Some(format!(
+                "damaged integrity state {} was not replaced because its evidence could not be preserved: {error:#}",
+                path.display()
+            )),
+            None,
+        ),
+    };
+    match preserved {
+        Some(backup) => eprintln!(
+            "[bulwark] INTEGRITY TAINTED: state file {} is unreadable or invalid ({cause}); preserved as {}",
+            path.display(),
+            backup.display()
+        ),
+        None => eprintln!(
+            "[bulwark] INTEGRITY TAINTED: state file {} is unreadable or invalid ({cause}); evidence preservation failed, refusing to replace it",
+            path.display()
+        ),
+    }
+    Store {
+        path,
+        state: Some(State {
+            tainted: Some(reason),
+            ..State::default()
+        }),
+        save_blocked,
+    }
 }
 
 // WO-13@v1: manage the integrity state lifecycle around each supervised run.
 impl Store {
     // WO-13@v1: load prior integrity state or establish a first-run baseline.
-    /// Load the state file, or start fresh if it does not exist. A
-    /// corrupt/unreadable file is treated as absent but reported, so a damaged
-    /// state never silently disables the circuit-breaker.
+    /// Load the state file, or start fresh only if it does not exist. Any other
+    /// read or parse failure starts tainted and preserves the original evidence.
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
-        let state = match std::fs::read_to_string(&path) {
-            Ok(s) => match toml::from_str::<State>(&s) {
-                Ok(st) => Some(st),
-                Err(e) => {
-                    eprintln!(
-                        "[bulwark] warn: state file {} unreadable ({e}); treating as first run",
-                        path.display()
-                    );
-                    None
-                }
+        let state = match std::fs::read(&path) {
+            Ok(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(text) => match toml::from_str::<State>(text) {
+                    Ok(state) => Some(state),
+                    Err(error) => return damaged_state(path, &error),
+                },
+                Err(error) => return damaged_state(path, &error),
             },
-            Err(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(&path) {
+                    Err(meta_error) if meta_error.kind() == std::io::ErrorKind::NotFound => None,
+                    _ => return damaged_state(path, &error),
+                }
+            }
+            Err(error) => return damaged_state(path, &error),
         };
-        Store { path, state }
+        Store {
+            path,
+            state,
+            save_blocked: None,
+        }
     }
 
     // WO-13@v1: expose the prior state used by the pure integrity evaluation.
@@ -488,18 +709,16 @@ impl Store {
     /// Persist the current state (no-op if there is nothing recorded yet),
     /// creating the parent directory if needed.
     fn save(&self) -> Result<()> {
+        if let Some(reason) = &self.save_blocked {
+            anyhow::bail!(reason.clone());
+        }
         let state = match self.state.as_ref() {
             Some(s) => s,
             None => return Ok(()),
         };
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("cannot create state dir {}", dir.display()))?;
-        }
         let body = toml::to_string(state).context("serialize integrity state")?;
-        std::fs::write(&self.path, body)
-            .with_context(|| format!("cannot write state file {}", self.path.display()))?;
-        Ok(())
+        atomic_write_state(&self.path, body.as_bytes())
+            .with_context(|| format!("cannot write state file {}", self.path.display()))
     }
 }
 
@@ -596,6 +815,157 @@ mod tests {
         store.begin_run(c, &verdict).unwrap();
         store.mark_clean_shutdown().unwrap();
         verdict
+    }
+
+    // WO-151@v1: locate evidence preserved beside a damaged state file.
+    fn corrupt_backups(dir: &Path) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state.toml.corrupt-"))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    // WO-151@v1: prove malformed state bytes taint and survive byte-for-byte.
+    fn assert_corrupt_state_is_tainted_and_preserved(tag: &str, bytes: &[u8]) {
+        let (dir, path) = scratch_state(tag);
+        std::fs::write(&path, bytes).unwrap();
+        let mut store = Store::load(&path);
+        let current = ctx(1, vec![]);
+        let verdict = evaluate(store.prior(), &current);
+        assert!(
+            matches!(&verdict, Integrity::Tainted(TaintReason::UncleanState(reason)) if reason.starts_with("unclean-state:")),
+            "damaged state loaded as {verdict:?}"
+        );
+        let backups = corrupt_backups(&dir);
+        assert_eq!(backups.len(), 1, "preserved evidence: {backups:?}");
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+        assert!(!path.exists(), "damaged state was not renamed aside");
+        store.begin_run(&current, &verdict).unwrap();
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+        let replacement = Store::load(&path);
+        assert!(matches!(
+            evaluate(replacement.prior(), &current),
+            Integrity::Tainted(TaintReason::UncleanState(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-151@v1: preserve a truncated TOML state and start tainted.
+    #[test]
+    fn corrupt_or_unreadable_state_truncated_toml() {
+        assert_corrupt_state_is_tainted_and_preserved(
+            "wo151-truncated",
+            b"generation = 1\nclean_shutdown = ",
+        );
+    }
+
+    // WO-151@v1: preserve non-UTF-8 state bytes and start tainted.
+    #[test]
+    fn corrupt_or_unreadable_state_garbage_bytes() {
+        assert_corrupt_state_is_tainted_and_preserved("wo151-garbage", &[0xff, 0xfe, 0xfd, 0x00]);
+    }
+
+    // WO-151@v1: treat a root-resistant directory read error as unclean state.
+    #[test]
+    fn corrupt_or_unreadable_state_directory_path() {
+        let (dir, path) = scratch_state("wo151-directory");
+        std::fs::create_dir(&path).unwrap();
+        let mut store = Store::load(&path);
+        let current = ctx(1, vec![]);
+        let verdict = evaluate(store.prior(), &current);
+        assert!(
+            matches!(&verdict, Integrity::Tainted(TaintReason::UncleanState(reason)) if reason.starts_with("unclean-state:")),
+            "directory state loaded as {verdict:?}"
+        );
+        let backups = corrupt_backups(&dir);
+        assert_eq!(backups.len(), 1, "preserved evidence: {backups:?}");
+        assert!(backups[0].is_dir());
+        assert!(!path.exists(), "unreadable state was not renamed aside");
+        store.begin_run(&current, &verdict).unwrap();
+        assert!(backups[0].is_dir());
+        let replacement = Store::load(&path);
+        assert!(matches!(
+            evaluate(replacement.prior(), &current),
+            Integrity::Tainted(TaintReason::UncleanState(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-151@v1: keep an absent state file as the only clean first-run case.
+    #[test]
+    fn absent_state_is_a_clean_first_run() {
+        let (dir, path) = scratch_state("wo151-absent");
+        let store = Store::load(&path);
+        assert_eq!(evaluate(store.prior(), &ctx(1, vec![])), Integrity::Clean);
+        assert!(corrupt_backups(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-151@v1: prove each save replaces the state atomically via a new inode.
+    #[test]
+    fn state_save_replaces_the_file_atomically() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (dir, path) = scratch_state("wo151-atomic");
+        let mut store = Store::load(&path);
+        let current = ctx(1, vec![]);
+        let verdict = evaluate(store.prior(), &current);
+        store.begin_run(&current, &verdict).unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        store.mark_clean_shutdown().unwrap();
+        let after = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(before, after, "state save rewrote the existing inode");
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .all(|name| !name.to_string_lossy().contains(".tmp-")),
+            "state save left a temporary file behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WO-151@v1: exercise EACCES only where chmod 000 makes the file unreadable.
+    #[test]
+    #[ignore = "requires a non-root uid; run explicitly"]
+    fn eacces_state_file_starts_tainted_and_preserves_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "not exercised: root can read a mode-000 state file"
+        );
+        let bytes = b"unreadable-state-evidence";
+        let (dir, path) = scratch_state("wo151-eacces");
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut store = Store::load(&path);
+        let current = ctx(1, vec![]);
+        let verdict = evaluate(store.prior(), &current);
+        assert!(
+            matches!(&verdict, Integrity::Tainted(TaintReason::UncleanState(reason)) if reason.starts_with("unclean-state:")),
+            "EACCES state loaded as {verdict:?}"
+        );
+        let backups = corrupt_backups(&dir);
+        assert_eq!(backups.len(), 1, "preserved evidence: {backups:?}");
+        std::fs::set_permissions(&backups[0], std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+        store.begin_run(&current, &verdict).unwrap();
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+        let replacement = Store::load(&path);
+        assert!(matches!(
+            evaluate(replacement.prior(), &current),
+            Integrity::Tainted(TaintReason::UncleanState(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // WO-13@v1: establish a clean baseline when no prior state exists.
