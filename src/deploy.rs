@@ -27,6 +27,7 @@ const REMOTE_SHM: &str = "/dev/shm";
 
 /// How `bulwark ssh` is allowed to obtain the remote binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// WO-86@v1: select the most ephemeral viable remote delivery rung.
 pub enum DeployMode {
     /// Choose the most ephemeral viable delivery rung.
     Auto,
@@ -44,6 +45,7 @@ pub enum DeployMode {
 
 impl DeployMode {
     /// Parse the `--deploy` flag value. Unknown values return `None`.
+    // WO-86@v1: recognize every selectable remote delivery rung.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "auto" => Some(DeployMode::Auto),
@@ -68,6 +70,7 @@ pub struct RemotePlatform {
 
 /// The resolved remote gate source and the shell fragments needed to execute it.
 #[derive(Debug, Clone)]
+// WO-86@v1: carry the selected delivery rung and its remote execution plan.
 pub struct RemoteBulwark {
     source: DeploySource,
     plain_invocation: String,
@@ -80,6 +83,7 @@ pub struct RemoteBulwark {
 
 /// Which deploy rung was selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// WO-86@v1: identify the delivery rung chosen for the remote gate.
 pub enum DeploySource {
     Existing,
     Scp,
@@ -88,41 +92,50 @@ pub enum DeploySource {
     Shm,
 }
 
+// WO-86@v1: expose the selected remote delivery plan to the SSH launcher.
 impl RemoteBulwark {
+    // WO-86@v1: report which remote delivery rung was selected.
     pub fn source(&self) -> DeploySource {
         self.source
     }
 
     /// Invocation for non-root preflight commands such as `landlock-check`.
+    // WO-85@v1: expose the transient gate invocation used before privilege escalation.
     pub fn plain_invocation(&self) -> &str {
         &self.plain_invocation
     }
 
     /// Invocation for the actual remote gate run, including sudo where needed.
+    // WO-85@v1: expose the privileged invocation for the streamed remote gate.
     pub fn gate_invocation(&self) -> &str {
         &self.gate_invocation
     }
 
     /// Local payload file streamed to the remote command's stdin, when needed.
+    // WO-85@v1: identify the static gate payload streamed over SSH.
     pub fn payload_path(&self) -> Option<&Path> {
         self.payload_path.as_deref()
     }
 
     /// Shell prelude that consumes the streamed payload before invoking the gate.
+    // WO-85@v1: stage the streamed payload for transient remote execution.
     pub fn prelude(&self) -> Option<&str> {
         self.prelude.as_deref()
     }
 
     /// Remote directory the caller must remove during teardown.
+    // WO-87@v1: expose the deploy directory that teardown must remove.
     pub fn cleanup_dir(&self) -> Option<&str> {
         self.cleanup_dir.as_deref()
     }
 
     /// Base directory for consent lanes. Memfd/shm avoid `/tmp`.
+    // WO-86@v1: keep control lanes on the selected ephemeral storage rung.
     pub fn run_dir_base(&self) -> &'static str {
         self.run_dir_base
     }
 
+    // WO-85@v1: stream a binary only for delivery rungs that consume SSH stdin.
     pub fn needs_binary_stdin(&self) -> bool {
         matches!(self.source(), DeploySource::Memfd | DeploySource::Shm)
     }
@@ -139,6 +152,7 @@ impl RemotePlatform {
 }
 
 /// Map `uname -m` to the static musl target used for streamable gates.
+// WO-84@v1: select the static musl artifact for the remote architecture.
 pub fn target_triple(arch: &str) -> Result<&'static str> {
     match arch {
         "x86_64" | "amd64" => Ok("x86_64-unknown-linux-musl"),
@@ -163,6 +177,7 @@ pub fn dist_url(version: &str, asset: &str) -> String {
 /// Whether the LOCAL binary can be scp'd to the remote and run there: true only
 /// when this build is Linux and its arch matches the remote arch. On macOS this
 /// is always false (a Mach-O binary will not run on Linux), forcing dist-fetch.
+// WO-18@v1: use a local binary only when it can run on the remote host.
 pub fn local_can_scp(remote: &RemotePlatform) -> bool {
     if std::env::consts::OS != "linux" || remote.os != "Linux" {
         return false;
@@ -198,6 +213,7 @@ fn ssh_capture(target: &str, remote_cmd: &str) -> Result<std::process::Output> {
         .with_context(|| format!("cannot ssh to {target}"))
 }
 
+// WO-90@v1: exercise the streamed payload while probing remote viability.
 fn ssh_capture_with_payload(
     target: &str,
     remote_cmd: &str,
@@ -237,6 +253,7 @@ fn remote_has_bulwark(target: &str) -> bool {
     )
 }
 
+// WO-84@v1: normalize remote architecture names for static artifact selection.
 fn normalized_arch(arch: &str) -> Result<&'static str> {
     match arch {
         "x86_64" | "amd64" => Ok("x86_64"),
@@ -247,10 +264,12 @@ fn normalized_arch(arch: &str) -> Result<&'static str> {
     }
 }
 
+// WO-85@v1: preserve loader arguments while composing the remote shell command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+// WO-90@v1: retain the remote probe reason when a delivery rung is rejected.
 fn output_reason(out: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !stderr.is_empty() {
@@ -263,6 +282,7 @@ fn output_reason(out: &std::process::Output) -> String {
     format!("remote exit {:?}", out.status.code())
 }
 
+// WO-87@v1: remove transient deploy artifacts on every shell exit path.
 fn cleanup_trap(cleanup_dir: &str) -> String {
     format!(
         r#"cleanup() {{
@@ -275,12 +295,14 @@ trap cleanup EXIT INT TERM HUP"#
     )
 }
 
+// WO-92@v1: execute the memfd loader without a remote runtime dependency.
 fn memfd_exec_invocation(remote_loader: &str) -> String {
     let script = r#"loader=$1; shift; exec "$loader" __memfd-exec bulwark "$@" < "$loader""#;
     format!("sh -c {} sh {remote_loader}", shell_quote(script))
 }
 
 // Probe memfd through the same sudo gate path used at launch.
+// WO-94@v1: validate memfd through the same sudo path used by the gate.
 fn memfd_probe_script(remote: &RemoteBulwark) -> String {
     let cleanup_dir = remote
         .cleanup_dir()
@@ -296,6 +318,7 @@ fn memfd_probe_script(remote: &RemoteBulwark) -> String {
     )
 }
 
+// WO-90@v1: select memfd only after its full remote path proves viable.
 fn memfd_supported(target: &str, payload_path: &Path, deploy_id: &str) -> Result<(), String> {
     let remote = memfd_remote(payload_path.to_path_buf(), deploy_id);
     let script = memfd_probe_script(&remote);
@@ -309,6 +332,7 @@ fn memfd_supported(target: &str, payload_path: &Path, deploy_id: &str) -> Result
     }
 }
 
+// WO-90@v1: test that the shared-memory rung is writable and executable.
 fn shm_probe_script() -> String {
     let probe_dir = format!("{REMOTE_SHM}/{DEPLOY_DIR_PREFIX}-probe-$$");
     format!(
@@ -324,6 +348,7 @@ sudo -n "$d/probe"
     )
 }
 
+// WO-90@v1: reject a shared-memory rung that cannot execute the gate.
 fn shm_supported(target: &str) -> Result<(), String> {
     match ssh_capture(target, &shm_probe_script()) {
         Ok(o) if o.status.success() => Ok(()),
@@ -337,6 +362,7 @@ fn shm_supported(target: &str) -> Result<(), String> {
 
 /// scp the local `bulwark` executable to a fresh remote temp dir and return the
 /// remote path. Caller must have already verified `local_can_scp`.
+// WO-87@v1: return the legacy deploy directory for deterministic teardown.
 fn deploy_via_scp(target: &str, deploy_id: &str) -> Result<(String, String)> {
     let local = std::env::current_exe().context("cannot locate local bulwark binary")?;
     let remote_dir = format!("{REMOTE_TMP}/{DEPLOY_DIR_PREFIX}-{VERSION}-{deploy_id}");
@@ -364,6 +390,7 @@ fn deploy_via_scp(target: &str, deploy_id: &str) -> Result<(String, String)> {
 /// Build the remote shell snippet that fetches the dist tarball for `arch`,
 /// verifies its sha256, and unpacks it. Echoes the resolved binary path on
 /// success. Pure string-builder (no I/O) so it is unit-testable.
+// WO-87@v1: isolate each legacy dist deployment so teardown can remove it.
 pub fn dist_fetch_script(version: &str, arch: &str, deploy_id: &str) -> Result<String> {
     let asset = dist_asset(version, arch)?;
     let url = dist_url(version, &asset);
@@ -388,6 +415,7 @@ echo {dir}/{unpacked}/bulwark
 /// Run the dist-fetch on the remote host and return the resolved remote binary
 /// path. A checksum failure (or any step) makes the remote script exit non-zero,
 /// which surfaces here as an error.
+// WO-87@v1: return the fetched deploy directory for deterministic teardown.
 fn deploy_via_dist(target: &str, arch: &str, deploy_id: &str) -> Result<(String, String)> {
     let script = dist_fetch_script(VERSION, arch, deploy_id)?;
     let out = ssh_capture(target, &script)?;
@@ -411,10 +439,12 @@ fn deploy_via_dist(target: &str, arch: &str, deploy_id: &str) -> Result<(String,
     Ok((path, cleanup_dir))
 }
 
+// WO-84@v1: accept an explicit static gate artifact for remote delivery.
 fn env_streamable_gate() -> Option<PathBuf> {
     std::env::var_os(STREAMABLE_GATE_ENV).map(PathBuf::from)
 }
 
+// WO-84@v1: discover release-bundled static gate artifacts beside the CLI.
 fn sibling_streamable_candidates(target: &str) -> Vec<PathBuf> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -431,6 +461,7 @@ fn sibling_streamable_candidates(target: &str) -> Vec<PathBuf> {
     ]
 }
 
+// WO-84@v1: reuse the current binary only when it is a matching static artifact.
 fn current_exe_is_streamable_for(remote: &RemotePlatform) -> bool {
     if !(cfg!(target_os = "linux") && cfg!(target_env = "musl")) {
         return false;
@@ -441,12 +472,14 @@ fn current_exe_is_streamable_for(remote: &RemotePlatform) -> bool {
     )
 }
 
+// WO-84@v1: authenticate a downloaded static gate before streaming it.
 fn sha256_hex(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let digest = Sha256::digest(&bytes);
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+// WO-84@v1: reject a static gate artifact whose published checksum differs.
 fn verify_sha256_file(tarball: &Path, sha_file: &Path) -> Result<()> {
     let expected = std::fs::read_to_string(sha_file)
         .with_context(|| format!("read {}", sha_file.display()))?
@@ -464,6 +497,7 @@ fn verify_sha256_file(tarball: &Path, sha_file: &Path) -> Result<()> {
     Ok(())
 }
 
+// WO-84@v1: fail artifact preparation when a local release command fails.
 fn run_local(cmd: &mut Command, label: &str) -> Result<()> {
     let status = cmd.status().with_context(|| format!("run local {label}"))?;
     if !status.success() {
@@ -472,6 +506,7 @@ fn run_local(cmd: &mut Command, label: &str) -> Result<()> {
     Ok(())
 }
 
+// WO-84@v1: fetch and verify the matching static gate artifact locally.
 fn fetch_streamable_gate(version: &str, target: &str) -> Result<PathBuf> {
     let asset = format!("bulwark-{version}-{target}.tar.gz");
     let url = dist_url(version, &asset);
@@ -517,6 +552,7 @@ fn fetch_streamable_gate(version: &str, target: &str) -> Result<PathBuf> {
     Ok(binary)
 }
 
+// WO-84@v1: resolve a verified static gate payload for the remote platform.
 fn streamable_gate_path(platform: &RemotePlatform) -> Result<PathBuf> {
     if platform.os != "Linux" {
         return Err(anyhow!("memfd/shm deploy only supports Linux remotes"));
@@ -547,6 +583,7 @@ fn streamable_gate_path(platform: &RemotePlatform) -> Result<PathBuf> {
         .with_context(|| format!("prepare local static gate payload for {target}"))
 }
 
+// WO-92@v1: stage a dependency-free loader that executes the gate from memfd.
 fn memfd_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
     let remote_dir = format!("{REMOTE_SHM}/{DEPLOY_DIR_PREFIX}-{VERSION}-{deploy_id}");
     let remote_loader = format!("{remote_dir}/bulwark-loader");
@@ -567,6 +604,7 @@ fn memfd_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
     }
 }
 
+// WO-86@v1: stage the static gate on the shared-memory fallback rung.
 fn shm_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
     let remote_dir = format!("{REMOTE_SHM}/{DEPLOY_DIR_PREFIX}-{VERSION}-{deploy_id}");
     let remote_bin = format!("{remote_dir}/bulwark");
@@ -582,6 +620,7 @@ fn shm_remote(payload_path: PathBuf, deploy_id: &str) -> RemoteBulwark {
     }
 }
 
+// WO-87@v1: retain legacy deploy paths and their teardown directories.
 fn path_remote(source: DeploySource, path: String, cleanup_dir: Option<String>) -> RemoteBulwark {
     RemoteBulwark {
         source,
@@ -596,6 +635,7 @@ fn path_remote(source: DeploySource, path: String, cleanup_dir: Option<String>) 
 
 /// Resolve a runnable remote `bulwark`, honoring the deploy mode. Returns the
 /// shell plan the launcher should invoke.
+// WO-86@v1: walk the delivery ladder from the most ephemeral viable rung.
 pub fn resolve_remote_bulwark(
     target: &str,
     mode: DeployMode,
@@ -713,6 +753,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // WO-86@v1: keep every delivery rung selectable by its CLI value.
     fn deploy_mode_parses_known_values() {
         assert_eq!(DeployMode::parse("auto"), Some(DeployMode::Auto));
         assert_eq!(DeployMode::parse("never"), Some(DeployMode::Never));
@@ -732,6 +773,7 @@ mod tests {
     }
 
     #[test]
+    // WO-84@v1: keep architecture aliases mapped to static musl targets.
     fn target_triple_maps_known_arches() {
         assert_eq!(
             target_triple("x86_64").unwrap(),
@@ -750,6 +792,7 @@ mod tests {
     }
 
     #[test]
+    // WO-84@v1: keep static release asset names aligned with their targets.
     fn dist_asset_matches_release_naming() {
         assert_eq!(
             dist_asset("0.5.0", "x86_64").unwrap(),
@@ -763,6 +806,7 @@ mod tests {
     }
 
     #[test]
+    // WO-18@v1: keep remote bootstrap downloads pinned to the matching release.
     fn dist_url_points_at_tagged_release() {
         let url = dist_url("0.5.0", "bulwark-0.5.0-x86_64-unknown-linux-musl.tar.gz");
         assert_eq!(
@@ -772,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    // WO-18@v1: verify remote bootstrap artifacts before exposing their path.
     fn dist_fetch_script_verifies_checksum_and_echoes_path() {
         let s = dist_fetch_script("0.5.0", "x86_64", "abc123").unwrap();
         // Pulls both the tarball and its sha256, and verifies with sha256sum -c.
@@ -785,6 +830,7 @@ mod tests {
     }
 
     #[test]
+    // WO-92@v1: keep memfd execution independent of remote runtime packages.
     fn memfd_invocation_uses_dependency_free_fexecve_loader() {
         let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"), "run42");
         assert_eq!(r.source(), DeploySource::Memfd);
@@ -802,6 +848,7 @@ mod tests {
     }
 
     #[test]
+    // WO-94@v1: keep the memfd probe on the gate's sudo execution path.
     fn memfd_probe_exercises_loader_and_removes_probe_dir() {
         let r = memfd_remote(PathBuf::from("/tmp/static-bulwark"), "probe42");
         let s = memfd_probe_script(&r);
@@ -815,6 +862,7 @@ mod tests {
     }
 
     #[test]
+    // WO-90@v1: detect a shared-memory mount that cannot execute the gate.
     fn shm_probe_executes_from_dev_shm_to_detect_noexec() {
         let s = shm_probe_script();
         assert!(s.contains("/dev/shm/bulwark-deploy-probe-$$"));
@@ -824,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    // WO-86@v1: write the payload before invoking the shared-memory fallback.
     fn shm_remote_writes_payload_before_exec() {
         let r = shm_remote(PathBuf::from("/tmp/static-bulwark"), "run42");
         assert_eq!(r.source(), DeploySource::Shm);
