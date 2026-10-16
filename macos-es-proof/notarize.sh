@@ -22,8 +22,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 BIN="es_proof"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 ZIP="es_proof-notarize.zip"
 
 [ -f "$BIN" ] || { echo "!! $BIN not found — run ./build.sh first"; exit 1; }
@@ -39,7 +42,9 @@ rm -f "$ZIP"
 echo "==> submitting to Apple notary (profile: $PROFILE) — waits for the result"
 xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait 2>&1 | tee notarize.out
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 SUBMIT_ID=$(grep -oE 'id: [0-9a-f-]+' notarize.out | head -1 | awk '{print $2}')
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 STATUS=$(grep -E '^\s*status:' notarize.out | tail -1 | awk '{print $2}')
 echo
 echo "==> submission id: ${SUBMIT_ID:-unknown}  status: ${STATUS:-unknown}"

@@ -14,10 +14,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+// WO-25@v1: prove the remote Landlock floor rejects reads outside explicit grants.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-25@v1: prove the remote Landlock floor rejects reads outside explicit grants.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -31,6 +33,7 @@ fn scratch(tag: &str) -> PathBuf {
 
 const TARGET: &str = "nullbot@localhost";
 
+// WO-25@v1: prove the remote Landlock floor rejects reads outside explicit grants.
 /// `bulwark ssh --hardened --allow <dir>/**`: the remote agent reads files inside
 /// the grant, but a read of `/etc/shadow` (outside the floor) is denied by the
 /// remote kernel. Proves the Landlock floor enforces over ssh.
@@ -75,6 +78,7 @@ fn ssh_hardened_allows_grant_denies_outside() {
     );
 }
 
+// WO-25@v1: prove the remote Landlock floor rejects reads outside explicit grants.
 /// `--hardened` + `--protect` are opposite modes — the launcher must reject the
 /// mix locally, before any ssh, with a clear message.
 #[test]
@@ -100,6 +104,7 @@ fn ssh_hardened_rejects_protect() {
     );
 }
 
+// WO-25@v1: prove the remote Landlock floor rejects reads outside explicit grants.
 /// `--hardened` with no `--allow` is rejected (no default floor).
 #[test]
 fn ssh_hardened_requires_allow() {

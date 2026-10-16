@@ -3,16 +3,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 fail() {
     echo "prove_test.sh: $*" >&2
     exit 1
 }
 
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 contains() {
     local needle="$1"
     grep -Fq "$needle" prove.sh || fail "prove.sh missing: $needle"
 }
 
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 not_contains() {
     local needle="$1"
     if grep -Fq "$needle" prove.sh; then

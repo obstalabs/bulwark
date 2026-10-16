@@ -9,6 +9,7 @@ fn repo_file(path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
 }
 
+// WO-39@v1: keep ES proof callbacks free of cross-queue mutable state.
 #[test]
 fn es_proof_client_has_no_callback_timer_shared_state() {
     let source = repo_file("macos-es-proof/es_proof.swift");
@@ -43,6 +44,7 @@ fn es_proof_client_has_no_callback_timer_shared_state() {
     );
 }
 
+// WO-38@v1: seal proof output only from a validated notarized app bundle.
 #[test]
 fn prove_script_seals_only_validated_app_bundle() {
     let source = repo_file("macos-es-proof/prove.sh");

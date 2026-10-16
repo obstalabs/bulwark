@@ -7,6 +7,7 @@ fn repo_file(path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("read {path}: {err}"))
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 #[test]
 fn main_selects_macos_gate_module() {
     let source = repo_file("src/main.rs");
@@ -15,6 +16,7 @@ fn main_selects_macos_gate_module() {
     assert!(source.contains(r#"not(any(target_os = "linux", target_os = "macos"))"#));
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 #[test]
 fn rust_launcher_fails_closed_until_es_edge_is_ready() {
     let source = repo_file("src/gate_macos.rs");
@@ -32,6 +34,7 @@ fn rust_launcher_fails_closed_until_es_edge_is_ready() {
     }
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 #[test]
 fn swift_edge_decides_by_inode_and_tracks_supervised_tree() {
     let source = repo_file("macos-es-proof/es_gate.swift");
@@ -186,6 +189,7 @@ fn rust_supervisor_reports_abnormal_edge_exit_after_child_exit() {
     }
 }
 
+// WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 #[test]
 fn behavior_matrix_documents_macos_linux_divergences() {
     let doc = repo_file("docs/macos-behavior-matrix.md");
@@ -204,6 +208,7 @@ fn behavior_matrix_documents_macos_linux_divergences() {
     }
 }
 
+// WO-24@v1: pin the documented and compiled macOS CLI parity surface.
 #[test]
 fn macos_quickstart_documents_operator_surface() {
     let doc = repo_file("docs/macos.md");
@@ -223,6 +228,7 @@ fn macos_quickstart_documents_operator_surface() {
     }
 }
 
+// WO-24@v1: pin the documented and compiled macOS CLI parity surface.
 #[test]
 fn ci_compiles_macos_rust_and_documents_swift_link_check() {
     let workflow = repo_file(".github/workflows/ci.yml");
@@ -267,6 +273,7 @@ fn allowlist_gate_has_sealed_hardware_harness() {
     }
 }
 
+// WO-24@v1: pin the documented and compiled macOS CLI parity surface.
 #[test]
 fn macos_socket_consent_keeps_peer_pid_and_process_tree_checks() {
     let socket = repo_file("src/socket.rs");

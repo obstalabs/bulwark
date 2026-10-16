@@ -113,6 +113,7 @@ SUP_ERR_KEEP="allowlist-supervised.err"
 LOAD_OUT_KEEP="allowlist-load.out"
 LOAD_ERR_KEEP="allowlist-load.err"
 
+# WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 fail() { echo "!! $*"; exit 2; }
 
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
@@ -175,6 +176,7 @@ ln "$ALLOW_FILE" "$HARDLINK_OUTSIDE"
 FOREIGN_INO=$(stat -f %i "$FOREIGN_FILE") || fail "cannot stat $FOREIGN_FILE"
 : > "$EVENT_RECEIPTS"
 
+# WO-41@v1: prove macOS default-deny allow-list behavior end to end.
 cleanup() { sudo pkill -f bulwark_es_gate 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 

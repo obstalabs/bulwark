@@ -13,10 +13,15 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 APP_BUNDLE="es_proof.app"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 APP_BIN="$APP_BUNDLE/Contents/MacOS/es_proof"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 BUNDLE_ID="dev.obstalabs.bulwark.es-proof"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 NOTARY_RECEIPT="notarization.receipt"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 ES_BIN="$APP_BIN"
 
 # WO-38: only the notarized+stapled app-bundle path can seal WO-26. A bare Mach-O
@@ -29,7 +34,9 @@ fi
 echo "==> using ES client: $ES_BIN"
 
 echo "==> validating sealable app bundle"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 CODESIGN_DETAILS=$(codesign -dv "$APP_BUNDLE" 2>&1)
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 SIGNED_BUNDLE_ID=$(printf "%s\n" "$CODESIGN_DETAILS" | awk -F= '/Identifier=/{print $2; exit}')
 [ "$SIGNED_BUNDLE_ID" = "$BUNDLE_ID" ] && BUNDLE_ID_OK=1 || BUNDLE_ID_OK=0
 
@@ -51,7 +58,9 @@ else
     SPCTL_OK=0
 fi
 
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 NOTARY_SUBMISSION_ID="MISSING"
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 NOTARY_STATUS="MISSING"
 if [ -f "$NOTARY_RECEIPT" ]; then
     NOTARY_SUBMISSION_ID=$(awk -F': ' '/^submission_id:/{print $2; exit}' "$NOTARY_RECEIPT")
@@ -77,14 +86,19 @@ if [ "$BUNDLE_VALID" != 1 ]; then
     exit 2
 fi
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 MARKER="BULWARK_DENY_$$"           # unique per run
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 DENY_FILE="/tmp/${MARKER}_secret.txt"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 ALLOW_FILE="/tmp/allowed_$$_plain.txt"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 RECEIPT="receipt.txt"
 
 echo "secret-contents" > "$DENY_FILE"
 echo "plain-contents"  > "$ALLOW_FILE"
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 cleanup() { sudo pkill -f "es_proof $MARKER" 2>/dev/null; rm -f "$DENY_FILE" "$ALLOW_FILE"; }
 trap cleanup EXIT
 
@@ -103,6 +117,7 @@ sleep 3   # let es_new_client + es_subscribe come up
 ES_REAL_PID=$(grep -oE 'pid=[0-9]+' es_proof.log | head -1 | cut -d= -f2)
 
 # alive: the ES client process is still running RIGHT NOW (not just "was logged").
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 alive() { [ -n "${ES_REAL_PID:-}" ] && sudo kill -0 "$ES_REAL_PID" 2>/dev/null; }
 
 if ! grep -q "gate is LIVE" es_proof.log 2>/dev/null || ! alive; then

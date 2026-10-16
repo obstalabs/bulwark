@@ -7,10 +7,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -22,6 +24,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn deny_then_allow_writes_policy_file() {
     let dir = scratch("mutate");
@@ -48,6 +51,7 @@ fn deny_then_allow_writes_policy_file() {
     assert!(body.contains("dev/proj"), "allow glob should be written");
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn deny_is_idempotent() {
     let dir = scratch("idem");
@@ -65,6 +69,7 @@ fn deny_is_idempotent() {
     assert_eq!(count, 1, "duplicate deny must not double-write");
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn check_reports_protected_for_default_profile() {
     // ~/.ssh is protected in the default profile.
@@ -85,6 +90,7 @@ fn check_reports_protected_for_default_profile() {
     );
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn check_reports_outside_for_unprotected_path() {
     let out = Command::new(bin())
@@ -164,6 +170,7 @@ fn check_json_decided_token_is_machine_readable() {
     );
 }
 
+// WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn audit_renders_and_counts_receipts() {
     let dir = scratch("audit");

@@ -139,6 +139,7 @@ echo "harmless"    > "$PLAIN"
 ln -s "$PROT" "$SYM"
 ln "$PROT" "$HARD"
 
+# WO-23@v1: prove inode-based macOS AUTH_OPEN enforcement end to end.
 cleanup() { sudo pkill -f bulwark_es_gate 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 

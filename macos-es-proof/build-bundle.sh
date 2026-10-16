@@ -20,12 +20,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 IDENTITY="${SIGNING_IDENTITY:?set SIGNING_IDENTITY to your 'Developer ID Application: NAME (TEAMID)'}"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 KEYCHAIN="${SIGNING_KEYCHAIN:-login.keychain-db}"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 BIN="es_proof"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 ENT="es_proof.entitlements"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 PROFILE="es_proof.provisionprofile"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 APP="es_proof.app"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
 # WO-38: copied with the bundle so prove.sh can cite notarization evidence.
 NOTARY_RECEIPT="notarization.receipt"
@@ -55,11 +62,14 @@ codesign -dv --entitlements - "$APP" 2>&1 | grep -E "TeamIdentifier|endpoint-sec
 [ -f "$APP/Contents/embedded.provisionprofile" ] && echo "    embedded.provisionprofile present"
 
 echo "==> notarizing the bundle"
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 ZIP="es_proof-app-notarize.zip"
 rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
 xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1 | tee notarize-bundle.out
+# WO-26@v1: keep the entitled macOS proof tied to the signed ES client pipeline.
 STATUS=$(grep -E '^\s*status:' notarize-bundle.out | tail -1 | awk '{print $2}')
+# WO-38@v1: seal proof output only from a validated notarized app bundle.
 SUBMISSION_ID=$(grep -oE 'id: [0-9a-f-]+' notarize-bundle.out | head -1 | awk '{print $2}')
 [ "$STATUS" = "Accepted" ] || { echo "!! notarization not Accepted ($STATUS)"; exit 2; }
 {
