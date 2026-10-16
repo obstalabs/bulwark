@@ -1804,16 +1804,17 @@ fn run_hardened(
         .with_context(|| format!("cannot exec {}", command[0]))
 }
 
-// WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
-/// Enumerate the mount points of every real filesystem from `/proc/mounts`, so
-/// allow-list mode can mark them all. Marking only `/` would miss separate
-/// mounts (tmpfs, a data volume, network shares) and silently allow reads
-/// there — fatal for a default-deny guarantee. We skip a few pseudo
-/// filesystems that cannot hold a readable on-disk secret and would only add
-/// event noise (`cgroup`, `devpts`, ...) but keep `proc`/`sysfs`/`tmpfs`/real
-/// block and network filesystems. On any error we fall back to `/` and warn —
-/// a noisy over-mark is safer than a silent gap.
-fn real_mount_points() -> Vec<PathBuf> {
+// WO-159@v1: return mount marks and diagnostics without performing platform I/O.
+struct MountMarkPlan {
+    paths: Vec<PathBuf>,
+    // WO-159@v1: carry Linux read failures to the caller without printing in the helper.
+    #[cfg(any(target_os = "linux", test))]
+    warning: Option<String>,
+}
+
+// WO-159@v1: parse Linux mount text independently from its procfs source.
+#[cfg(any(target_os = "linux", test))]
+fn parse_mount_points(raw: &str) -> Vec<PathBuf> {
     const SKIP_FSTYPES: &[&str] = &[
         "cgroup",
         "cgroup2",
@@ -1830,13 +1831,6 @@ fn real_mount_points() -> Vec<PathBuf> {
         "binfmt_misc",
         "autofs",
     ];
-    let raw = match std::fs::read_to_string("/proc/mounts") {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[bulwark] WARN cannot read /proc/mounts ({e}); marking only / — other mounts will not be gated");
-            return vec![PathBuf::from("/")];
-        }
-    };
     let mut seen = std::collections::HashSet::new();
     let mut mounts = Vec::new();
     for line in raw.lines() {
@@ -1859,11 +1853,69 @@ fn real_mount_points() -> Vec<PathBuf> {
     if mounts.is_empty() {
         mounts.push(PathBuf::from("/"));
     }
-    eprintln!(
-        "[bulwark] allow-list: marking {} mounted filesystem(s)",
-        mounts.len()
-    );
     mounts
+}
+
+// WO-159@v1: preserve Linux's warning when its mount source cannot be read.
+#[cfg(any(target_os = "linux", test))]
+fn mount_mark_plan_from_read(raw: std::io::Result<String>) -> MountMarkPlan {
+    match raw {
+        Ok(raw) => MountMarkPlan {
+            paths: parse_mount_points(&raw),
+            warning: None,
+        },
+        Err(e) => MountMarkPlan {
+            paths: vec![PathBuf::from("/")],
+            warning: Some(format!(
+                "[bulwark] WARN cannot read /proc/mounts ({e}); marking only / — other mounts will not be gated"
+            )),
+        },
+    }
+}
+
+// WO-159@v1: never invoke the Linux mount reader on non-Linux hosts.
+fn mount_mark_plan_with_reader<F>(reader: F) -> MountMarkPlan
+where
+    F: FnOnce() -> std::io::Result<String>,
+{
+    #[cfg(target_os = "linux")]
+    {
+        mount_mark_plan_from_read(reader())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _reader = reader;
+        MountMarkPlan {
+            paths: vec![PathBuf::from("/")],
+            #[cfg(test)]
+            warning: None,
+        }
+    }
+}
+
+// WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
+// WO-159@v1: avoid Linux mount reads and warnings on non-Linux gates.
+/// Enumerate the mount points of every real filesystem from `/proc/mounts`, so
+/// allow-list mode can mark them all. Marking only `/` would miss separate
+/// mounts (tmpfs, a data volume, network shares) and silently allow reads
+/// there — fatal for a default-deny guarantee. We skip a few pseudo
+/// filesystems that cannot hold a readable on-disk secret and would only add
+/// event noise (`cgroup`, `devpts`, ...) but keep `proc`/`sysfs`/`tmpfs`/real
+/// block and network filesystems. On any error we fall back to `/` and warn —
+/// a noisy over-mark is safer than a silent gap.
+fn real_mount_points() -> Vec<PathBuf> {
+    let plan = mount_mark_plan_with_reader(|| std::fs::read_to_string("/proc/mounts"));
+    #[cfg(target_os = "linux")]
+    if let Some(warning) = &plan.warning {
+        eprintln!("{warning}");
+    } else {
+        eprintln!(
+            "[bulwark] allow-list: marking {} mounted filesystem(s)",
+            plan.paths.len()
+        );
+    }
+    plan.paths
 }
 
 // WO-8@v1: carry consent and policy inputs into one supervised run.
@@ -3807,6 +3859,72 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             !msg2.contains("that home belongs to a different user"),
             "{msg2}"
         );
+    }
+
+    // WO-159@v1: keep non-Linux allow-list setup silent about Linux mount sources.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_allowlist_mount_probe_emits_no_proc_warning() {
+        const CHILD: &str = "BULWARK_TEST_MOUNT_WARNING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = real_mount_points();
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::non_linux_allowlist_mount_probe_emits_no_proc_warning")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "child test failed: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("cannot read /proc/mounts"),
+            "non-Linux allow-list setup emitted a Linux-only warning: {stderr}"
+        );
+    }
+
+    // WO-159@v1: prove non-Linux allow-list setup never invokes the Linux reader.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_mount_plan_does_not_read_linux_source() {
+        let plan = mount_mark_plan_with_reader(|| panic!("Linux mount reader was called"));
+        assert_eq!(plan.paths, vec![PathBuf::from("/")]);
+        assert!(plan.warning.is_none());
+    }
+
+    // WO-159@v1: preserve the Linux warning and safe root fallback on read errors.
+    #[test]
+    fn unreadable_mount_source_warns_and_falls_back_to_root() {
+        let plan = mount_mark_plan_from_read(Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fixture refused",
+        )));
+        assert_eq!(plan.paths, vec![PathBuf::from("/")]);
+        assert!(plan
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("cannot read /proc/mounts"));
+    }
+
+    // WO-159@v1: preserve every parsed real mount, including escaped spaces.
+    #[test]
+    fn parsed_mount_source_yields_every_real_mount() {
+        let raw =
+            "root / ext4 rw 0 0\ntmp /tmp tmpfs rw 0 0\nshare /mnt/team\\040data nfs rw 0 0\n";
+        let plan = mount_mark_plan_from_read(Ok(raw.to_string()));
+        assert_eq!(
+            plan.paths,
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/mnt/team data"),
+            ]
+        );
+        assert!(plan.warning.is_none());
     }
 
     // WO-164@v2: doctor marks the checks enforcement depends on as required, on both platforms.

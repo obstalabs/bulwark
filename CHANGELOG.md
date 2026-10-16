@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact pair that ships, build signed + notarized + stapled `.pkg` files, verify, upload),
   until CI signs macOS releases.
 
+### Fixed
+<!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
+- macOS allow-list runs no longer warn that `/proc/mounts` could not be read.
+
 ### Changed
 <!-- WO-173@v2: per-item platform gates expose unrelated dead code on non-Linux builds. -->
 - Non-Linux builds scope dead-code allowances to the specific Linux-only items that need them.
