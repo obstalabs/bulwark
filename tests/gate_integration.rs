@@ -54,6 +54,7 @@ fn run_gate(protect: &[&Path], cmd: &[&str], receipts: &Path) -> (String, String
 // account) whose home sits outside /home must refuse before anything runs —
 // the default profile's `~/` entries cannot cover that user's own home. The
 // marker proves the agent never exec'd.
+// WO-145@v2: a SUDO_UID that owns no enumerated home refuses before anything runs.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn tilde_refuses_when_sudo_uid_owns_no_enumerated_home() {
@@ -200,6 +201,7 @@ fn tilde_explicit_worker_uid_with_no_home_refuses_without_an_auto_exemption() {
 // WO-145@v6 (F): a root agent with the default `~` profile still covers /root.
 // Run-evidence assertions: the agent RAN (done marker + exit 0), the read shows a
 // kernel denial and not the secret, and the deny line names /root/.ssh/<fixture>.
+// WO-145@v2: a root agent's own /root home stays covered, without a different-user message.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn root_agent_home_is_covered_without_a_different_user_message() {
@@ -480,8 +482,11 @@ fn tilde_protects_every_home_not_the_sudo_home() {
         std::os::unix::fs::chown(&ssh, Some(uid), Some(gid)).unwrap();
     }
     // The fixture lives in a real user's ~/.ssh: remove it however the test ends.
+    // WO-145@v2: hold the fixture key and the .ssh dir this test may have created.
     struct Cleanup(PathBuf, Option<PathBuf>);
+    // WO-145@v2: cleanup runs on drop, so a failed assertion cannot leave the key behind.
     impl Drop for Cleanup {
+        // WO-145@v2: delete the key, and the .ssh dir only when this test created it.
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
             if let Some(d) = &self.1 {

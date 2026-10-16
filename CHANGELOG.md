@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 <!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
+  Regions whose work order cannot be traced stay uncited for a maintainer decision instead of
+  receiving a guessed one.
 
 ## [0.9.3] - 2026-10-15
 

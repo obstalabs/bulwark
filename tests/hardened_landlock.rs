@@ -93,6 +93,7 @@ fn hardened_floor_denies_etc_shadow() {
 /// applied. Otherwise `open(O_PATH)` follows the symlink and floors the wider
 /// target — a silent widening invisible in the grant string. The rejection is a
 /// CLI-level bail (no Landlock/root needed), so this test checks stderr+status.
+// WO-74@v1: a concrete grant that is a symlink to a broader directory is refused before any rule applies.
 #[test]
 #[ignore = "requires Linux (filesystem symlink + canonicalize)"]
 fn hardened_rejects_symlink_widening_grant() {
@@ -136,6 +137,7 @@ fn hardened_rejects_symlink_widening_grant() {
 /// path is resolved against the working directory when the Landlock floor is
 /// applied, so `tmp/**` launched from `/` would silently floor all of `/tmp` —
 /// wider than the grant string names. The check is a CLI-level bail.
+// WO-82@v1: a relative grant is refused because it would resolve against the working directory.
 #[test]
 #[ignore = "requires Linux"]
 fn hardened_rejects_relative_grant() {
@@ -164,6 +166,7 @@ fn hardened_rejects_relative_grant() {
 /// prefix with `openat2(RESOLVE_NO_SYMLINKS)`, which refuses a symlink in any
 /// component — not just the final one — so the grant adds no rule and the
 /// symlink target is not floored.
+// WO-81@v1: a symlink in any grant component must not widen the floor at apply time.
 #[test]
 #[ignore = "requires Linux + Landlock + root + openat2"]
 fn hardened_denies_intermediate_symlink_grant() {
@@ -420,6 +423,7 @@ fn run_hardened_as_root(
     c.output().expect("spawn bulwark")
 }
 
+// WO-144@v1: under sudo the hardened agent runs as SUDO_UID, and the floor still holds after the drop.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_drops_root_agent_to_sudo_uid() {
@@ -473,6 +477,7 @@ fn hardened_drops_root_agent_to_sudo_uid() {
     }
 }
 
+// WO-144@v1: an explicit --worker-uid is accepted with --hardened and wins over SUDO_UID.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_honours_explicit_worker_uid_over_sudo_uid() {
@@ -497,6 +502,7 @@ fn hardened_honours_explicit_worker_uid_over_sudo_uid() {
     );
 }
 
+// WO-144@v1: real root with no worker identity refuses before exec, so nothing runs as root.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_refuses_real_root_without_a_worker_uid() {
@@ -524,6 +530,7 @@ fn hardened_refuses_real_root_without_a_worker_uid() {
     );
 }
 
+// WO-144@v1: --allow-root keeps uid 0 only when the operator asks for it.
 #[test]
 #[ignore = "requires Linux + Landlock + root"]
 fn hardened_allow_root_keeps_uid_zero_on_request() {

@@ -38,6 +38,7 @@ const TARGET: &str = "nullbot@localhost";
 /// `--auto allow-session`: the remote read of a protected file is denied on first
 /// touch, the local relay auto-answers allow-session, and the second read passes
 /// from cache. No interactive tty needed.
+// WO-18@v1: the local relay answers a remote consent prompt without the agent seeing it.
 #[test]
 #[ignore = "needs ssh localhost + sudo; VM only"]
 fn auto_allow_session_lets_second_read_through() {
@@ -145,6 +146,7 @@ fn interactive_operator_grants_locally() {
 
 /// `--deploy dist`: fetch the matching release tarball, verify its sha256, and
 /// run it. Uses the real published v0.5.0 dist release for this host's arch.
+// WO-18@v1: auto-deploy fetches a checksum-verified release when the remote has no gate.
 #[test]
 #[ignore = "needs ssh localhost + sudo + network; VM only"]
 fn deploy_dist_fetches_and_runs() {

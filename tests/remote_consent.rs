@@ -38,6 +38,7 @@ fn mkfifo(path: &std::path::Path) {
     assert!(ok.success(), "mkfifo failed for {}", path.display());
 }
 
+// WO-9@v1: the remote gate denies first, then serves the operator's allow-session grant from cache.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn remote_split_denies_then_caches_allow_session() {

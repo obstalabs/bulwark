@@ -14,6 +14,7 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-8@v1: each consent scenario gets a private scratch dir for its socket and fixtures.
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -44,6 +45,7 @@ fn sock_node(sock: &std::path::Path) -> PathBuf {
 
 /// Run a consent scenario: launch the gate (sleeps then reads the secret) and an
 /// operator that answers `verdict`. Returns (agent_read_contents, receipts).
+// WO-8@v1: run the gate and an off-band operator together, as consent runs in practice.
 fn scenario(tag: &str, verdict: &str) -> (String, String) {
     let dir = scratch(tag);
     let secret = dir.join("secret.env");
@@ -132,6 +134,7 @@ fn operator_allow_once_lets_read_through_with_operator_source() {
     );
 }
 
+// WO-8@v1: the supervised command must not be able to answer its own consent prompt.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn agent_cannot_answer_its_own_consent() {
@@ -198,6 +201,7 @@ fn agent_cannot_answer_its_own_consent() {
 /// "reject only if provably in-tree" rule would accept the dead in-tree peer and
 /// let the agent answer its own consent. The gate must refuse a peer it can no
 /// longer observe (fail closed), so the protected read stays denied.
+// WO-80@v1: a peer that exited before the membership check is refused, so the read stays denied.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn dead_peer_cannot_answer_its_own_consent() {
@@ -299,6 +303,7 @@ fn sock_dir(sock: &std::path::Path) -> PathBuf {
 
 /// Run the gate just far enough to reach `bind`, which must refuse the planted
 /// socket directory. Returns stderr.
+// WO-147@v1: start the gate only far enough for bind to refuse the planted socket directory.
 fn run_and_expect_refusal(sock: &std::path::Path) -> String {
     let out = Command::new(bin())
         .args([
@@ -320,6 +325,7 @@ fn run_and_expect_refusal(sock: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+// WO-147@v1: a socket dir owned by another uid is refused and left in place.
 #[test]
 #[ignore = "requires Linux + root for fanotify + chown"]
 fn foreign_owned_socket_dir_is_refused() {
@@ -341,6 +347,7 @@ fn foreign_owned_socket_dir_is_refused() {
     );
 }
 
+// WO-147@v1: a symlink at the socket dir is refused and its target is untouched.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn symlink_at_socket_dir_is_refused_and_target_unchanged() {
@@ -373,6 +380,7 @@ fn symlink_at_socket_dir_is_refused_and_target_unchanged() {
     );
 }
 
+// WO-147@v1: a regular file at the socket dir is refused, never deleted.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn regular_file_at_socket_dir_is_not_deleted() {
@@ -393,6 +401,7 @@ fn regular_file_at_socket_dir_is_not_deleted() {
     );
 }
 
+// WO-147@v1: the bound node is a 0600 socket owned by the invoking user.
 #[test]
 #[ignore = "requires Linux + root for fanotify"]
 fn node_is_0600_socket_owned_by_invoking_user() {

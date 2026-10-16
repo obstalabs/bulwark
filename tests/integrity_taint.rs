@@ -33,6 +33,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// and return its combined stderr (where taint notices and receipts are
 /// printed). The supervised command is trivial — taint evaluation happens at
 /// startup, before the gate forks, so it does not matter what the agent does.
+// WO-13@v1: run one gate with a per-test state file so the taint lifecycle is observable.
 fn run_gate(secret: &Path, state: &Path, cmd: &[&str]) -> String {
     let out = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
@@ -69,6 +70,7 @@ fn clean_restart_is_not_tainted() {
     );
 }
 
+// WO-13@v1: an unclean restart taints the next run until the operator resets it.
 #[test]
 #[ignore = "needs root (fanotify); run under sudo on Linux"]
 fn unclean_restart_taints_then_reset_clears() {
@@ -125,6 +127,7 @@ fn unclean_restart_taints_then_reset_clears() {
     );
 }
 
+// WO-13@v1: a protected path that resolves to a different inode taints as object drift.
 #[test]
 #[ignore = "needs root (fanotify); run under sudo on Linux"]
 fn object_identity_drift_taints() {
@@ -161,6 +164,7 @@ fn object_identity_drift_taints() {
     );
 }
 
+// WO-13@v1: a taint writes an audit receipt with source "integrity".
 #[test]
 #[ignore = "needs root (fanotify); run under sudo on Linux"]
 fn taint_receipt_is_recorded() {
