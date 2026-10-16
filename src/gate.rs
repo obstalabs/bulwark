@@ -32,6 +32,7 @@ const ANCESTRY_MAX_DEPTH: usize = 16;
 /// How the gate decides. Deny-list is the interactive default ("protect these,
 /// ask about them"); allow-list is the non-interactive CI mode ("allow only
 /// these, deny everything else").
+// WO-154@v1: separate interactive consent from the permission-event loop.
 pub enum GateMode<'a> {
     /// Deny-list: a protected inode opened by the tree is referred to consent.
     DenyList { protected: &'a ProtectedSet },
@@ -73,12 +74,14 @@ const SWITCH_NO_PDEATHSIG: &str = "BULWARK_TEST_NO_PDEATHSIG";
 /// gated like its constants; the call sites use `#[cfg]` to hard-code the
 /// enabled answer when the feature is absent.
 #[cfg(feature = "fault-injection")]
+// WO-155@v1: isolate reaping-layer fault switches to test-only builds.
 fn test_layer_disabled(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
 
 /// Result of a supervised run: the child's exit code plus the deny-forever
 /// paths the operator chose this session (for the caller to persist).
+// WO-154@v1: return persisted consent outcomes with the supervised exit status.
 pub struct RunOutcome {
     pub exit_code: i32,
     pub deny_forever_paths: Vec<String>,
@@ -110,10 +113,12 @@ pub(crate) fn shutdown_requested() -> bool {
 /// timer ever releasing enforcement.
 pub(crate) static DRAINING: AtomicBool = AtomicBool::new(false);
 
+// WO-155@v1: let every enforcement path observe teardown synchronously.
 pub(crate) fn draining() -> bool {
     DRAINING.load(Ordering::SeqCst)
 }
 
+// WO-155@v1: switch all protected opens to fail-closed teardown handling.
 fn begin_draining() {
     DRAINING.store(true, Ordering::SeqCst);
 }
@@ -128,6 +133,7 @@ static TEST_PANIC: AtomicBool = AtomicBool::new(false);
 /// WO-155@v1 (fault-injection): async-signal-safe; the event loop does the actual
 /// panic, where unwinding is safe.
 #[cfg(feature = "fault-injection")]
+// WO-155@v1: exercise panic teardown without adding a production trigger.
 extern "C" fn on_test_panic(_sig: libc::c_int) {
     TEST_PANIC.store(true, Ordering::SeqCst);
 }
@@ -160,6 +166,7 @@ extern "C" fn on_shutdown_signal(_sig: libc::c_int) {
 
 /// Install handlers for the trappable termination signals so the event loop can
 /// fail closed on a graceful stop.
+// WO-155@v1: convert graceful termination into enforced tree teardown.
 fn install_shutdown_handlers() {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = on_shutdown_signal as extern "C" fn(libc::c_int) as usize;
@@ -188,12 +195,14 @@ fn install_shutdown_handlers() {
 /// The gate's consent dependency: given a request for a protected open, return
 /// a verdict and how it was reached. Implemented by `consent::CachingProvider`
 /// (wrapped in `main`) so the gate stays agnostic to the transport.
+// WO-154@v1: define the worker-owned consent contract used off the event loop.
 pub trait ConsentDecider {
     fn decide(&mut self, req: &ConsentRequest) -> (Verdict, Source);
 
     /// Decide with a caller-chosen deadline (shorter than the provider's
     /// configured one), so a request that sat in the consent queue is bounded to
     /// what remains of its own consent window. Default: `decide`.
+    // WO-154@v1: preserve the original absolute deadline after queueing.
     fn decide_deadline(&mut self, req: &ConsentRequest, _deadline: Duration) -> (Verdict, Source) {
         self.decide(req)
     }
@@ -203,17 +212,20 @@ pub trait ConsentDecider {
     /// the tree by the same reparent-proof primitive the gate uses — not just by
     /// ancestry, which a double-fork()'d orphan sheds. Default: no-op (modes with
     /// no off-band channel, or where no cgroup scope exists).
+    // WO-71@v1: authenticate consent against the gate's cgroup membership boundary.
     fn bind_scope(&mut self, _scope_rel: Option<&str>) {}
 
     /// WO-147/154@v1: attach the gate's log sink so this decider's diagnostics
     /// (e.g. a refused off-band peer) go through the bounded queue instead of a
     /// synchronous stderr write that could stall the consent worker. Default:
     /// no-op (the static-deny floor, and providers with no peer diagnostics).
+    // WO-154@v1: route provider diagnostics through the asynchronous log sink.
     fn attach_log(&mut self, _sink: crate::receipt::LogSink) {}
 
     /// Paths the operator denied forever this session, for the caller to persist
     /// as protected globs. Default: empty (providers without a standing-deny
     /// cache). `run` returns the worker's result so the caller can persist them.
+    // WO-154@v1: return standing denials after the consent worker drains.
     fn deny_forever_paths(&self) -> Vec<String> {
         Vec::new()
     }
@@ -226,6 +238,7 @@ pub trait ConsentDecider {
 /// mount). The caller builds both — from explicit `--protect` paths or from a
 /// policy profile — keeping the gate agnostic to policy. Returns the child's
 /// exit code.
+// WO-155@v1: keep enforcement active until every supervised process is reaped.
 pub fn run(
     mode: GateMode,
     consent: Option<Box<dyn ConsentDecider + Send>>,
@@ -447,6 +460,7 @@ struct FanFd {
 }
 
 impl FanFd {
+    // WO-66@v1: prevent bounded fanotify queue overflow from releasing reads.
     fn init() -> Result<Self> {
         // FAN_CLASS_CONTENT: permission events on content access.
         // O_RDONLY|O_LARGEFILE: how the event fds are opened.
@@ -529,6 +543,7 @@ fn inode_of_fd(fd: RawFd) -> Option<(InodeKey, String)> {
 /// Write a `fanotify_response` to the gate's fanotify fd. This is a write to
 /// the fanotify group fd — the kernel queues the response, it never blocks on an
 /// external reader — so it may stay on both the loop and the consent worker.
+// WO-154@v1: answer held opens without introducing an external blocking sink.
 fn write_response(fan_fd: RawFd, event_fd: RawFd, allow: bool) -> std::io::Result<()> {
     let resp = libc::fanotify_response {
         fd: event_fd,
@@ -554,6 +569,7 @@ fn write_response(fan_fd: RawFd, event_fd: RawFd, allow: bool) -> std::io::Resul
 
 /// Reply to a permission event from the loop. The failure warning is queued
 /// off-loop, so even a broken response path cannot block the loop on output.
+// WO-154@v1: queue response failures rather than writing synchronously.
 fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool, log: &mut ReceiptLog) {
     if let Err(e) = write_response(fan_fd, event_fd, allow) {
         log.warn(&format!("failed to write fanotify response: {e}"));
@@ -828,6 +844,7 @@ fn reap_tree(scope: &Option<crate::cgroup::CgroupScope>, child: libc::pid_t) {
 /// deny it, so no held read is released as allowed when we exit. Returns the
 /// number of events denied. Best-effort and non-blocking: we drain what the
 /// kernel has queued right now.
+// WO-155@v1: deny every queued permission event before the gate closes.
 fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
     let mut denied = 0usize;
     loop {
@@ -888,6 +905,7 @@ fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
 }
 
 /// Decode and answer all events in a read buffer.
+// WO-154@v1: hand protected opens to consent without blocking unrelated events.
 fn handle_events(
     fan: &FanFd,
     bytes: &[u8],
@@ -936,6 +954,7 @@ fn handle_events(
 /// identified is DENIED, never allowed. Membership and inode-resolution ordering
 /// live in `decide`; this captures only the in-tree fstat-fail ruling.
 #[derive(Debug, PartialEq, Eq)]
+// WO-70@v1: represent failed in-tree inode resolution as an explicit denial.
 enum InTreeOpen {
     /// Inode resolved — hand to the gate mode for the real allow/deny ruling.
     Judge,
@@ -943,6 +962,7 @@ enum InTreeOpen {
     DenyUnknownInode,
 }
 
+// WO-70@v1: fail closed when an in-tree event fd cannot be identified.
 fn in_tree_open(inode_resolved: bool) -> InTreeOpen {
     if inode_resolved {
         InTreeOpen::Judge
@@ -960,6 +980,7 @@ fn in_tree_open(inode_resolved: bool) -> InTreeOpen {
 /// over an off-band channel the agent has no descriptor on. Opens that are not
 /// protected, or come from outside the supervised tree, are allowed without
 /// asking. The receipt records the verdict and how it was reached.
+// WO-70@v1: establish tree membership before resolving the event inode.
 fn decide(
     fan: &FanFd,
     meta: &libc::fanotify_event_metadata,
@@ -1063,6 +1084,7 @@ fn decide(
 /// consent worker; everything else is allowed inline. Returns `true` when the
 /// event was deferred (the worker owns and will close the event fd).
 #[allow(clippy::too_many_arguments)]
+// WO-154@v1: defer protected deny-list opens to the consent worker.
 fn decide_denylist(
     fan: &FanFd,
     meta: &libc::fanotify_event_metadata,
@@ -1224,6 +1246,7 @@ pub struct WorkerCreds {
 ///
 /// # Safety
 /// Must be called in the child between `fork()` and `execvp()`.
+// WO-67@v1: make the worker credential drop irreversible across later execs.
 unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     // No-new-privs first, while still privileged: makes the uid drop irreversible
     // by ignoring setuid/setgid bits on all future execs in this process tree.
@@ -1255,6 +1278,7 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
 /// Fork and exec the command, returning the child pid. When `worker` is `Some`,
 /// the child drops to those credentials before exec (the supervisor parent stays
 /// root). A failed drop exits the child 126 — never execs the agent half-dropped.
+// WO-59@v1: place the child in its inherited membership scope before exec.
 fn spawn(
     command: &[String],
     worker: Option<WorkerCreds>,
@@ -1338,7 +1362,9 @@ fn spawn(
 /// byte, and only the supervisor calls that AFTER `reap_tree` has proven the
 /// scope empty.
 struct WatcherGuard(RawFd);
+// WO-155@v1: make every unreleased watcher guard trigger tree reaping.
 impl Drop for WatcherGuard {
+    // WO-155@v1: trigger reaping when teardown unwinds before proven release.
     fn drop(&mut self) {
         // Close only: EOF => the watcher reaps. No graceful byte — that is
         // reserved for release_proven_empty, and must never fire on an unwinding
@@ -1349,12 +1375,14 @@ impl Drop for WatcherGuard {
     }
 }
 
+// WO-155@v1: release the watcher only after positive empty-tree proof.
 impl WatcherGuard {
     /// Release the watcher WITH positive proof: write the graceful byte (the
     /// watcher reads `1` and skips reaping — the scope is already gone), then
     /// close. Call ONLY after `reap_tree` has proven the scope empty, on the
     /// graceful path and the event-loop error path. Any other drop (an early
     /// return or a panic) closes without the byte, so the watcher reaps instead.
+    // WO-155@v1: distinguish proven graceful release from crash-triggered EOF.
     fn release_proven_empty(mut self) {
         let fd = self.0;
         self.0 = -1; // Drop must not double-close.
@@ -1537,6 +1565,7 @@ fn spawn_watcher(scope: Option<&crate::cgroup::CgroupScope>) -> Result<Option<Wa
 }
 
 /// Open a cgroup trigger file for writing (best-effort: -1 when absent).
+// WO-155@v1: open watcher trigger fds before the post-fork raw-libc path.
 fn open_cgroup_writer(path: &Path) -> RawFd {
     use std::os::unix::ffi::OsStrExt;
     let c = match CString::new(path.as_os_str().as_bytes()) {
@@ -1547,6 +1576,7 @@ fn open_cgroup_writer(path: &Path) -> RawFd {
 }
 
 /// Open a cgroup status file for reading (best-effort: -1 when absent).
+// WO-155@v1: open status fds before the watcher forks.
 fn open_cgroup_reader(path: &Path) -> RawFd {
     use std::os::unix::ffi::OsStrExt;
     let c = match CString::new(path.as_os_str().as_bytes()) {
@@ -1576,6 +1606,7 @@ const WATCHER_RETRY: libc::timespec = libc::timespec {
 /// read before fork and passed in by value — the post-fork body takes no env
 /// reads, and bundling them keeps the argument list to the four fds.
 #[derive(Clone, Copy)]
+// WO-155@v1: carry deterministic watcher faults without post-fork environment reads.
 struct WatcherFaults {
     kill_write_fails: bool,
     events_read_failures: u32,
@@ -1583,6 +1614,7 @@ struct WatcherFaults {
     events_populated_for: u32,
 }
 
+// WO-155@v1: hold enforcement until the watcher proves the scope empty.
 unsafe fn watcher_reap(
     kill_fd: RawFd,
     freeze_fd: RawFd,
@@ -1713,6 +1745,7 @@ unsafe fn watcher_reap(
 }
 
 /// Does `events` contain the literal byte sequence "populated 0"? No allocation.
+// WO-155@v1: recognize only positive kernel evidence that the scope is empty.
 fn populated_zero(events: &[u8]) -> bool {
     let pat = b"populated 0";
     let mut i = 0;
@@ -1730,6 +1763,7 @@ fn populated_zero(events: &[u8]) -> bool {
 /// provably reaped — the watcher may exit instead of re-reading a deleted scope's
 /// fds forever. Raw-libc and async-signal-safe (post-fork). Only meaningful
 /// right after a real (non-injected) libc descriptor op.
+// WO-155@v1: treat a kernel-removed cgroup as proof that no member remains.
 unsafe fn scope_removed() -> bool {
     let e = *libc::__errno_location();
     e == libc::ENODEV || e == libc::ENOENT
@@ -1755,6 +1789,7 @@ fn try_wait(child: libc::pid_t) -> Result<Option<i32>> {
 }
 
 #[cfg(test)]
+// WO-70@v1: pin fail-closed handling for unresolved in-tree event inodes.
 mod tests {
     use super::*;
 
@@ -1763,6 +1798,7 @@ mod tests {
     /// asserts the disposition is now DenyUnknownInode, so reverting the fix
     /// turns this red.
     #[test]
+    // WO-70@v1: reject an in-tree open whose event inode is unknown.
     fn in_tree_open_with_unresolved_inode_fails_closed() {
         assert_eq!(in_tree_open(false), InTreeOpen::DenyUnknownInode);
     }
@@ -1770,6 +1806,7 @@ mod tests {
     /// Control: an in-tree open with a resolved inode is still judged by the
     /// gate mode (the fail-closed branch does not swallow normal opens).
     #[test]
+    // WO-70@v1: continue normal policy evaluation when the inode resolves.
     fn in_tree_open_with_resolved_inode_is_judged() {
         assert_eq!(in_tree_open(true), InTreeOpen::Judge);
     }

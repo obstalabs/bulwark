@@ -631,6 +631,7 @@ impl SocketProvider {
     /// the double-fork()'d orphan that reparented to init still carries the
     /// scope. Where no scope is bound (macOS, v1 host) ancestry is the only
     /// check — a documented residual for those hosts.
+    // WO-71@v1: refuse consent from every process in the supervised scope.
     fn peer_in_tree(&self, pid: i32) -> bool {
         #[cfg(target_os = "linux")]
         if let Some(rel) = &self.scope_rel {
@@ -654,10 +655,12 @@ impl SocketProvider {
     /// process has exited — but we will not *trust* a verdict from a process we
     /// can no longer attribute.
     #[cfg(target_os = "linux")]
+    // WO-80@v1: accept verdicts only from a peer still attributable as live.
     fn peer_is_live(pid: i32) -> bool {
         pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
     }
     #[cfg(target_os = "macos")]
+    // WO-80@v1: apply the same live-peer requirement on macOS.
     fn peer_is_live(pid: i32) -> bool {
         // kill(pid, 0) succeeds iff the process exists and we may signal it.
         pid > 0 && unsafe { libc::kill(pid, 0) } == 0
@@ -666,6 +669,7 @@ impl SocketProvider {
     /// Queue a diagnostic through the gate's log sink. A no-op before the sink is
     /// attached (and on the socket unit tests, which bind without a gate behind
     /// them) — the refusal is enforced regardless; this is observability only.
+    // WO-154@v1: keep consent diagnostics off the enforcement loop's stderr path.
     fn warn(&self, line: &str) {
         if let Some(sink) = &self.sink {
             sink.warn(line);
@@ -676,6 +680,7 @@ impl SocketProvider {
     /// peer inside the supervised tree. `deadline` is the request's absolute
     /// cut-off (arrival + consent timeout), shared with the write/read phases, so
     /// a queued request is bounded to what remains of its own consent window.
+    // WO-154@v1: bound operator acceptance by the request's absolute deadline.
     fn accept_operator_for(&self, deadline: std::time::Instant) -> Result<Option<UnixStream>> {
         let lfd = self.listener.as_raw_fd();
         loop {
@@ -752,6 +757,7 @@ impl SocketProvider {
 }
 
 impl Drop for SocketProvider {
+    // WO-147@v3: remove the consent node through its verified directory identity.
     fn drop(&mut self) {
         // Unlink the node while still holding the run lock, then release the
         // lock last — so a racing second bind cannot publish its node while this
@@ -787,19 +793,24 @@ fn remove_consent_node(node: &Path, dir_dev: libc::dev_t, dir_ino: libc::ino_t) 
     unsafe { libc::close(dirfd) };
 }
 
+// WO-154@v1: expose deadline-aware consent through the gate provider contract.
 impl ConsentProvider for SocketProvider {
+    // WO-71@v1: bind consent authentication to the supervised cgroup scope.
     fn bind_scope(&mut self, scope_rel: Option<&str>) {
         self.scope_rel = scope_rel.map(|s| s.to_string());
     }
 
+    // WO-154@v1: send provider diagnostics through the asynchronous gate log.
     fn attach_log(&mut self, sink: LogSink) {
         self.sink = Some(sink);
     }
 
+    // WO-154@v1: apply the configured consent deadline to ordinary requests.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         self.request_for(req, self.timeout)
     }
 
+    // WO-154@v1: preserve an explicit remaining deadline for queued requests.
     fn request_with_timeout(
         &mut self,
         req: &ConsentRequest,
@@ -809,12 +820,14 @@ impl ConsentProvider for SocketProvider {
     }
 }
 
+// WO-154@v1: keep consent I/O bounded independently of fanotify handling.
 impl SocketProvider {
     /// Answer one request. The accept, write, and read phases all share one
     /// absolute deadline (arrival + `timeout`), enforced by `poll()` before every
     /// syscall on the non-blocking stream — so a peer that stalls, trickles bytes
     /// one at a time, or overflows the verdict line is denied at (or before) the
     /// deadline, never blocked past it.
+    // WO-154@v1: share one absolute deadline across accept, write, and read.
     fn request_for(&mut self, req: &ConsentRequest, timeout: Duration) -> (Verdict, Source) {
         // WO-147/154@v1: ONE absolute deadline per request (arrival + timeout),
         // shared by accept, write and read and never reset per phase.
@@ -887,6 +900,7 @@ impl SocketProvider {
 /// noticed promptly) but the slices LOOP until the deadline — a slice expiring is
 /// not a deny, so an operator who answers at, say, 1.5 s of a 30 s window is
 /// still heard.
+// WO-154@v1: poll in bounded slices without extending the absolute deadline.
 fn poll_ready(fd: RawFd, events: libc::c_short, deadline: std::time::Instant) -> bool {
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1054,6 +1068,7 @@ mod tests {
     // of a directory the process owns but claim a different owner: the fstat is
     // of a directory not owned by that uid, so the verified-open path refuses.
     #[test]
+    // WO-147@v3: reject a directory fd whose ownership does not match the claim.
     fn verified_dir_fd_refuses_a_dir_not_owned_by_the_claimed_uid() {
         let base = std::path::PathBuf::from(format!(
             "/tmp/bulwark-verified-{}-{}",
@@ -1525,6 +1540,7 @@ mod tests {
     // wait past that deadline (plus scheduling slack) — under the old per-phase
     // timeouts the reply got a fresh full window and this overshot ~2x.
     #[test]
+    // WO-154@v1: prevent a late connection from resetting the consent timeout.
     fn a_late_peer_cannot_stretch_the_consent_deadline() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixStream;
@@ -1583,6 +1599,7 @@ mod tests {
     // read, so `remaining == 0` denies instead of a per-syscall timeout re-arming
     // on each trickled byte.
     #[test]
+    // WO-154@v1: cut off a peer that trickles an incomplete verdict.
     fn a_trickling_peer_cannot_hold_the_consent_deadline_open() {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
@@ -1633,6 +1650,7 @@ mod tests {
     // WO-147/154@v1: when the operator's window is already spent by the accept,
     // the write/read phases must deny at once (remaining <= 0), never block.
     #[test]
+    // WO-154@v1: deny immediately when no consent window remains.
     fn a_peer_connecting_with_zero_millis_left_is_denied_without_blocking() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixStream;
@@ -1679,6 +1697,7 @@ mod tests {
     // cap) must still be heard — the read loop slices until the absolute deadline,
     // never denying on an expired 1 s slice.
     #[test]
+    // WO-154@v1: keep polling until the real deadline rather than one slice.
     fn an_operator_who_answers_past_one_second_is_still_heard() {
         use std::io::{Read as _, Write as _};
         use std::os::unix::fs::PermissionsExt;
