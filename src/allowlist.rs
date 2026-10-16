@@ -146,6 +146,8 @@ pub const RUNTIME_BASE_SET: &[&str] = &[];
 
 /// A default-deny allowlist: allow the base runtime set plus explicit grants,
 /// deny every other read by the supervised tree.
+// WO-68@v1: bind operator grants to the inode set observed at launch.
+// WO-76@v1: include inode generations so reuse cannot revive a stale grant.
 #[derive(Debug, Clone)]
 pub struct AllowList {
     /// Operator-granted globs (the paths the agent is dispatched to read).
@@ -178,6 +180,7 @@ pub struct AllowList {
 /// `None` if the filesystem does not support it (some tmpfs/overlay/network fs) —
 /// callers treat `None` as "cannot prove freshness" and fail closed for grant
 /// matching. Linux-only (the ioctl does not exist elsewhere).
+// WO-76@v1: obtain the generation used to distinguish reused inode numbers.
 #[cfg(target_os = "linux")]
 pub(crate) fn fs_generation_fd(fd: std::os::unix::io::RawFd) -> Option<u64> {
     // FS_IOC_GETVERSION writes a c_long (the generation) into the out param.
@@ -195,6 +198,7 @@ pub(crate) fn fs_generation_fd(fd: std::os::unix::io::RawFd) -> Option<u64> {
 
 /// Open `path` read-only (no symlink follow on the final component) and read its
 /// generation. Used at snapshot time, where we have a path, not an fd.
+// WO-76@v1: read a grant candidate's inode generation from a path.
 #[cfg(target_os = "linux")]
 fn fs_generation_path(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
@@ -224,20 +228,26 @@ const FS_IOC_GETVERSION: libc::c_ulong = 0x8008_7601;
 /// Generation of the file at `path` for the snapshot. Linux reads it via the
 /// ioctl; other platforms have no equivalent and return `None` (decisions there
 /// rely on the macOS ES gate's own inode model, not this snapshot).
+// WO-76@v1: preserve Linux inode-generation evidence in grant snapshots.
 #[cfg(target_os = "linux")]
 fn grant_generation(path: &Path) -> Option<u64> {
     fs_generation_path(path)
 }
+// WO-76@v1: make unsupported platforms explicit in the generation model.
 #[cfg(not(target_os = "linux"))]
 fn grant_generation(_path: &Path) -> Option<u64> {
     None
 }
 
+// WO-68@v1: enforce operator grants against their launch-time inode snapshot.
+// WO-76@v1: require the observed generation when the filesystem supplies one.
 impl AllowList {
     /// Build from operator grants, including the runtime base set. The grant
     /// inode snapshot starts empty; call [`AllowList::snapshot_grants`] once the
     /// real grant paths exist on the host (the supervised gate does this at
     /// launch). Path-only checks (`allows`, `allowed_globs`) work without it.
+    // WO-68@v1: initialize an allow-list whose grant snapshot is populated at launch.
+    // WO-76@v1: initialize generation-aware grant identities.
     pub fn new(grants: Vec<String>) -> Self {
         AllowList {
             grants,
@@ -256,6 +266,8 @@ impl AllowList {
     /// not record its target's inode, and a grant whose prefix ends in a symlink
     /// contributes nothing (grant the target's real path instead). Idempotent;
     /// call at launch before supervising.
+    // WO-68@v1: capture only the inodes actually covered by operator grants.
+    // WO-137@v1: reject symlinked grant roots and skip symlink entries.
     pub fn snapshot_grants(&mut self) {
         let grants = self.grants.clone();
         for g in &grants {
@@ -306,6 +318,8 @@ impl AllowList {
 
     /// Walk `path` (a concrete grant prefix), recording the inode of every entry
     /// whose path matches grant glob `g`. Bounded by depth and total entries.
+    // WO-68@v1: build the bounded launch-time inode set for a grant.
+    // WO-137@v1: walk grants without following symlink entries or roots.
     fn snapshot_one(&mut self, g: &str, path: &Path, depth: usize) {
         if self.grant_inodes.len() >= MAX_GRANT_ENTRIES {
             self.grant_capped = true;
@@ -388,6 +402,7 @@ impl AllowList {
     /// foreign file into a granted path presents an inode the snapshot never
     /// recorded and is denied (the macOS analog of the Linux grant inode gate).
     /// Requires [`AllowList::snapshot_grants`] to have run (the launch path does).
+    // WO-72@v1: export snapshotted grant identities to the macOS edge.
     #[cfg(target_os = "macos")]
     pub fn grant_inode_keys(&self) -> impl Iterator<Item = InodeKey> + '_ {
         // macOS keys on inode only (no FS_IOC_GETVERSION there); drop the
@@ -409,6 +424,7 @@ impl AllowList {
     /// glob. Retained for grant/base-set listing and policy preview; the live
     /// gate decides with [`AllowList::allows_open`], which also gates grants on
     /// inode identity.
+    // WO-41@v1: evaluate the default-deny path policy without an open-file identity.
     #[allow(dead_code)]
     pub fn allows(&self, path: &str) -> bool {
         if self.include_base && RUNTIME_BASE_SET.iter().any(|g| glob::matches(g, path)) {
@@ -442,6 +458,8 @@ impl AllowList {
     /// number is reused by a foreign file is denied (the kernel bumped the
     /// generation). If the snapshot entry has a generation but the opened file's
     /// is unreadable, the match fails CLOSED.
+    // WO-68@v1: admit grant paths only when the opened inode was snapshotted.
+    // WO-76@v1: include the opened generation in grant identity decisions.
     pub fn allows_open(&self, path: &str, key: &InodeKey, opened_gen: Option<u64>) -> bool {
         if self.include_base && RUNTIME_BASE_SET.iter().any(|g| glob::matches(g, path)) {
             return true;
@@ -454,6 +472,8 @@ impl AllowList {
 
     /// Test-only: inject a snapshotted grant inode (with optional generation)
     /// without touching the filesystem, for decision-logic unit tests.
+    // WO-68@v1: expose an inode injection seam for allow-list decision tests.
+    // WO-76@v1: let decision tests cover generation-aware identities.
     #[cfg(test)]
     pub fn insert_grant_inode_for_test(&mut self, key: InodeKey, gen_val: Option<u64>) {
         self.grant_inodes.insert((key, gen_val));
@@ -465,6 +485,7 @@ impl AllowList {
 /// own prefix, so `--allow /etc/foo.conf` snapshots exactly that file rather
 /// than all of `/etc`. `/var/log/app/**` and `/var/log/app/*.log` both yield
 /// `/var/log/app`.
+// WO-68@v1: derive the bounded root used to snapshot a grant glob.
 fn concrete_prefix(g: &str) -> &str {
     match g.find(['*', '?']) {
         None => g,
@@ -486,6 +507,7 @@ fn concrete_prefix(g: &str) -> &str {
 /// across a symlink before the check ever sees it. Intermediate components are
 /// left alone: a deeper grant under macOS's `/tmp -> /private/tmp` must still
 /// work, only the final component decides. Nothing is touched on disk.
+// WO-137@v1: normalize the final prefix component before the symlink check.
 fn prefix_anchor(prefix: &str) -> Option<std::path::PathBuf> {
     use std::path::Component;
     let mut anchor = std::path::PathBuf::new();
@@ -504,6 +526,7 @@ fn prefix_anchor(prefix: &str) -> Option<std::path::PathBuf> {
     Some(anchor)
 }
 
+// WO-41@v1: exercise the default-deny allow-list policy and runtime floor.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +674,9 @@ mod tests {
     }
 }
 
+// WO-68@v1: prove launch-time inode snapshots reject post-launch aliases.
+// WO-76@v1: prove grant decisions include inode generation where available.
+// WO-137@v1: prove grant snapshots do not follow symlinks.
 #[cfg(test)]
 mod inode_tests {
     use super::*;
@@ -660,15 +686,18 @@ mod inode_tests {
         crate::test_scratch_dir(&format!("allow-{tag}"))
     }
 
+    // WO-68@v1: read the inode identity used by snapshot decision tests.
     fn key_of(p: &Path) -> InodeKey {
         InodeKey::of(&fs::metadata(p).unwrap())
     }
 
     /// The generation the decision path would read for `p` (mirrors the snapshot).
+    // WO-76@v1: mirror the production generation lookup in grant tests.
     fn gen_of(p: &Path) -> Option<u64> {
         grant_generation(p)
     }
 
+    // WO-68@v1: pin concrete snapshot roots for exact paths and glob patterns.
     #[test]
     fn concrete_prefix_cases() {
         assert_eq!(concrete_prefix("/var/log/app/**"), "/var/log/app");
@@ -679,6 +708,7 @@ mod inode_tests {
     }
 
     // WO-137@v1 (F1): lexical anchor for the symlink check.
+    // WO-137@v1: pin lexical anchors used by the symlink-root refusal.
     #[test]
     fn prefix_anchor_cases() {
         let p = |s: &str| prefix_anchor(s).map(|a| a.to_string_lossy().into_owned());
@@ -695,6 +725,7 @@ mod inode_tests {
     }
 
     /// A grant file present at launch is allowed by inode.
+    // WO-68@v1: prove a launch-snapshotted grant remains readable.
     #[test]
     fn snapshotted_grant_file_is_allowed() {
         let dir = scratch("present");
@@ -709,6 +740,7 @@ mod inode_tests {
     /// Negative control: a path that matches a grant glob but whose inode
     /// was NOT under the grant at launch (a hardlinked or renamed-in foreign
     /// file) is DENIED. The pre-fix path-only `allows` returned true here.
+    // WO-68@v1: prove a foreign inode cannot gain access through a grant path.
     #[test]
     fn foreign_inode_on_granted_path_is_denied() {
         let dir = scratch("foreign");
@@ -731,6 +763,7 @@ mod inode_tests {
     /// The snapshot records only inodes whose path matches the grant glob, NOT
     /// every file under the prefix directory — so a non-granted sibling cannot
     /// be reached by hardlinking it to a granted name.
+    // WO-68@v1: prove the snapshot excludes non-matching files under a grant root.
     #[test]
     fn non_matching_sibling_is_not_snapshotted() {
         let dir = scratch("sibling");
@@ -813,6 +846,7 @@ mod inode_tests {
     // tree was snapshotted through the back door. A `..`-terminated prefix is
     // refused outright (it can cross a symlink lexically), while `real/./**`
     // must keep snapshotting exactly what `real/**` does.
+    // WO-137@v1: prove alternate spellings cannot bypass symlink-root refusal.
     #[test]
     fn symlink_prefix_check_sees_through_trailing_dot_slash_and_dotdot() {
         let real = scratch("norm-real");
@@ -866,6 +900,7 @@ mod inode_tests {
 
     /// Base-set paths are allowed by path regardless of inode (documented read
     /// floor, not inode-snapshotted).
+    // WO-68@v1: distinguish the documented runtime floor from inode-bound grants.
     #[test]
     fn base_set_path_allowed_regardless_of_inode() {
         let a = AllowList::new(vec![]);
@@ -877,6 +912,7 @@ mod inode_tests {
     }
 
     /// A path matching no rule is denied whatever its inode.
+    // WO-68@v1: prove an injected grant identity cannot authorize another path.
     #[test]
     fn ungranted_path_denied() {
         let mut a = AllowList::new(vec!["/data/**".into()]).without_base();

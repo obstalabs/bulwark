@@ -20,6 +20,7 @@ struct RemoteFixture {
     login_uid: String,
 }
 
+// WO-110@v4: centralize the isolated remote-consent CLI fixture lifecycle.
 impl RemoteFixture {
     // WO-110@v4: only the fixture SSH executable may receive the CLI's remote calls.
     fn new() -> Self {
@@ -132,6 +133,7 @@ printf '%s\n' fixture-agent-executed
         fixture
     }
 
+    // WO-110@v4: install only fixture executables inside the isolated transport path.
     fn script(&self, name: &str, contents: &str) {
         let path = self.root.join("bin").join(name);
         fs::write(&path, contents).unwrap();
@@ -162,6 +164,7 @@ printf '%s\n' fixture-agent-executed
         cmd.output().expect("run real bulwark ssh")
     }
 
+    // WO-110@v4: read named fixture evidence for launch and cleanup assertions.
     fn contents(&self, name: &str) -> String {
         fs::read_to_string(self.root.join(name)).unwrap_or_default()
     }
@@ -208,7 +211,9 @@ printf '%s\n' fixture-agent-executed
     }
 }
 
+// WO-110@v4: remove every per-test remote-consent fixture artifact.
 impl Drop for RemoteFixture {
+    // WO-110@v4: make cleanup unconditional on assertion success.
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
