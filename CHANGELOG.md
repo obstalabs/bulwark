@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+<!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
+- `macos-es-proof/package-release.sh`: the macOS release packaging steps for maintainers
+  (bundle the signed gate app into the darwin tarballs, re-run both hardware seals on the
+  exact pair that ships, build signed + notarized + stapled `.pkg` files, verify, upload),
+  until CI signs macOS releases.
+
 ## [0.9.3] - 2026-10-15
 
 ### Security
