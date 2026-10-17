@@ -8,6 +8,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CHECK="${CHECK:-$SCRIPT_DIR/check-seal-ack.sh}"
 # WO-175@v1: exercise the base-copy runner while keeping its red substitute injectable.
 RUNNER="${RUNNER:-$SCRIPT_DIR/run-seal-ack.sh}"
+# WO-175@v1: count weakened-head fixtures the runner wrongly accepts.
 RUNNER_FAILURES=0
 # WO-140@v1: keep fixture repositories outside the source tree.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bulwark-seal-ack-test.XXXXXX")

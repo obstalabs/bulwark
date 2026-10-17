@@ -32,4 +32,5 @@ else
   git show "HEAD:scripts/boundary-paths.txt" > "$boundary_paths"
 fi
 
+# WO-175@v1: run the selected checker against the trusted boundary list.
 BOUNDARY_PATHS="$boundary_paths" bash "$check" "$base_ref" HEAD

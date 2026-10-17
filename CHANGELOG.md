@@ -30,7 +30,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-176@v1: failing non-root integrity checks must retain their Cargo diagnostics. -->
 - CI prints Cargo output before failing the non-root integrity-state check.
 <!-- WO-175@v1: pull requests must not supply the seal control that judges them. -->
-- CI evaluates hardware-seal acknowledgement with the base branch's control files.
+- CI evaluates hardware-seal acknowledgement with the base branch's control files,
+  every step of which carries its work-order citation.
 <!-- WO-153@v1: reserve remote run paths before placing HiveBus material. -->
 - Remote HiveBus dispatches create each run and key directory exactly once instead of
   colliding with the consent lane's anti-squatting guard; the remote integration tests
