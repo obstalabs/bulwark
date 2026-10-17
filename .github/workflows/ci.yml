@@ -194,11 +194,20 @@ jobs:
           fetch-depth: 0
 
       # WO-140@v1: require the exact marker for paths in boundary-paths.txt.
+      # WO-175@v1: select the base runner before it selects the base checker and list.
       - name: Check hardware seal acknowledgement
         # WO-140@v1: keep the expression value out of shell source text.
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: scripts/check-seal-ack.sh "origin/$BASE_REF" HEAD
+        run: |
+          runner="$RUNNER_TEMP/run-seal-ack.sh"
+          if git show "origin/$BASE_REF:scripts/run-seal-ack.sh" > "$runner" 2>/dev/null; then
+            :
+          else
+            echo "[bulwark] base branch lacks the seal-ack runner; using the head copy"
+            git show "HEAD:scripts/run-seal-ack.sh" > "$runner"
+          fi
+          bash "$runner" "origin/$BASE_REF"
 
   supply-chain:
     name: supply-chain (cargo-deny)

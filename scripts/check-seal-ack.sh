@@ -4,7 +4,8 @@ set -euo pipefail
 # WO-140@v1: enforce one acknowledgement when a PR crosses the kernel boundary.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # WO-140@v1: keep CI and local checks on the same boundary definition.
-BOUNDARY_PATHS="$SCRIPT_DIR/boundary-paths.txt"
+# WO-175@v1: let the base-branch runner supply the trusted boundary definition.
+BOUNDARY_PATHS="${BOUNDARY_PATHS:-$SCRIPT_DIR/boundary-paths.txt}"
 
 # WO-140@v1: make malformed invocations fail before inspecting commit messages.
 die() {

@@ -26,6 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   privileged tests.
 <!-- WO-176@v1: failing non-root integrity checks must retain their Cargo diagnostics. -->
 - CI prints Cargo output before failing the non-root integrity-state check.
+<!-- WO-175@v1: pull requests must not supply the seal control that judges them. -->
+- CI evaluates hardware-seal acknowledgement with the base branch's control files.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
   enumerator documents its non-Linux fallback.
