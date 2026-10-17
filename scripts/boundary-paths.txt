@@ -1,0 +1,19 @@
+# WO-140@v1: one source of truth for changes that require hardware-seal acknowledgement.
+src/allowlist.rs
+src/protect.rs
+src/gate.rs
+src/gate_macos.rs
+src/hardened.rs
+src/glob.rs
+# WO-140@v1: policy expansion and protect/allow lists determine the run boundary.
+src/policy.rs
+macos-es-proof/es_gate.swift
+macos-es-proof/*.entitlements
+macos-es-proof/verify-gate.sh
+macos-es-proof/verify-allowlist-gate.sh
+# WO-140@v1: the shared packaging script holds the release upload gate.
+macos-es-proof/package-release.sh
+# WO-140@v1: weakening the boundary definition must require acknowledgement.
+scripts/boundary-paths.txt
+# WO-140@v1: weakening the acknowledgement check must require acknowledgement.
+scripts/check-seal-ack.sh

@@ -49,6 +49,8 @@ use crate::consent::{ConsentProvider, ConsentRequest, Source, Verdict};
 use crate::protect::InodeKey;
 
 // WO-9@v1: scope remote grants to object, identity, session, and policy state.
+// WO-173@v2: Linux-only: fanotify remote grants bind opened inode identity.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// A scoped allow grant. The key is deliberately NOT a bare inode: it binds the
 /// inode to the requester identity, the session, and the policy epoch, so a
 /// grant cannot over-authorize a different process or a stale policy.
@@ -68,6 +70,8 @@ pub struct GrantKey {
 // WO-9@v1: encode and recover grants carried across the remote control lanes.
 impl GrantKey {
     // WO-9@v1: bind each grant to the requesting identity and supervised run.
+    // WO-173@v2: Linux-only: fanotify remote grants bind requester identity.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Build a grant key from an inode + the scope of the current request.
     pub fn scoped(key: InodeKey, uid: u32, session_id: u64, policy_epoch: u64) -> Self {
         GrantKey {
@@ -80,6 +84,8 @@ impl GrantKey {
     }
 
     // WO-9@v1: serialize scoped grants for the remote verdict lane.
+    // WO-173@v2: Linux-only: serialize fanotify grants across remote lanes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Wire form for the verdict lane: `<dev>:<ino>:<uid>:<session>:<epoch>`.
     pub fn wire(&self) -> String {
         format!(
@@ -89,6 +95,8 @@ impl GrantKey {
     }
 
     // WO-9@v1: reject malformed scoped grants received from the operator lane.
+    // WO-173@v2: Linux-only: parse fanotify grants returned over remote lanes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Parse the wire form.
     pub fn parse_wire(s: &str) -> Option<Self> {
         let mut p = s.split(':');
@@ -108,6 +116,8 @@ impl GrantKey {
 }
 
 // WO-9@v1: share session grants between gate decisions and verdict intake.
+// WO-173@v2: Linux-only: fanotify remote decisions share session grants.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Scoped grants shared between the gate (reader) and the verdict-intake thread
 /// (writer). The gate consults it on the prompt lane; the operator's replies,
 /// arriving asynchronously on the verdict lane, populate it.
@@ -121,16 +131,22 @@ pub struct RemoteCache {
 // WO-9@v1: expose synchronized operations over the remote session grant set.
 impl RemoteCache {
     // WO-9@v1: initialize an empty grant cache for each remote gate session.
+    // WO-173@v2: Linux-only: initialize fanotify remote session grants.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }
 
     // WO-9@v1: record an operator-approved scoped grant for later opens.
+    // WO-173@v2: Linux-only: cache fanotify remote grants for later opens.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn allow(&self, key: GrantKey) {
         self.allow_session.lock().unwrap().insert(key);
     }
 
     // WO-9@v1: decide remote opens only from an exact scoped grant match.
+    // WO-173@v2: Linux-only: match fanotify remote opens to scoped grants.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_allowed(&self, key: &GrantKey) -> bool {
         self.allow_session.lock().unwrap().contains(key)
     }
@@ -144,6 +160,8 @@ impl RemoteCache {
 }
 
 // WO-9@v1: bind a grant to the kernel identity that requested the remote open.
+// WO-173@v2: Linux-only: read fanotify requester identity from procfs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Read the uid that owns a pid, from `/proc/<pid>/status` (`Uid:` line). Used
 /// to scope a grant to the requester identity. Falls back to `u32::MAX` (an
 /// identity nothing matches) on failure, so a grant is never mis-scoped to uid
@@ -165,6 +183,8 @@ fn uid_of_pid(pid: i32) -> u32 {
 }
 
 // WO-9@v1: deny uncached remote opens immediately while emitting operator prompts.
+// WO-173@v2: Linux-only: fanotify remote opens emit asynchronous prompts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// The remote-side consent provider. On a protected open that is not already
 /// cached-allowed (scoped), it DENIES immediately and emits a prompt to the
 /// prompt lane. It never blocks: the kernel deadline is always met.
@@ -185,6 +205,8 @@ pub struct AsyncRemoteProvider<W: Write> {
 // WO-9@v1: construct prompts and grant keys without blocking remote decisions.
 impl<W: Write> AsyncRemoteProvider<W> {
     // WO-9@v1: bind the remote provider to one host, session, and policy epoch.
+    // WO-173@v2: Linux-only: construct the fanotify remote prompt provider.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn new(
         cache: RemoteCache,
         prompt_out: W,
@@ -202,6 +224,8 @@ impl<W: Write> AsyncRemoteProvider<W> {
     }
 
     // WO-9@v1: derive the exact authorization scope for each protected open.
+    // WO-173@v2: Linux-only: scope each fanotify remote grant to its opener.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// The scoped grant key for a request: inode + requester uid + session +
     /// policy epoch.
     fn grant_key(&self, req: &ConsentRequest) -> GrantKey {
@@ -214,6 +238,8 @@ impl<W: Write> AsyncRemoteProvider<W> {
     }
 
     // WO-9@v1: emit structured prompts without changing the immediate deny decision.
+    // WO-173@v2: Linux-only: emit fanotify remote prompts over the control lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Emit one prompt line on the prompt lane. Tab-separated, never carries
     /// file content. The `grant` field is the SCOPED key the operator echoes
     /// back to authorize — so the operator authorizes exactly this
@@ -319,6 +345,8 @@ pub fn verdict_line(verdict: Verdict, grant: &str) -> String {
 }
 
 // WO-9@v1: parse remote verdict replies without broadening their grant scope.
+// WO-173@v2: Linux-only: parse fanotify remote verdict replies.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// A verdict reply from the operator, on the verdict lane back to the remote
 /// gate. Wire form: `allow-session <dev>:<ino>:<uid>:<session>:<epoch>` — the
 /// operator echoes the exact scoped grant from the prompt, so the authorization
@@ -332,6 +360,8 @@ pub fn parse_verdict_reply(line: &str) -> Option<(Verdict, GrantKey)> {
 }
 
 // WO-9@v1: apply asynchronous allow replies to the matching remote session cache.
+// WO-173@v2: Linux-only: apply fanotify remote verdicts to the session cache.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Read operator verdict replies from `reader` (the verdict lane) and apply
 /// `allow-session` decisions to `cache`. Runs until the lane closes; intended to
 /// run on a background thread on the remote gate.

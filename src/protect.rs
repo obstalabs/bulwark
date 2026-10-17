@@ -62,6 +62,8 @@ pub struct ProtectedOrigin {
 // WO-69@v1: protect directory descendants, including files created after launch.
 pub struct ProtectedSet {
     inodes: HashSet<InodeKey>,
+    // WO-173@v2: Linux-only: fanotify protects post-launch directory descendants.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     dirs: HashSet<InodeKey>, // inodes of protected directories (for descendant matching)
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     origins: Vec<ProtectedOrigin>, // WO-24: first resolved path for each inode
@@ -180,6 +182,8 @@ impl ProtectedSet {
     /// link requires write access to the protected directory, which the dropped,
     /// unprivileged agent typically lacks for a mode-700 credential store.
     // WO-69@v1: include post-launch files through protected ancestor identities.
+    // WO-173@v2: Linux-only: fanotify evaluates protected ancestor identities.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn protects(&self, key: &InodeKey, path: &str) -> bool {
         if self.inodes.contains(key) {
             return true;
@@ -205,6 +209,8 @@ impl ProtectedSet {
     }
 
     // WO-3@v1: key the Linux permission gate to stable inode identity.
+    // WO-173@v2: Linux-only: report the fanotify protected inode count.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.inodes.len()
     }

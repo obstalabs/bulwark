@@ -2,10 +2,10 @@
 //!
 //! Linux fanotify MVP. `main` stays thin and delegates to the internal modules.
 
+// WO-173@v2: the crate-level allowance is gone; gates are per item.
 // The Linux gate exercises the full fanotify/Landlock/socket surface. Other
 // platforms compile the portable support code progressively as their gate
-// backends land, so scope the dead-code allowance away from Linux only.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// backends land, so each Linux-only item carries its own `allow(dead_code)` gate.
 
 // WO-155@v1: the `fault-injection` feature exists for DEBUG-only tests (it lets
 // a test disable a reaping layer). It must never compile into a release binary —
@@ -1805,16 +1805,17 @@ fn run_hardened(
         .with_context(|| format!("cannot exec {}", command[0]))
 }
 
-// WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
-/// Enumerate the mount points of every real filesystem from `/proc/mounts`, so
-/// allow-list mode can mark them all. Marking only `/` would miss separate
-/// mounts (tmpfs, a data volume, network shares) and silently allow reads
-/// there — fatal for a default-deny guarantee. We skip a few pseudo
-/// filesystems that cannot hold a readable on-disk secret and would only add
-/// event noise (`cgroup`, `devpts`, ...) but keep `proc`/`sysfs`/`tmpfs`/real
-/// block and network filesystems. On any error we fall back to `/` and warn —
-/// a noisy over-mark is safer than a silent gap.
-fn real_mount_points() -> Vec<PathBuf> {
+// WO-159@v1: return mount marks and diagnostics without performing platform I/O.
+struct MountMarkPlan {
+    paths: Vec<PathBuf>,
+    // WO-159@v1: carry Linux read failures to the caller without printing in the helper.
+    #[cfg(any(target_os = "linux", test))]
+    warning: Option<String>,
+}
+
+// WO-159@v1: parse Linux mount text independently from its procfs source.
+#[cfg(any(target_os = "linux", test))]
+fn parse_mount_points(raw: &str) -> Vec<PathBuf> {
     const SKIP_FSTYPES: &[&str] = &[
         "cgroup",
         "cgroup2",
@@ -1831,13 +1832,6 @@ fn real_mount_points() -> Vec<PathBuf> {
         "binfmt_misc",
         "autofs",
     ];
-    let raw = match std::fs::read_to_string("/proc/mounts") {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[bulwark] WARN cannot read /proc/mounts ({e}); marking only / — other mounts will not be gated");
-            return vec![PathBuf::from("/")];
-        }
-    };
     let mut seen = std::collections::HashSet::new();
     let mut mounts = Vec::new();
     for line in raw.lines() {
@@ -1860,11 +1854,70 @@ fn real_mount_points() -> Vec<PathBuf> {
     if mounts.is_empty() {
         mounts.push(PathBuf::from("/"));
     }
-    eprintln!(
-        "[bulwark] allow-list: marking {} mounted filesystem(s)",
-        mounts.len()
-    );
     mounts
+}
+
+// WO-159@v1: preserve Linux's warning when its mount source cannot be read.
+#[cfg(any(target_os = "linux", test))]
+fn mount_mark_plan_from_read(raw: std::io::Result<String>) -> MountMarkPlan {
+    match raw {
+        Ok(raw) => MountMarkPlan {
+            paths: parse_mount_points(&raw),
+            warning: None,
+        },
+        Err(e) => MountMarkPlan {
+            paths: vec![PathBuf::from("/")],
+            warning: Some(format!(
+                "[bulwark] WARN cannot read /proc/mounts ({e}); marking only / — other mounts will not be gated"
+            )),
+        },
+    }
+}
+
+// WO-159@v1: never invoke the Linux mount reader on non-Linux hosts.
+fn mount_mark_plan_with_reader<F>(reader: F) -> MountMarkPlan
+where
+    F: FnOnce() -> std::io::Result<String>,
+{
+    #[cfg(target_os = "linux")]
+    {
+        mount_mark_plan_from_read(reader())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _reader = reader;
+        MountMarkPlan {
+            paths: vec![PathBuf::from("/")],
+            #[cfg(test)]
+            warning: None,
+        }
+    }
+}
+
+// WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
+// WO-159@v1: avoid Linux mount reads and warnings on non-Linux gates.
+/// On Linux, enumerate the mount points of every real filesystem from `/proc/mounts`, so
+/// allow-list mode can mark them all. Marking only `/` would miss separate
+/// mounts (tmpfs, a data volume, network shares) and silently allow reads
+/// there — fatal for a default-deny guarantee. We skip a few pseudo
+/// filesystems that cannot hold a readable on-disk secret and would only add
+/// event noise (`cgroup`, `devpts`, ...) but keep `proc`/`sysfs`/`tmpfs`/real
+/// block and network filesystems. On any error we fall back to `/` and warn —
+/// a noisy over-mark is safer than a silent gap.
+/// Off Linux, this returns `/` without reading `/proc/mounts`.
+fn real_mount_points() -> Vec<PathBuf> {
+    let plan = mount_mark_plan_with_reader(|| std::fs::read_to_string("/proc/mounts"));
+    #[cfg(target_os = "linux")]
+    if let Some(warning) = &plan.warning {
+        eprintln!("{warning}");
+    } else {
+        eprintln!(
+            "[bulwark] allow-list: marking {} mounted filesystem(s)",
+            plan.paths.len()
+        );
+    }
+    plan.paths
 }
 
 // WO-8@v1: carry consent and policy inputs into one supervised run.
@@ -1882,8 +1935,14 @@ struct RunArgs<'a> {
     consent: ConsentMode,
     consent_socket: Option<PathBuf>,
     consent_timeout: u64,
+    // WO-173@v2: Linux-only: label remote prompts emitted by the fanotify gate.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     host_label: String,
+    // WO-173@v2: Linux-only: carry the fanotify gate's remote prompt lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     prompt_out: Option<PathBuf>,
+    // WO-173@v2: Linux-only: carry the fanotify gate's remote verdict lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     verdict_in: Option<PathBuf>,
     deny_all: bool,
     allow: &'a [String],
@@ -3004,6 +3063,8 @@ fn run_doctor_checks() -> Vec<DoctorCheck> {
 }
 
 // WO-164@v2: Linux enforcement needs the OS and root or CAP_SYS_ADMIN; kernel and Landlock inform.
+// WO-173@v2: Linux-only: collect fanotify and Landlock readiness checks.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
     // Linux is required — the gate is fanotify/Landlock.
     let is_linux = cfg!(target_os = "linux");
@@ -3059,6 +3120,8 @@ fn collect_linux_doctor_checks(out: &mut Vec<DoctorCheck>) {
 }
 
 // WO-164@v2: report the Linux kernel version as an informational doctor check.
+// WO-173@v2: Linux-only: read the kernel version for Linux doctor output.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Read the kernel release string via uname(2). Empty on failure or non-Linux.
 fn kernel_release() -> String {
     #[cfg(target_os = "linux")]
@@ -3079,6 +3142,8 @@ fn kernel_release() -> String {
 }
 
 // WO-164@v2: report whether this host can support hardened Landlock runs.
+// WO-173@v2: Linux-only: probe Landlock for Linux doctor output.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Probe Landlock support by asking the kernel for the current ABI version.
 /// Returns true when ABI >= 1. Non-Linux always false.
 fn landlock_available() -> bool {
@@ -3796,6 +3861,72 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             !msg2.contains("that home belongs to a different user"),
             "{msg2}"
         );
+    }
+
+    // WO-159@v1: keep non-Linux allow-list setup silent about Linux mount sources.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_allowlist_mount_probe_emits_no_proc_warning() {
+        const CHILD: &str = "BULWARK_TEST_MOUNT_WARNING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = real_mount_points();
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::non_linux_allowlist_mount_probe_emits_no_proc_warning")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "child test failed: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("cannot read /proc/mounts"),
+            "non-Linux allow-list setup emitted a Linux-only warning: {stderr}"
+        );
+    }
+
+    // WO-159@v1: prove non-Linux allow-list setup never invokes the Linux reader.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_mount_plan_does_not_read_linux_source() {
+        let plan = mount_mark_plan_with_reader(|| panic!("Linux mount reader was called"));
+        assert_eq!(plan.paths, vec![PathBuf::from("/")]);
+        assert!(plan.warning.is_none());
+    }
+
+    // WO-159@v1: preserve the Linux warning and safe root fallback on read errors.
+    #[test]
+    fn unreadable_mount_source_warns_and_falls_back_to_root() {
+        let plan = mount_mark_plan_from_read(Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fixture refused",
+        )));
+        assert_eq!(plan.paths, vec![PathBuf::from("/")]);
+        assert!(plan
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("cannot read /proc/mounts"));
+    }
+
+    // WO-159@v1: preserve every parsed real mount, including escaped spaces.
+    #[test]
+    fn parsed_mount_source_yields_every_real_mount() {
+        let raw =
+            "root / ext4 rw 0 0\ntmp /tmp tmpfs rw 0 0\nshare /mnt/team\\040data nfs rw 0 0\n";
+        let plan = mount_mark_plan_from_read(Ok(raw.to_string()));
+        assert_eq!(
+            plan.paths,
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/mnt/team data"),
+            ]
+        );
+        assert!(plan.warning.is_none());
     }
 
     // WO-164@v2: doctor marks the checks enforcement depends on as required, on both platforms.

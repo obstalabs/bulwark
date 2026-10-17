@@ -46,6 +46,26 @@ validate_reps() {
   [ "$1" -le "$MAX_REPS" ]
 }
 
+# WO-140@v1: resolve the exact executable behind a relative path or symlink chain.
+resolve_executable() {
+  local path="$1" target dir hops=0
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    target=$(readlink "$path") || return 1
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+  done
+  dir=$(cd -P "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
 # shape_verdict <stdout> <stderr-file> <receipts-file> <fixture-ino>: print the
 # first reason a shape FAILS, nothing when it is a clean static deny. A shape is
 # only a deny if the content stayed hidden, the edge did not die, no integrity or
@@ -106,7 +126,13 @@ validate_reps "$REPS" || fail "REPS must be a positive integer no greater than $
 
 cd "$(dirname "$0")" || fail "cannot enter the harness directory"
 
-BULWARK="${BULWARK:-./bulwark}"
+# WO-140@v1: record whether the exact binary was explicit or the harness default.
+if [ "${BULWARK+x}" = x ]; then
+  BULWARK_SOURCE=env
+else
+  BULWARK_SOURCE=default
+  BULWARK=./bulwark
+fi
 GATE_APP="bulwark_es_gate.app"
 GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
 GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
@@ -115,10 +141,26 @@ RECEIPT="gate-receipt.txt"
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE — run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
 
+# WO-140@v1: collect immutable receipt identity before any hardware test runs.
+BULWARK_PATH=$(resolve_executable "$BULWARK") || fail "cannot resolve bulwark binary $BULWARK"
+BULWARK="$BULWARK_PATH"
+BULWARK_VERSION=$("$BULWARK" --version) || fail "cannot read bulwark version from $BULWARK"
+BULWARK_SHA256=$(shasum -a 256 "$BULWARK" | awk '{print $1}') \
+  || fail "cannot hash bulwark binary $BULWARK"
+if [ -n "${BULWARK_SOURCE_SHA:-}" ]; then
+  HEAD_SHA="$BULWARK_SOURCE_SHA"
+else
+  HEAD_SHA=$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)
+fi
+[[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]] && SOURCE_SHA_OK=1 || SOURCE_SHA_OK=0
+echo "==> bulwark binary: $BULWARK_PATH (source=$BULWARK_SOURCE)"
+
 # --- the same bundle-sealability gate as WO-38: only the signed/notarized/
 #     stapled production bundle is closure proof. ---
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
+GATE_CDHASH=$(codesign -dvvv "$GATE_APP" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
+[ -n "$GATE_CDHASH" ] && CDHASH_OK=1 || CDHASH_OK=0
 [ "$SIGNED_ID" = "$GATE_BUNDLE_ID" ] && BUNDLE_ID_OK=1 || BUNDLE_ID_OK=0
 codesign -d --entitlements - "$GATE_APP" 2>/dev/null | grep -q endpoint-security && ENT_OK=1 || ENT_OK=0
 xcrun stapler validate "$GATE_APP" >/dev/null 2>&1 && STAPLE_OK=1 || STAPLE_OK=0
@@ -266,6 +308,13 @@ echo
   echo "# bulwark macOS ES GATE — WO-23 verification receipt"
   echo "date_utc:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:            $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
+  # WO-140@v1: bind this verdict to its executable, source and gate signature.
+  echo "bulwark_path:    $BULWARK_PATH"
+  echo "bulwark_source:  $BULWARK_SOURCE"
+  echo "bulwark_version: $BULWARK_VERSION"
+  echo "bulwark_sha256:  $BULWARK_SHA256"
+  echo "gate_cdhash:     ${GATE_CDHASH:-UNKNOWN}"
+  echo "head_sha:        ${HEAD_SHA:-UNKNOWN}"
   echo "gate_bundle_id:  ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"
   echo "bundle_sealable: $([ "${BUNDLE_VALID:-0}" = 1 ] && echo yes || echo no) (id+entitlement+staple+spctl)"
   echo "test1_deny_path:      $([ "$DENY_PATH_OK" = 1 ] && echo PASS || echo FAIL)"
@@ -278,10 +327,15 @@ echo
   echo "test6_bash_c:         $([ "$BASHC_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_sleep_exec:     $([ "$SLEEP_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_runs:           $([ "$RUNS_OK" = 1 ] && echo PASS || echo FAIL) ($SHAPE_RUNS of $((3 * REPS)) shape runs executed)"
-  if [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$DENY_PATH_OK" = 1 ] && [ "$DENY_SYM_OK" = 1 ] && \
+  if [ "$SOURCE_SHA_OK" = 1 ] && [ "$CDHASH_OK" = 1 ] && \
+     [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$DENY_PATH_OK" = 1 ] && [ "$DENY_SYM_OK" = 1 ] && \
      [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ] && \
      [ "$DIRECT_OK" = 1 ] && [ "$BASHC_OK" = 1 ] && [ "$SLEEP_OK" = 1 ] && [ "$RUNS_OK" = 1 ]; then
     echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink, and to direct cat / bash -c / sleep+exec x$REPS with static receipts), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
+  elif [ "$SOURCE_SHA_OK" != 1 ]; then
+    echo "verdict:         NOT SEALED — source SHA unknown."
+  elif [ "$CDHASH_OK" != 1 ]; then
+    echo "verdict:         NOT SEALED — gate code-signature hash unknown."
   elif [ "${BUNDLE_VALID:-0}" != 1 ]; then
     echo "verdict:         NOT SEALED — gate bundle not validated (sign/notarize/staple/spctl)."
   else

@@ -461,6 +461,8 @@ impl AllowList {
     /// is unreadable, the match fails CLOSED.
     // WO-68@v1: admit grant paths only when the opened inode was snapshotted.
     // WO-76@v1: include the opened generation in grant identity decisions.
+    // WO-173@v2: Linux-only: the fanotify gate evaluates opened grant identity.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn allows_open(&self, path: &str, key: &InodeKey, opened_gen: Option<u64>) -> bool {
         if self.include_base && RUNTIME_BASE_SET.iter().any(|g| glob::matches(g, path)) {
             return true;

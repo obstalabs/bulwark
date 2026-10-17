@@ -9,6 +9,8 @@
 use std::fs;
 
 // WO-3@v1: key the Linux permission gate to stable inode identity.
+// WO-173@v2: Linux-only: fanotify receipts render procfs ancestry nodes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// One node in an ancestry chain.
 #[derive(Debug, Clone)]
 pub struct ProcNode {
@@ -74,6 +76,8 @@ fn read_stat(_pid: i32) -> Option<(String, i32)> {
 }
 
 // WO-3@v1: key the Linux permission gate to stable inode identity.
+// WO-173@v2: Linux-only: fanotify receipts collect procfs ancestry.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Build the ancestry chain for `pid`, nearest first: `[pid, parent, ...]`,
 /// stopping at pid 1 or after `max_depth` hops.
 pub fn ancestry(pid: i32, max_depth: usize) -> Vec<ProcNode> {
@@ -94,6 +98,8 @@ pub fn ancestry(pid: i32, max_depth: usize) -> Vec<ProcNode> {
 }
 
 // WO-3@v1: key the Linux permission gate to stable inode identity.
+// WO-173@v2: Linux-only: fanotify receipts render procfs ancestry.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// Render an ancestry chain as `comm(pid) <- comm(pid) <- ...`.
 pub fn render(chain: &[ProcNode]) -> String {
     chain

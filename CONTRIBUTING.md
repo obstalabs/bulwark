@@ -21,6 +21,14 @@ the normal run. CI runs them on a Linux runner.
 
 Before opening a PR: `make fmt-check && make lint && make test` should pass.
 
+<!-- WO-140@v1: keep enforcement-boundary changes tied to reproducible seal evidence. -->
+Changes matching [`scripts/boundary-paths.txt`](scripts/boundary-paths.txt) must
+carry the exact commit-body line `Seal-required: acknowledged`; macOS seal receipts
+bind the tested binary, source commit, and signed gate, and the release upload
+refuses evidence from another build. Every defect observed in use must produce a
+reproduction and a permanent unit, integration, or seal check, plus a new boundary
+path when the defect crossed that boundary through a path the list did not cover.
+
 ## Sign your commits (DCO)
 
 We use the **Developer Certificate of Origin** — no CLA, no copyright assignment.

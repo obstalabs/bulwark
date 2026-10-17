@@ -97,12 +97,38 @@ test4_verdict() {
   [ "$denied" != 0 ] || { echo "no complete allow-list deny receipt for the foreign inode $ino"; return; }
 }
 
+# WO-140@v1: resolve the exact executable behind a relative path or symlink chain.
+resolve_executable() {
+  local path="$1" target dir hops=0
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    target=$(readlink "$path") || return 1
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+  done
+  dir=$(cd -P "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
 if [ -n "${VERIFY_ALLOWLIST_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ---- executable-only setup from here on (not run when sourced as a library) ----
 cd "$(dirname "$0")"
 
-BULWARK="${BULWARK:-./bulwark}"
+# WO-140@v1: record whether the exact binary was explicit or the harness default.
+if [ "${BULWARK+x}" = x ]; then
+  BULWARK_SOURCE=env
+else
+  BULWARK_SOURCE=default
+  BULWARK=./bulwark
+fi
 GATE_APP="bulwark_es_gate.app"
 GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
 GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
@@ -119,10 +145,26 @@ fail() { echo "!! $*"; exit 2; }
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
 [ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE - run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
 
+# WO-140@v1: collect immutable receipt identity before any hardware test runs.
+BULWARK_PATH=$(resolve_executable "$BULWARK") || fail "cannot resolve bulwark binary $BULWARK"
+BULWARK="$BULWARK_PATH"
+BULWARK_VERSION=$("$BULWARK" --version) || fail "cannot read bulwark version from $BULWARK"
+BULWARK_SHA256=$(shasum -a 256 "$BULWARK" | awk '{print $1}') \
+  || fail "cannot hash bulwark binary $BULWARK"
+if [ -n "${BULWARK_SOURCE_SHA:-}" ]; then
+  HEAD_SHA="$BULWARK_SOURCE_SHA"
+else
+  HEAD_SHA=$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)
+fi
+[[ "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]] && SOURCE_SHA_OK=1 || SOURCE_SHA_OK=0
+echo "==> bulwark binary: $BULWARK_PATH (source=$BULWARK_SOURCE)"
+
 # Same bundle-sealability gate as WO-38/WO-23: only the signed/notarized/
 # stapled production bundle is closure proof.
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
+GATE_CDHASH=$(codesign -dvvv "$GATE_APP" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
+[ -n "$GATE_CDHASH" ] && CDHASH_OK=1 || CDHASH_OK=0
 [ "$SIGNED_ID" = "$GATE_BUNDLE_ID" ] && BUNDLE_ID_OK=1 || BUNDLE_ID_OK=0
 codesign -d --entitlements - "$GATE_APP" 2>/dev/null | grep -q endpoint-security && ENT_OK=1 || ENT_OK=0
 xcrun stapler validate "$GATE_APP" >/dev/null 2>&1 && STAPLE_OK=1 || STAPLE_OK=0
@@ -147,10 +189,23 @@ if [ "$EDGE_ALLOWLIST_OK" != 1 ]; then
     echo "# bulwark macOS ES ALLOW-LIST GATE - WO-41 verification receipt"
     echo "date_utc:              $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host:                  $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
+    # WO-140@v1: bind this verdict to its executable, source and gate signature.
+    echo "bulwark_path:          $BULWARK_PATH"
+    echo "bulwark_source:        $BULWARK_SOURCE"
+    echo "bulwark_version:       $BULWARK_VERSION"
+    echo "bulwark_sha256:        $BULWARK_SHA256"
+    echo "gate_cdhash:           ${GATE_CDHASH:-UNKNOWN}"
+    echo "head_sha:              ${HEAD_SHA:-UNKNOWN}"
     echo "gate_bundle_id:        ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"
     echo "bundle_sealable:       $([ "${BUNDLE_VALID:-0}" = 1 ] && echo yes || echo no) (id+entitlement+staple+spctl)"
     echo "edge_allowlist:        FAIL (missing allowlist/allow_glob/allow_root markers)"
-    echo "verdict:               NOT SEALED - gate edge does not contain allow-list support; rebuild and copy a fresh bulwark_es_gate.app."
+    if [ "$SOURCE_SHA_OK" != 1 ]; then
+      echo "verdict:               NOT SEALED - source SHA unknown."
+    elif [ "$CDHASH_OK" != 1 ]; then
+      echo "verdict:               NOT SEALED - gate code-signature hash unknown."
+    else
+      echo "verdict:               NOT SEALED - gate edge does not contain allow-list support; rebuild and copy a fresh bulwark_es_gate.app."
+    fi
   } | tee "$RECEIPT"
   exit 2
 fi
@@ -293,6 +348,13 @@ echo
   echo "# bulwark macOS ES ALLOW-LIST GATE - verification receipt"
   echo "date_utc:              $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host:                  $(hostname) / $(sw_vers -productVersion) / $(uname -m)"
+  # WO-140@v1: bind this verdict to its executable, source and gate signature.
+  echo "bulwark_path:          $BULWARK_PATH"
+  echo "bulwark_source:        $BULWARK_SOURCE"
+  echo "bulwark_version:       $BULWARK_VERSION"
+  echo "bulwark_sha256:        $BULWARK_SHA256"
+  echo "gate_cdhash:           ${GATE_CDHASH:-UNKNOWN}"
+  echo "head_sha:              ${HEAD_SHA:-UNKNOWN}"
   echo "gate_bundle_id:        ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"
   echo "bundle_sealable:       $([ "${BUNDLE_VALID:-0}" = 1 ] && echo yes || echo no) (id+entitlement+staple+spctl)"
   echo "edge_allowlist:        $([ "$EDGE_ALLOWLIST_OK" = 1 ] && echo PASS || echo FAIL)"
@@ -311,13 +373,18 @@ echo
   echo "supervised_stderr:     $PWD/$SUP_ERR_KEEP"
   echo "load_stdout:           $PWD/$LOAD_OUT_KEEP"
   echo "load_stderr:           $PWD/$LOAD_ERR_KEEP"
-  if [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$EDGE_ALLOWLIST_OK" = 1 ] && \
+  if [ "$SOURCE_SHA_OK" = 1 ] && [ "$CDHASH_OK" = 1 ] && \
+     [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$EDGE_ALLOWLIST_OK" = 1 ] && \
      [ "$SUP_STATUS" = 0 ] && [ "$T4_STATUS" = 0 ] && [ "$LOAD_STATUS" = 0 ] && \
      [ "$ALLOW_FILE_OK" = 1 ] && [ "$DENY_OUTSIDE_OK" = 1 ] && \
      [ "$NO_PROMPT_OK" = 1 ] && [ "$DENY_SYMLINK_OK" = 1 ] && \
      [ "$HARDLINK_OUTSIDE_OK" = 1 ] && [ "$T4_FOREIGN_OK" = 1 ] && \
      [ "$LOAD_OK" = 1 ]; then
     echo "verdict:               SEALED - allow-list mode allowed the grant (by path and by hardlink of the granted inode), denied the sibling, the symlink escape and a foreign file hardlinked into the grant after launch with a receipt, launched through the macOS base set, and survived 1000+ opens on a real Mac."
+  elif [ "$SOURCE_SHA_OK" != 1 ]; then
+    echo "verdict:               NOT SEALED - source SHA unknown."
+  elif [ "$CDHASH_OK" != 1 ]; then
+    echo "verdict:               NOT SEALED - gate code-signature hash unknown."
   elif [ "${BUNDLE_VALID:-0}" != 1 ]; then
     echo "verdict:               NOT SEALED - gate bundle not validated (sign/notarize/staple/spctl)."
   elif [ "$EDGE_ALLOWLIST_OK" != 1 ]; then

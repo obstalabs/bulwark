@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+<!-- WO-140@v1: release and CI gates bind macOS seal evidence to exact artifacts. -->
+- macOS hardware-seal receipts identify the tested binary, source commit and signed
+  gate; release upload checks the extracted arm64 archive and gate identity, and CI
+  requires acknowledgement when a boundary path changes, is renamed or is deleted.
+
 ### Added
 <!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
 - `macos-es-proof/package-release.sh`: the macOS release packaging steps for maintainers
@@ -13,7 +19,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact pair that ships, build signed + notarized + stapled `.pkg` files, verify, upload),
   until CI signs macOS releases.
 
+### Fixed
+<!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->
+- Corrupt or unreadable integrity state now starts tainted and is preserved before an
+  atomic replacement; only an absent state file starts clean; CI exercises EACCES before
+  privileged tests.
+<!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
+- macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
+  enumerator documents its non-Linux fallback.
+
 ### Changed
+<!-- WO-173@v2: per-item platform gates expose unrelated dead code on non-Linux builds. -->
+- Non-Linux builds scope dead-code allowances to the specific Linux-only items that need them;
+  the crate comment names that per-item gate.
 <!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
   Code that shipped without a recorded work order was given a retroactive one that records its

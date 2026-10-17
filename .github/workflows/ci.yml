@@ -104,6 +104,14 @@ jobs:
       - name: ES proof seal source checks
         run: bash macos-es-proof/prove_test.sh
 
+      # WO-140@v1: keep release upload refusal covered without release credentials.
+      - name: macOS release seal gate fixtures
+        run: bash macos-es-proof/release_gate_test.sh
+
+      # WO-140@v1: exercise boundary acknowledgement against isolated histories.
+      - name: Hardware seal acknowledgement fixtures
+        run: bash scripts/check-seal-ack_test.sh
+
       # WO-155@v1: `fault-injection` is debug-only (it lets a test disable a
       # reaping layer). A release build that enables it must NOT compile — assert
       # the build fails; a success here means the test switches shipped.
@@ -118,6 +126,13 @@ jobs:
           echo "::error::release --all-features must fail with the fault-injection compile_error! diagnostic (it succeeded or failed for another reason)"
           printf '%s\n' "$err"
           exit 1
+
+      # WO-151@v1: exercise the unreadable-state path before privileged tests.
+      - name: Integrity EACCES test (non-root)
+        run: |
+          output=$(cargo test --bin bulwark integrity::tests::eacces_state_file_starts_tainted_and_preserves_evidence -- --ignored --exact 2>&1)
+          printf '%s\n' "$output"
+          grep -qF 'test result: ok. 1 passed;' <<<"$output"
 
       # WO-36: the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
       # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
@@ -165,6 +180,24 @@ jobs:
 
       - name: Supervisor reaping tests (fault-injection, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_supervisor --features fault-injection -- --ignored --test-threads=1
+
+  # WO-140@v1: flag pull requests that cross the hardware-sealed boundary.
+  hardware-seal-ack:
+    name: hardware seal acknowledgement
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      # WO-140@v1: commit bodies and the complete base range are gate inputs.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # WO-140@v1: require the exact marker for paths in boundary-paths.txt.
+      - name: Check hardware seal acknowledgement
+        # WO-140@v1: keep the expression value out of shell source text.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/check-seal-ack.sh "origin/$BASE_REF" HEAD
 
   supply-chain:
     name: supply-chain (cargo-deny)
