@@ -9,21 +9,22 @@
 # (security find-identity -v -p basic); notarytool keychain profile "bulwark-notary";
 # Full Disk Access for the terminal (re-check after every macOS update, else the
 # seals fail with "es_new_client failed: 4").
-# ORDER: stage -> seal (run the two printed sudo lines, both SEALED) -> repack
+# ORDER: stage -> sign -> seal (run the two printed sudo lines, both SEALED) -> repack
 #   -> APP_ID=... INSTALLER_ID=... pkg (about 1 min per arch) -> verify
 #   -> upload (PUBLIC) -> homebrew-tap bump (formula: version, 4 urls/sha256,
 #   darwin sums from $W/out; cask: version + 2 pkg sha256).
-# KNOWN HARMLESS: the tarball binary stays ad-hoc signed (only the pkg's carries
-# Developer ID); pkgbuild prints "write: Permission denied" x4 and the payload has
+# KNOWN HARMLESS: pkgbuild prints "write: Permission denied" x4 and the payload has
 # four ._* AppleDouble entries, as 0.9.2 had. Apple 403 = re-accept the developer
 # agreement, rerun pkg. Proven on 0.9.3 (2026-10-16).
 # WO-140@v1: document the exact scope of the binary exercised by hardware seals.
-# The .pkg ships a Developer-ID re-signed copy of the sealed binary, so its bytes
-# differ from the sealed hash by design. The x86_64 binary is built from the same
-# tag but is not hardware-sealed; both limitations are tracked separately.
+# WO-174@v1: make shipped artifact identity match the selected seal policy.
+# The arm64 tarball and .pkg ship the same Developer-ID-signed binary the seals ran.
+# The x86_64 binary is built from the same tag and signed the same way but is not
+# hardware-sealed; its release binding is the tag SHA, by decision.
 #
 # Phases, run in order:
 #   stage    download the CI darwin tarballs + PREV's notarized gate app; verify both
+#   sign     Developer-ID-sign both staged CLI binaries before any hardware seal
 #   seal     re-run both seals on the exact pair that ships (needs sudo)
 #   repack   rebuild both darwin tarballs with bulwark_es_gate.app + .sha256
 #   pkg      signed + notarized + stapled .pkg per arch (needs APP_ID, INSTALLER_ID)
@@ -105,6 +106,39 @@ release_gate() {
   done
 }
 
+# WO-174@v1: require the arm64 package payload to match the same seal receipts.
+release_pkg_gate() {
+  local seal_dir="$1" expected_sha="$2" package="$3" expected_cdhash="$4"
+  local expand_dir payload="" candidate payload_count=0
+  if [ ! -f "$package" ]; then
+    echo "!! release seal check failed: missing package $package" >&2
+    return 1
+  fi
+  expand_dir=$(mktemp -d "${TMPDIR:-/tmp}/bulwark-pkg-gate.XXXXXX") || {
+    echo "!! release seal check failed: cannot create package expansion directory" >&2
+    return 1
+  }
+  if ! pkgutil --expand-full "$package" "$expand_dir"; then
+    rm -rf "$expand_dir"
+    echo "!! release seal check failed: cannot expand package $package" >&2
+    return 1
+  fi
+  while IFS= read -r -d '' candidate; do
+    payload="$candidate"
+    payload_count=$((payload_count + 1))
+  done < <(find "$expand_dir" -type f -path '*/Payload/usr/local/bin/bulwark' -print0)
+  if [ "$payload_count" -ne 1 ]; then
+    rm -rf "$expand_dir"
+    echo "!! release seal check failed: package must contain exactly one bulwark payload (found $payload_count)" >&2
+    return 1
+  fi
+  if ! release_gate "$seal_dir" "$expected_sha" "$payload" "$expected_cdhash"; then
+    rm -rf "$expand_dir"
+    return 1
+  fi
+  rm -rf "$expand_dir"
+}
+
 # WO-140@v1: let fixture tests source the pure upload gate without release inputs.
 if [ -n "${RELEASE_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
@@ -168,14 +202,53 @@ check_app() {
   echo "    gate app ok: $app"
 }
 
+# WO-174@v1: read the leaf signing authority used to identify the CLI signer.
+signing_authority() {
+  codesign -dvvv "$1" 2>&1 | awk -F= '
+    /^Authority=/ { print substr($0, index($0, "=") + 1); found = 1; exit }
+    END { if (!found) exit 1 }
+  '
+}
+
+# WO-174@v1: sign both release binaries before sealing or packaging either one.
+sign() {
+  : "${APP_ID:?set APP_ID to 'Developer ID Application: NAME (TEAMID)'}"
+  local keychain="${SIGNING_KEYCHAIN:-login.keychain-db}"
+  local t source signed authority signed_hash hash_file="$W/signed.sha256.tmp"
+  rm -rf "$W/signed"; mkdir -p "$W/signed"
+  rm -f "$W/signed.sha256" "$hash_file"
+  for t in "${TRIPLES[@]}"; do
+    source="$W/ci/bulwark-$VERSION-$t/bulwark"
+    signed="$W/signed/$t/bulwark"
+    mkdir -p "$(dirname "$signed")"
+    COPYFILE_DISABLE=1 cp "$source" "$signed"
+    codesign --force --sign "$APP_ID" --keychain "$keychain" \
+      --options runtime --timestamp "$signed"
+    codesign --verify --strict "$signed"
+    authority=$(signing_authority "$signed") \
+      || die "cannot read signing authority from $signed"
+    [ "$authority" = "$APP_ID" ] \
+      || die "$signed was signed by '$authority', expected '$APP_ID'"
+    signed_hash=$(shasum -a 256 "$signed" | awk '{print $1}')
+    printf '%s  %s/bulwark\n' "$signed_hash" "$t" >> "$hash_file"
+  done
+  mv "$hash_file" "$W/signed.sha256"
+  echo "==> Developer-ID-signed binaries staged in $W/signed"
+}
+
 # WO-95@v1: the hardware seals must run on the exact binary + gate pair that ships.
 seal() {
   # The seal scripts cd into their own directory and look for ./bulwark_es_gate.app,
   # so seal from a staging copy instead of swapping the app in the checkout.
   local s="$W/seal"; rm -rf "$s"; mkdir -p "$s"
+  # WO-174@v1: refuse unless the signing manifest still matches both staged binaries.
+  [ -f "$W/signed.sha256" ] || die "sign phase has not recorded signed binary hashes"
+  (cd "$W/signed" && shasum -a 256 -c "$W/signed.sha256") \
+    || die "signed binary hash does not match the sign phase"
   cp "$SRC_REPO/macos-es-proof/verify-gate.sh" "$SRC_REPO/macos-es-proof/verify-allowlist-gate.sh" "$s/"
   COPYFILE_DISABLE=1 cp -R "$W/$APP" "$s/"
-  cp "$W/ci/bulwark-$VERSION-aarch64-apple-darwin/bulwark" "$s/bulwark"
+  # WO-174@v1: seal the signed arm64 bytes that both arm64 artifacts will ship.
+  cp "$W/signed/aarch64-apple-darwin/bulwark" "$s/bulwark"
   # WO-140@v1: bind both receipts to the commit named by the release tag.
   local source_sha
   source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
@@ -191,6 +264,8 @@ repack() {
   mkdir -p "$W/out"
   for t in "${TRIPLES[@]}"; do
     local name="bulwark-$VERSION-$t" d="$W/ci/bulwark-$VERSION-$t"
+    # WO-174@v1: repack the signed copy, never the unsigned CI download.
+    COPYFILE_DISABLE=1 cp "$W/signed/$t/bulwark" "$d/bulwark"
     rm -rf "${d:?}/$APP"; COPYFILE_DISABLE=1 cp -R "$W/$APP" "$d/$APP"
     COPYFILE_DISABLE=1 tar -C "$W/ci" -czf "$W/out/$name.tar.gz" "$name"
     (cd "$W/out" && shasum -a 256 "$name.tar.gz" | awk '{print $1 "  " $2}' > "$name.tar.gz.sha256")
@@ -204,11 +279,12 @@ pkg() {
   : "${INSTALLER_ID:?set INSTALLER_ID to 'Developer ID Installer: NAME (TEAMID)'}"
   # build-cli-pkg.sh cds to its parent and reads target/<triple>/release/bulwark;
   # give it a staging root holding the CI binaries so the pkg ships the released bits.
+  # WO-174@v1: populate that staging root with the already signed release copies.
   local r="$W/pkgroot"; rm -rf "$r"; mkdir -p "$r/macos-es-proof"
   cp "$SRC_REPO/macos-es-proof/build-cli-pkg.sh" "$r/macos-es-proof/"
   for t in "${TRIPLES[@]}"; do
     mkdir -p "$r/target/$t/release"
-    cp "$W/ci/bulwark-$VERSION-$t/bulwark" "$r/target/$t/release/bulwark"
+    cp "$W/signed/$t/bulwark" "$r/target/$t/release/bulwark"
   done
   VERSION="$VERSION" OUT="$W/pkg" bash "$r/macos-es-proof/build-cli-pkg.sh"
   for t in "${TRIPLES[@]}"; do
@@ -226,7 +302,8 @@ verify() {
     tar xzf "$W/out/$name.tar.gz" -C "$v"
     [ -z "$(tar tzf "$W/out/$name.tar.gz" | grep '/\._' || true)" ] || die "AppleDouble entries in $name.tar.gz"
     check_app "$v/$name/$APP"
-    cmp "$v/$name/bulwark" "$W/ci/$name/bulwark"
+    # WO-174@v1: the archive must preserve the exact signed staging bytes.
+    cmp "$v/$name/bulwark" "$W/signed/$t/bulwark"
     pkgutil --check-signature "$W/out/$name.pkg" | grep -q 'Developer ID Installer' || die "pkg not Installer-signed"
     xcrun stapler validate "$W/out/$name.pkg" >/dev/null || die "pkg staple invalid"
     spctl -a -vv -t install "$W/out/$name.pkg" 2>&1 | grep -q accepted || die "pkg rejected by spctl"
@@ -239,7 +316,7 @@ verify() {
 # WO-140@v1: validate identity from a fresh extract of the archive sent to GitHub.
 upload() {
   # WO-140@v1: the shared upload point fails before gh sees any unsealed asset.
-  local source_sha archive extract_dir extracted_name sealed_binary sealed_app expected_cdhash
+  local source_sha archive package extract_dir extracted_name sealed_binary sealed_app expected_cdhash
   source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
     || die "cannot resolve v$VERSION to a source commit"
   [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die "v$VERSION source SHA is not 40 hex characters"
@@ -270,12 +347,19 @@ upload() {
     rm -rf "$extract_dir"
     die "macOS release upload refused: hardware seal evidence does not match v$VERSION"
   fi
+  # WO-174@v1: the arm64 package payload must be the same signed bytes the seals ran.
+  package="$W/out/bulwark-$VERSION-aarch64-apple-darwin.pkg"
+  if ! release_pkg_gate "$W/seal" "$source_sha" "$package" "$expected_cdhash"; then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: package payload does not match the hardware seal"
+  fi
   rm -rf "$extract_dir"
   gh_ release upload "v$VERSION" --repo "$REPO" --clobber "$W"/out/*
   gh_ release view "v$VERSION" --repo "$REPO" --json assets -q '.assets[].name'
 }
 
+# WO-174@v1: expose signing as a required phase before either seal or package build.
 case "${1:-}" in
-  stage|seal|repack|pkg|verify|upload) "$1" ;;
-  *) die "usage: $0 stage|seal|repack|pkg|verify|upload" ;;
+  stage|sign|seal|repack|pkg|verify|upload) "$1" ;;
+  *) die "usage: $0 stage|sign|seal|repack|pkg|verify|upload" ;;
 esac

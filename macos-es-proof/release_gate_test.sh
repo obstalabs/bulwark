@@ -144,3 +144,54 @@ write_receipt "$sealed/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA
 release_gate "$sealed" "$HEAD_SHA" "$BINARY" "$GATE_CDHASH"
 echo "PASS: matching sealed receipts accepted"
 assert_seal_identity_contract
+
+# WO-174@v1: make package expansion deterministic while exercising the real payload gate.
+fake_bin="$WORK/bin"
+mkdir -p "$fake_bin"
+cat > "$fake_bin/pkgutil" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = "--expand-full" ]
+mkdir -p "$3/Payload/usr/local/bin"
+case "$PKG_PAYLOAD_SOURCE" in
+  __fail__) exit 1 ;;
+  __missing__) exit 0 ;;
+  *) cp "$PKG_PAYLOAD_SOURCE" "$3/Payload/usr/local/bin/bulwark" ;;
+esac
+SH
+chmod +x "$fake_bin/pkgutil"
+PATH="$fake_bin:$PATH"
+export PATH
+pkg="$WORK/bulwark.pkg"
+: > "$pkg"
+
+# WO-174@v1: a package payload with bytes outside the receipts must block upload.
+expect_pkg_rejected() {
+  local name="$1" expected="$2" package="$3" payload="$4" output
+  if output=$(PKG_PAYLOAD_SOURCE="$payload" release_pkg_gate \
+    "$sealed" "$HEAD_SHA" "$package" "$GATE_CDHASH" 2>&1); then
+    echo "FAIL: $name was accepted"
+    exit 1
+  fi
+  if ! grep -qF "$expected" <<<"$output"; then
+    echo "FAIL: $name did not name '$expected': $output"
+    exit 1
+  fi
+  echo "PASS: $name rejected ($expected)"
+}
+
+mismatched_payload="$WORK/pkg-bulwark-mismatch"
+printf 'different package payload\n' > "$mismatched_payload"
+expect_pkg_rejected "package payload mismatch" "bulwark_sha256 mismatch" \
+  "$pkg" "$mismatched_payload"
+
+# WO-174@v1: the exact signed payload is accepted, while a missing package is not evidence.
+PKG_PAYLOAD_SOURCE="$BINARY" release_pkg_gate \
+  "$sealed" "$HEAD_SHA" "$pkg" "$GATE_CDHASH"
+echo "PASS: matching package payload accepted"
+expect_pkg_rejected "missing package" "missing package" \
+  "$WORK/missing.pkg" "$BINARY"
+expect_pkg_rejected "failed package expansion" "cannot expand package" \
+  "$pkg" "__fail__"
+expect_pkg_rejected "missing package payload" "exactly one bulwark payload" \
+  "$pkg" "__missing__"

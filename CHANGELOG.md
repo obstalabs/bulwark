@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - macOS hardware-seal receipts identify the tested binary, source commit and signed
   gate; release upload checks the extracted arm64 archive and gate identity, and CI
   requires acknowledgement when a boundary path changes, is renamed or is deleted.
+<!-- WO-174@v1: ship the signed arm64 bytes that the hardware seals exercised. -->
+- macOS release packaging signs before sealing and refuses upload unless both the
+  arm64 tarball and installer payload match the hardware-seal receipts.
 
 ### Added
 <!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
