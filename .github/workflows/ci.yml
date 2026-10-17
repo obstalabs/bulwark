@@ -187,7 +187,10 @@ jobs:
 
       # WO-140@v1: require the exact marker for paths in boundary-paths.txt.
       - name: Check hardware seal acknowledgement
-        run: scripts/check-seal-ack.sh origin/${{ github.base_ref }} HEAD
+        # WO-140@v1: keep the expression value out of shell source text.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/check-seal-ack.sh "origin/$BASE_REF" HEAD
 
   supply-chain:
     name: supply-chain (cargo-deny)

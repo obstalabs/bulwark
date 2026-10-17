@@ -20,6 +20,10 @@ HASH=$(shasum -a 256 "$BINARY" | awk '{print $1}')
 HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # WO-140@v1: keep the mismatched source distinct without runtime dependencies.
 OTHER_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# WO-140@v1: use fixed code-signature identities for deterministic gate fixtures.
+GATE_CDHASH=cccccccccccccccccccccccccccccccccccccccc
+# WO-140@v1: keep the mismatched gate identity visibly distinct.
+OTHER_CDHASH=dddddddddddddddddddddddddddddddddddddddd
 
 # WO-140@v1: pin receipt identity fields that require signed hardware to produce.
 assert_seal_identity_contract() {
@@ -52,19 +56,24 @@ assert_seal_identity_contract() {
 }
 
 # WO-140@v1: write only the receipt fields consumed by the upload gate.
+# WO-140@v1: include gate identity unless a fixture intentionally omits it.
 write_receipt() {
-  local path="$1" verdict="$2" sha="$3" hash="$4"
+  local path="$1" verdict="$2" sha="$3" hash="$4" cdhash="${5-}"
   {
     printf 'verdict:               %s\n' "$verdict"
     printf 'head_sha:              %s\n' "$sha"
     printf 'bulwark_sha256:        %s\n' "$hash"
+    if [ -n "$cdhash" ]; then
+      printf 'gate_cdhash:           %s\n' "$cdhash"
+    fi
   } > "$path"
 }
 
 # WO-140@v1: a rejected fixture must fail and name its failed identity check.
+# WO-140@v1: pass the expected signed-gate identity into every negative case.
 expect_rejected() {
-  local name="$1" expected="$2" dir="$3" output
-  if output=$(release_gate "$dir" "$HEAD_SHA" "$BINARY" 2>&1); then
+  local name="$1" expected="$2" dir="$3" expected_cdhash="${4-$GATE_CDHASH}" output
+  if output=$(release_gate "$dir" "$HEAD_SHA" "$BINARY" "$expected_cdhash" 2>&1); then
     echo "FAIL: $name was accepted"
     exit 1
   fi
@@ -78,39 +87,60 @@ expect_rejected() {
 # WO-140@v1: missing either hardware-seal receipt blocks the upload.
 missing="$WORK/missing"
 mkdir -p "$missing"
-write_receipt "$missing/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
+write_receipt "$missing/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
 expect_rejected "missing receipt" "missing receipt" "$missing"
 
 # WO-140@v1: a negative hardware verdict can never authorize an upload.
 not_sealed="$WORK/not-sealed"
 mkdir -p "$not_sealed"
-write_receipt "$not_sealed/gate-receipt.txt" "NOT SEALED - fixture" "$HEAD_SHA" "$HASH"
-write_receipt "$not_sealed/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
+write_receipt "$not_sealed/gate-receipt.txt" "NOT SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+write_receipt "$not_sealed/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
 expect_rejected "NOT SEALED verdict" "is not SEALED" "$not_sealed"
 
 # WO-140@v1: receipts from another source commit cannot authorize this tag.
 wrong_sha="$WORK/wrong-sha"
 mkdir -p "$wrong_sha"
-write_receipt "$wrong_sha/gate-receipt.txt" "SEALED - fixture" "$OTHER_SHA" "$HASH"
-write_receipt "$wrong_sha/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
+write_receipt "$wrong_sha/gate-receipt.txt" "SEALED - fixture" "$OTHER_SHA" "$HASH" "$GATE_CDHASH"
+write_receipt "$wrong_sha/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
 expect_rejected "head_sha mismatch" "head_sha mismatch" "$wrong_sha"
 
 # WO-140@v1: receipts from another binary cannot authorize the upload artifact.
 wrong_hash="$WORK/wrong-hash"
 mkdir -p "$wrong_hash"
-write_receipt "$wrong_hash/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
+write_receipt "$wrong_hash/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
 case "$HASH" in
   0*) WRONG_HASH="1${HASH#?}" ;;
   *) WRONG_HASH="0${HASH#?}" ;;
 esac
-write_receipt "$wrong_hash/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$WRONG_HASH"
+write_receipt "$wrong_hash/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$WRONG_HASH" "$GATE_CDHASH"
 expect_rejected "bulwark_sha256 mismatch" "bulwark_sha256 mismatch" "$wrong_hash"
 
-# WO-140@v1: matching sealed receipts authorize the exact source and binary.
+# WO-140@v1: a receipt without signed-gate identity cannot authorize upload.
+missing_cdhash="$WORK/missing-cdhash"
+mkdir -p "$missing_cdhash"
+write_receipt "$missing_cdhash/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" ""
+write_receipt "$missing_cdhash/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+expect_rejected "gate_cdhash missing" "gate_cdhash missing" "$missing_cdhash"
+
+# WO-140@v1: a receipt from another signed gate cannot authorize upload.
+wrong_cdhash="$WORK/wrong-cdhash"
+mkdir -p "$wrong_cdhash"
+write_receipt "$wrong_cdhash/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$OTHER_CDHASH"
+write_receipt "$wrong_cdhash/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+expect_rejected "gate_cdhash mismatch" "gate_cdhash mismatch" "$wrong_cdhash"
+
+# WO-140@v1: upload cannot proceed without a readable expected gate identity.
+empty_cdhash="$WORK/empty-cdhash"
+mkdir -p "$empty_cdhash"
+write_receipt "$empty_cdhash/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+write_receipt "$empty_cdhash/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+expect_rejected "empty expected gate_cdhash" "expected gate_cdhash missing" "$empty_cdhash" ""
+
+# WO-140@v1: matching sealed receipts authorize the exact source, binary and gate.
 sealed="$WORK/sealed"
 mkdir -p "$sealed"
-write_receipt "$sealed/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
-write_receipt "$sealed/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH"
-release_gate "$sealed" "$HEAD_SHA" "$BINARY"
+write_receipt "$sealed/gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+write_receipt "$sealed/allowlist-gate-receipt.txt" "SEALED - fixture" "$HEAD_SHA" "$HASH" "$GATE_CDHASH"
+release_gate "$sealed" "$HEAD_SHA" "$BINARY" "$GATE_CDHASH"
 echo "PASS: matching sealed receipts accepted"
 assert_seal_identity_contract

@@ -13,11 +13,12 @@ die() {
 }
 
 # WO-140@v1: compare one bounded commit range against the shared boundary list.
+# WO-140@v1: disable rename folding so deleted boundary names remain visible.
 check_seal_ack() {
   local base="$1" head="$2" changed file line pattern bodies matched
   local -a boundary_files=()
   [ -s "$BOUNDARY_PATHS" ] || die "boundary path list missing or empty: $BOUNDARY_PATHS"
-  changed=$(git diff --name-only "$base...$head") \
+  changed=$(git diff --name-only --no-renames "$base...$head") \
     || die "cannot diff $base...$head"
   while IFS= read -r file; do
     [ -n "$file" ] || continue

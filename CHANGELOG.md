@@ -9,8 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 <!-- WO-140@v1: release and CI gates bind macOS seal evidence to exact artifacts. -->
 - macOS hardware-seal receipts identify the tested binary, source commit and signed
-  gate; release upload refuses missing or mismatched evidence, and CI requires an
-  explicit acknowledgement when an enforcement-boundary path changes.
+  gate; release upload checks the extracted arm64 archive and gate identity, and CI
+  requires acknowledgement when a boundary path changes, is renamed or is deleted.
 
 ### Added
 <!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->

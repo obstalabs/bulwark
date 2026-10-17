@@ -17,6 +17,10 @@
 # Developer ID); pkgbuild prints "write: Permission denied" x4 and the payload has
 # four ._* AppleDouble entries, as 0.9.2 had. Apple 403 = re-accept the developer
 # agreement, rerun pkg. Proven on 0.9.3 (2026-10-16).
+# WO-140@v1: document the exact scope of the binary exercised by hardware seals.
+# The .pkg ships a Developer-ID re-signed copy of the sealed binary, so its bytes
+# differ from the sealed hash by design. The x86_64 binary is built from the same
+# tag but is not hardware-sealed; both limitations are tracked separately.
 #
 # Phases, run in order:
 #   stage    download the CI darwin tarballs + PREV's notarized gate app; verify both
@@ -46,9 +50,14 @@ release_receipt_field() {
 }
 
 # WO-140@v1: refuse release upload unless both seals name this source and binary.
+# WO-140@v1: bind the receipts to the signed gate extracted from the upload artifact.
 release_gate() {
-  local seal_dir="$1" expected_sha="$2" binary="$3" expected_hash
-  local receipt verdict receipt_sha receipt_hash
+  local seal_dir="$1" expected_sha="$2" binary="$3" expected_cdhash="$4" expected_hash
+  local receipt verdict receipt_sha receipt_hash receipt_cdhash
+  if [ -z "$expected_cdhash" ]; then
+    echo "!! release seal check failed: expected gate_cdhash missing" >&2
+    return 1
+  fi
   expected_hash=$(shasum -a 256 "$binary" | awk '{print $1}') || {
     echo "!! release seal check failed: cannot hash binary $binary" >&2
     return 1
@@ -83,6 +92,14 @@ release_gate() {
     }
     if [ "$receipt_hash" != "$expected_hash" ]; then
       echo "!! release seal check failed: bulwark_sha256 mismatch in $receipt" >&2
+      return 1
+    fi
+    receipt_cdhash=$(release_receipt_field "$receipt" gate_cdhash) || {
+      echo "!! release seal check failed: gate_cdhash missing from $receipt" >&2
+      return 1
+    }
+    if [ "$receipt_cdhash" != "$expected_cdhash" ]; then
+      echo "!! release seal check failed: gate_cdhash mismatch in $receipt" >&2
       return 1
     fi
   done
@@ -219,15 +236,41 @@ verify() {
 }
 
 # WO-95@v1: replace the CI darwin assets and add the pkgs on the tagged release.
+# WO-140@v1: validate identity from a fresh extract of the archive sent to GitHub.
 upload() {
   # WO-140@v1: the shared upload point fails before gh sees any unsealed asset.
-  local source_sha sealed_binary
+  local source_sha archive extract_dir extracted_name sealed_binary sealed_app expected_cdhash
   source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
     || die "cannot resolve v$VERSION to a source commit"
   [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die "v$VERSION source SHA is not 40 hex characters"
-  sealed_binary="$W/ci/bulwark-$VERSION-aarch64-apple-darwin/bulwark"
-  release_gate "$W/seal" "$source_sha" "$sealed_binary" \
-    || die "macOS release upload refused: hardware seal evidence does not match v$VERSION"
+  archive="$W/out/bulwark-$VERSION-aarch64-apple-darwin.tar.gz"
+  [ -f "$archive" ] || die "macOS release upload refused: missing archive $archive"
+  extract_dir=$(mktemp -d "$W/upload-check.XXXXXX") \
+    || die "macOS release upload refused: cannot create extraction directory"
+  if ! tar -xzf "$archive" -C "$extract_dir"; then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: cannot extract $archive"
+  fi
+  extracted_name="bulwark-$VERSION-aarch64-apple-darwin"
+  sealed_binary="$extract_dir/$extracted_name/bulwark"
+  sealed_app="$extract_dir/$extracted_name/$APP"
+  if [ ! -x "$sealed_binary" ] || [ ! -d "$sealed_app" ]; then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: extracted archive is missing the binary or gate app"
+  fi
+  if ! expected_cdhash=$(codesign -dvvv "$sealed_app" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}'); then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: cannot read gate CDHash from extracted archive"
+  fi
+  if [ -z "$expected_cdhash" ]; then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: gate CDHash missing from extracted archive"
+  fi
+  if ! release_gate "$W/seal" "$source_sha" "$sealed_binary" "$expected_cdhash"; then
+    rm -rf "$extract_dir"
+    die "macOS release upload refused: hardware seal evidence does not match v$VERSION"
+  fi
+  rm -rf "$extract_dir"
   gh_ release upload "v$VERSION" --repo "$REPO" --clobber "$W"/out/*
   gh_ release view "v$VERSION" --repo "$REPO" --json assets -q '.assets[].name'
 }

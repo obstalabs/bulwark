@@ -4,7 +4,8 @@ set -euo pipefail
 # WO-140@v1: prove boundary acknowledgement against isolated commit histories.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # WO-140@v1: exercise the repository check rather than a fixture copy.
-CHECK="$SCRIPT_DIR/check-seal-ack.sh"
+# WO-140@v1: let the red proof substitute the pre-fix boundary checker.
+CHECK="${CHECK:-$SCRIPT_DIR/check-seal-ack.sh}"
 # WO-140@v1: keep fixture repositories outside the source tree.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bulwark-seal-ack-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -92,3 +93,36 @@ printf 'docs only\n' >> "$repo/README.md"
 git -C "$repo" add README.md
 head=$(fixture_commit "$repo" "$base" "docs: update readme" 0)
 expect_accepted "README-only change" "$repo" "$base" "$head"
+
+# WO-140@v1: a renamed boundary source remains visible under its old protected name.
+repo=$(new_fixture renamed-boundary)
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/src"
+printf '// bulwark/WO-140@v1: rename fixture.\n' > "$repo/src/gate.rs"
+git -C "$repo" add src/gate.rs
+base=$(fixture_commit "$repo" "$base" "test: seed renamed boundary" 1)
+git -C "$repo" mv src/gate.rs src/gate2.rs
+printf '// edited after rename\n' >> "$repo/src/gate2.rs"
+git -C "$repo" add src/gate2.rs
+head=$(fixture_commit "$repo" "$base" "test: rename boundary" 0)
+expect_rejected "renamed boundary" "$repo" "$base" "$head" "src/gate.rs"
+
+# WO-140@v1: deleting a boundary source cannot remove the acknowledgement requirement.
+repo=$(new_fixture deleted-boundary)
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/src"
+printf '// bulwark/WO-140@v1: deletion fixture.\n' > "$repo/src/gate.rs"
+git -C "$repo" add src/gate.rs
+base=$(fixture_commit "$repo" "$base" "test: seed deleted boundary" 1)
+git -C "$repo" rm -q src/gate.rs
+head=$(fixture_commit "$repo" "$base" "test: delete boundary" 0)
+expect_rejected "deleted boundary" "$repo" "$base" "$head" "src/gate.rs"
+
+# WO-140@v1: weakening the boundary list itself requires acknowledgement.
+repo=$(new_fixture boundary-list-only)
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/scripts"
+printf 'src/gate.rs\n' > "$repo/scripts/boundary-paths.txt"
+git -C "$repo" add scripts/boundary-paths.txt
+head=$(fixture_commit "$repo" "$base" "test: change boundary list" 0)
+expect_rejected "boundary list change" "$repo" "$base" "$head" "scripts/boundary-paths.txt"
