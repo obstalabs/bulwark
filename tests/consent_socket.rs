@@ -35,6 +35,20 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 /// WO-147@v1: the on-disk node for a requested socket path, the
 /// same derivation the CLI and `answer_once` use (`<requested>.d/s`). A test
 /// must point at THIS node, never at the requested path.
@@ -73,6 +87,9 @@ fn scenario(tag: &str, verdict: &str) -> (String, String) {
     .arg(&secret)
     .arg("--receipts")
     .arg(&receipts)
+    // WO-149@v1: each scenario call is one test; isolate its integrity state.
+    .arg("--state")
+    .arg(isolated_state(tag))
     .arg("--")
     .args(["bash", "-c", &inner]);
     let mut gate_child = gate.spawn().expect("spawn gate");
@@ -171,6 +188,9 @@ fn agent_cannot_answer_its_own_consent() {
         .arg(&secret)
         .arg("--receipts")
         .arg(&receipts)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("selfconsent"))
         .arg("--")
         .args(["bash", "-c", &inner])
         .status()
@@ -272,6 +292,9 @@ int main(int c,char**v){int s=socket(AF_UNIX,SOCK_STREAM,0);
         .arg(&secret)
         .arg("--receipts")
         .arg(&receipts)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("deadpeer"))
         .arg("--")
         .args(["bash", "-c", &inner])
         .status()
@@ -317,6 +340,9 @@ fn run_and_expect_refusal(sock: &std::path::Path) -> String {
             "--consent-socket",
         ])
         .arg(sock)
+        // WO-149@v1: each refusal call is one test; isolate its integrity state.
+        .arg("--state")
+        .arg(isolated_state("refusal"))
         .args(["--consent-timeout", "3", "--protect", "/etc/hostname", "--"])
         .args(["true"])
         .output()
@@ -415,6 +441,9 @@ fn node_is_0600_socket_owned_by_invoking_user() {
     let mut gate = Command::new(bin())
         .args(["run", "--consent", "socket", "--consent-socket"])
         .arg(&sock)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("node"))
         .args(["--consent-timeout", "4", "--protect", "/etc/hostname", "--"])
         .args(["sleep", "8"])
         .env("SUDO_UID", "65534")
@@ -455,10 +484,14 @@ fn root_default_socket_ignores_xdg_runtime_dir() {
     let xdg = dir.join("xdg");
     fs::create_dir(&xdg).unwrap();
     let node = std::path::PathBuf::from("/run/bulwark/consent.sock.d/s");
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    let state = isolated_state("rootdefault");
 
     let mut gate = Command::new(bin())
         .args([
             "run",
+            "--state",
+            state.to_str().unwrap(),
             "--consent",
             "socket",
             "--consent-timeout",
@@ -580,6 +613,9 @@ fn non_root_client_connects_to_the_root_gate_default_without_socket() {
     .arg(&secret)
     .arg("--receipts")
     .arg(&receipts)
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    .arg("--state")
+    .arg(isolated_state("clientdefault"))
     .arg("--")
     .args(["bash", "-c", &inner]);
     let mut gate_child = gate.spawn().expect("spawn gate");
@@ -638,10 +674,14 @@ fn root_parent_is_0711_under_umask_077_and_invoking_user_connects() {
     let invoking =
         std::env::var("SUDO_USER").expect("run under sudo; SUDO_USER is the invoking user");
 
+    // WO-149@v1: isolate the integrity state; created before the umask changes.
+    let state = isolated_state("rootparent");
     let old = unsafe { libc::umask(0o077) };
     let mut gate = Command::new(bin())
         .args([
             "run",
+            "--state",
+            state.to_str().unwrap(),
             "--allow-root",
             "--consent",
             "socket",

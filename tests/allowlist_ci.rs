@@ -26,11 +26,36 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 /// Run `bulwark run --deny-all --allow <grant> -- <cmd>` and return stdout.
 // WO-15@v1: run one default-deny allow-list gate and return what the agent printed.
 fn run_allowlist(grant: &str, cmd: &[&str]) -> String {
+    // WO-149@v1: each caller is one test, so each gets its own integrity state.
+    let state = isolated_state("allowlist");
     let mut c = Command::new(bin());
-    c.args(["run", "--allow-root", "--deny-all", "--allow", grant, "--"]);
+    c.args([
+        "run",
+        "--state",
+        state.to_str().unwrap(),
+        "--allow-root",
+        "--deny-all",
+        "--allow",
+        grant,
+        "--",
+    ]);
     for a in cmd {
         c.arg(a);
     }

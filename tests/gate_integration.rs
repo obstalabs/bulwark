@@ -32,6 +32,20 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 // WO-3@v1: run one gated command and return its output with the decision receipts.
 /// Run `bulwark run --protect <protect...> --receipts <r> -- <cmd...>`.
 /// Returns (child_stdout, child_stderr, receipts_contents).
@@ -42,6 +56,8 @@ fn run_gate(protect: &[&Path], cmd: &[&str], receipts: &Path) -> (String, String
         c.arg("--protect").arg(p);
     }
     c.arg("--receipts").arg(receipts);
+    // WO-149@v1: each caller is one test, so each gets its own integrity state.
+    c.arg("--state").arg(isolated_state("gate"));
     c.arg("--");
     for a in cmd {
         c.arg(a);
@@ -76,8 +92,18 @@ fn tilde_refuses_when_sudo_uid_owns_no_enumerated_home() {
     let marker = ldap_home.join("agent-ran");
 
     let sh_cmd = format!("echo RAN > {}", marker.display());
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    let state = isolated_state("sudo-uid-no-home");
     let out = Command::new(bin())
-        .args(["run", "--", "/bin/sh", "-c", sh_cmd.as_str()])
+        .args([
+            "run",
+            "--state",
+            state.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            sh_cmd.as_str(),
+        ])
         .env("SUDO_UID", uid.to_string())
         .env("SUDO_GID", uid.to_string())
         .env("HOME", ldap_home.to_string_lossy().into_owned())
@@ -119,9 +145,13 @@ fn tilde_refuses_explicit_worker_uid_with_no_home() {
 
     let uid_s = uid.to_string();
     let sh_cmd = format!("echo RAN > {}", marker.display());
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    let state = isolated_state("worker-uid-no-home");
     let out = Command::new(bin())
         .args([
             "run",
+            "--state",
+            state.to_str().unwrap(),
             "--worker-uid",
             uid_s.as_str(),
             "--",
@@ -168,9 +198,13 @@ fn tilde_explicit_worker_uid_with_no_home_refuses_without_an_auto_exemption() {
 
     let uid_s = uid.to_string();
     let sh_cmd = format!("echo RAN > {}", marker.display());
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    let state = isolated_state("worker-uid-no-auto-exemption");
     let out = Command::new(bin())
         .args([
             "run",
+            "--state",
+            state.to_str().unwrap(),
             "--worker-uid",
             uid_s.as_str(),
             "--",
@@ -226,9 +260,13 @@ fn root_agent_home_is_covered_without_a_different_user_message() {
     let key_display = key.display().to_string();
 
     let inner = format!("cat {key_display} > {} 2>&1; echo done", read_out.display());
+    // WO-149@v1: isolate this test's integrity state from the host default.
+    let state = isolated_state("root-home");
     let out = Command::new(bin())
         .args([
             "run",
+            "--state",
+            state.to_str().unwrap(),
             "--allow-root",
             "--consent",
             "static",
@@ -441,6 +479,9 @@ fn policy_with_absent_protected_path_starts_and_names_the_skip() {
     let out = Command::new(bin())
         .args(["run", "--allow-root", "--policy"])
         .arg(&policy)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("absent"))
         .args(["--", "cat"])
         .arg(&ok)
         .output()

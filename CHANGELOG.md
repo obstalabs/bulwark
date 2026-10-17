@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - macOS hardware-seal receipts identify the tested binary, source commit and signed
   gate; release upload checks the extracted arm64 archive and gate identity, and CI
   requires acknowledgement when a boundary path changes, is renamed or is deleted.
+<!-- WO-174@v1: ship the signed arm64 bytes that the hardware seals exercised. -->
+- macOS release packaging signs before sealing and refuses upload unless both the
+  arm64 tarball and installer payload match the hardware-seal receipts.
 
 ### Added
 <!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
@@ -24,6 +27,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Corrupt or unreadable integrity state now starts tainted and is preserved before an
   atomic replacement; only an absent state file starts clean; CI exercises EACCES before
   privileged tests.
+<!-- WO-176@v1: failing non-root integrity checks must retain their Cargo diagnostics. -->
+- CI prints Cargo output before failing the non-root integrity-state check.
+<!-- WO-175@v1: pull requests must not supply the seal control that judges them. -->
+- CI evaluates hardware-seal acknowledgement with the base branch's control files,
+  every step of which carries its work-order citation.
+<!-- WO-153@v1: reserve remote run paths before placing HiveBus material. -->
+- Remote HiveBus dispatches create each run and key directory exactly once instead of
+  colliding with the consent lane's anti-squatting guard; the remote integration tests
+  stream the binary under test instead of using an installed copy.
+<!-- WO-149@v1: isolate remote integration runs from shared integrity state. -->
+- `bulwark ssh` accepts a hidden per-run integrity state path for isolated tests and
+  forwards it safely to the remote gate; every root test suite uses its own state file and
+  CI fails if one changes the host default.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
   enumerator documents its non-Linux fallback.

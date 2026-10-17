@@ -177,6 +177,9 @@ printf '%s\n' fixture-agent-executed
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         Command::new(env!("CARGO_BIN_EXE_bulwark"))
             .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            // WO-149@v1: forward a per-fixture integrity state, never the host default.
+            .arg("--state")
+            .arg(self.root.join("state.toml"))
             .args(args)
             .args(["--", "fixture-agent"])
             .env("PATH", std::env::join_paths(paths).unwrap())

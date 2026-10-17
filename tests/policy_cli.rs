@@ -205,6 +205,9 @@ fn run_with_spawn_marker(dir: &std::path::Path, args: &[&str]) -> (std::process:
     let script = format!("echo SPAWNED > '{}'", marker.display());
     let out = Command::new(bin())
         .arg("run")
+        // WO-149@v1: keep each caller's integrity state in its own scratch dir.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(args)
         .args(["--", "/bin/sh", "-c", &script])
         .output()

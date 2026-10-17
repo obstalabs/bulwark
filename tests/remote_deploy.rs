@@ -59,14 +59,18 @@ fn auto_allow_session_lets_second_read_through() {
         .args([
             "ssh",
             TARGET,
+            // WO-153@v1: stream the binary under test, not an installed remote copy.
             "--deploy",
-            "never",
+            "scp",
             "--auto",
             "allow-session",
             "--auto-worker-uid",
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .output()
         .expect("spawn bulwark ssh");
@@ -105,12 +109,16 @@ fn interactive_operator_grants_locally() {
         .args([
             "ssh",
             TARGET,
+            // WO-153@v1: stream the binary under test, not an installed remote copy.
             "--deploy",
-            "never",
+            "scp",
             "--auto-worker-uid",
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -170,6 +178,9 @@ fn deploy_dist_fetches_and_runs() {
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .output()
         .expect("spawn bulwark ssh");
@@ -214,22 +225,29 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
     // One dispatch with a slow agent; returns (launcher_output, remote_dir_listing,
     // seed_mode, seed_owner, seed_bytes_len) captured while the agent sleeps.
     let dispatch = |tag: &str| -> (String, String, String, String, usize) {
+        // WO-153@v1: protect a real scratch file; current releases refuse a
+        // protect path that does not exist.
+        let protect = scratch(tag).join("protect");
+        fs::write(&protect, "x\n").unwrap();
         let child = Command::new(bin())
             .args([
                 "ssh",
                 TARGET,
+                // WO-153@v1: stream the binary under test; an installed remote
+                // copy would test stale code and conflicts with the never-deploy test.
                 "--deploy",
-                "never",
+                "scp",
                 "--auto",
                 "deny",
                 "--auto-worker-uid",
                 "--hivebus-worker-seed-generate",
                 "--protect",
-                "/tmp/bulwark-nonexistent-protect",
-                "--",
-                "sleep",
-                "4",
             ])
+            .arg(&protect)
+            // WO-149@v1: each dispatch forwards its own scratch integrity state.
+            .arg("--state")
+            .arg(protect.with_file_name("state.toml"))
+            .args(["--", "sleep", "4"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -257,7 +275,8 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
         );
         let listing = probe(&format!("sudo ls -la \"$(dirname {seed})\" 2>&1"));
         let seed_mode = probe(&format!("sudo stat -c %a {seed} 2>/dev/null"));
-        let seed_owner = probe(&format!("sudo stat -c %U {seed} 2>/dev/null"));
+        // WO-153@v1: numeric owner; the auto-picked worker uid has no passwd entry.
+        let seed_owner = probe(&format!("sudo stat -c %u {seed} 2>/dev/null"));
         // `sudo wc -c FILE` (not `< FILE`): the redirect would be opened by the
         // unprivileged outer shell, which cannot read the root-owned seed.
         let seed_len = probe(&format!("sudo wc -c {seed} 2>/dev/null"))
@@ -287,9 +306,21 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
         mode1, "600",
         "worker.seed must be mode 0600; listing:\n{listing1}"
     );
+    // WO-153@v1: with --auto-worker-uid the seed follows the dropped worker uid
+    // (WO-49), so the unprivileged agent can read its own key.
+    let worker_uid1 = first
+        .lines()
+        .find_map(|l| l.split("worker dropped to uid ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !worker_uid1.is_empty(),
+        "launcher must report the dropped worker uid; got:\n{first}"
+    );
     assert_eq!(
-        owner1, "root",
-        "worker.seed must be owned by the gate uid (root)"
+        owner1, worker_uid1,
+        "worker.seed must be owned by the dropped worker uid"
     );
     // 45 bytes = base64 of a 32-byte seed (44 chars) + trailing newline.
     assert_eq!(
@@ -355,23 +386,31 @@ fn hivebus_accepts_bulwark_seed_and_derives_same_fingerprint() {
         return;
     }
 
+    // WO-153@v1: protect a real scratch file; current releases refuse a protect
+    // path that does not exist.
+    let protect = scratch("hivebus-loop").join("protect");
+    fs::write(&protect, "x\n").unwrap();
+
     // Dispatch a slow agent so the placed seed persists while we feed it to hivebus.
     let child = Command::new(bin())
         .args([
             "ssh",
             TARGET,
+            // WO-153@v1: stream the binary under test; an installed remote
+            // copy would test stale code and conflicts with the never-deploy test.
             "--deploy",
-            "never",
+            "scp",
             "--auto",
             "deny",
             "--auto-worker-uid",
             "--hivebus-worker-seed-generate",
             "--protect",
-            "/tmp/bulwark-nonexistent-protect",
-            "--",
-            "sleep",
-            "6",
         ])
+        .arg(&protect)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(protect.with_file_name("state.toml"))
+        .args(["--", "sleep", "6"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -457,6 +496,9 @@ fn deploy_never_without_binary_errors_clearly() {
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110@v4: isolate deployment diagnostics.
         .args(["--", "true"])
         .output()
@@ -488,14 +530,18 @@ fn auto_worker_uid_runs_as_anonymous_uid_no_orphan() {
         .args([
             "ssh",
             TARGET,
+            // WO-153@v1: stream the binary under test, not an installed remote copy.
             "--deploy",
-            "never",
+            "scp",
             "--auto",
             "deny",
             "--auto-worker-uid",
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", "id -u"])
         .output()
         .expect("spawn bulwark ssh --auto-worker-uid");

@@ -113,6 +113,13 @@ commit-body line `Seal-required: acknowledged`. Any defect observed in use must
 produce a reproduction and a permanent automated or seal check; when it crossed
 the enforcement boundary, add its path to that list if it was missing.
 
+<!-- WO-174@v1: state the release binding provided for every Darwin artifact. -->
+The arm64 tarball and arm64 `.pkg` carry the exact Developer-ID-signed Bulwark
+binary hash named by both hardware-seal receipts; upload rechecks the binary in
+each artifact. The x86_64 tarball and `.pkg` are built from the same tag commit
+and signed with the same identity, but are not hardware-sealed; their binding is
+to that tag commit only.
+
 ## Preflight
 
 ```sh

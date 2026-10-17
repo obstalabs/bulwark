@@ -6,6 +6,10 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # WO-140@v1: exercise the repository check rather than a fixture copy.
 # WO-140@v1: let the red proof substitute the pre-fix boundary checker.
 CHECK="${CHECK:-$SCRIPT_DIR/check-seal-ack.sh}"
+# WO-175@v1: exercise the base-copy runner while keeping its red substitute injectable.
+RUNNER="${RUNNER:-$SCRIPT_DIR/run-seal-ack.sh}"
+# WO-175@v1: count weakened-head fixtures the runner wrongly accepts.
+RUNNER_FAILURES=0
 # WO-140@v1: keep fixture repositories outside the source tree.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/bulwark-seal-ack-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -68,6 +72,24 @@ expect_accepted() {
   echo "PASS: $name accepted"
 }
 
+# WO-175@v1: assert the base-copy runner rejects a weakened head control.
+expect_runner_rejected() {
+  local name="$1" repo="$2" base="$3" expected="$4" output runner_temp
+  runner_temp="$WORK/runner-$name"
+  mkdir -p "$runner_temp"
+  if output=$(cd "$repo" && RUNNER_TEMP="$runner_temp" "$RUNNER" "$base" 2>&1); then
+    echo "FAIL: $name was accepted"
+    RUNNER_FAILURES=$((RUNNER_FAILURES + 1))
+    return
+  fi
+  if ! grep -qF "$expected" <<< "$output"; then
+    echo "FAIL: $name did not name $expected: $output"
+    RUNNER_FAILURES=$((RUNNER_FAILURES + 1))
+    return
+  fi
+  echo "PASS: $name rejected ($expected)"
+}
+
 # WO-140@v1: a boundary change without the exact marker fails.
 repo=$(new_fixture no-marker)
 base=$(git -C "$repo" rev-parse HEAD)
@@ -126,3 +148,38 @@ printf 'src/gate.rs\n' > "$repo/scripts/boundary-paths.txt"
 git -C "$repo" add scripts/boundary-paths.txt
 head=$(fixture_commit "$repo" "$base" "test: change boundary list" 0)
 expect_rejected "boundary list change" "$repo" "$base" "$head" "scripts/boundary-paths.txt"
+
+# WO-175@v1: replacing the head checker cannot weaken the base branch's control.
+repo=$(new_fixture weakened-head-checker)
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/scripts" "$repo/src"
+cp "$SCRIPT_DIR/check-seal-ack.sh" "$repo/scripts/check-seal-ack.sh"
+cp "$SCRIPT_DIR/boundary-paths.txt" "$repo/scripts/boundary-paths.txt"
+printf '// base gate\n' > "$repo/src/gate.rs"
+git -C "$repo" add scripts/check-seal-ack.sh scripts/boundary-paths.txt src/gate.rs
+base=$(fixture_commit "$repo" "$base" "test: seed seal control" 1)
+printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/check-seal-ack.sh"
+printf '// unacknowledged change\n' >> "$repo/src/gate.rs"
+git -C "$repo" add scripts/check-seal-ack.sh src/gate.rs
+fixture_commit "$repo" "$base" "test: weaken checker" 0 >/dev/null
+expect_runner_rejected "weakened head checker" "$repo" "$base" "src/gate.rs"
+
+# WO-175@v1: removing a head boundary entry cannot weaken the base branch's list.
+repo=$(new_fixture weakened-head-list)
+base=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/scripts" "$repo/src"
+cp "$SCRIPT_DIR/check-seal-ack.sh" "$repo/scripts/check-seal-ack.sh"
+cp "$SCRIPT_DIR/boundary-paths.txt" "$repo/scripts/boundary-paths.txt"
+printf '// base gate\n' > "$repo/src/gate.rs"
+git -C "$repo" add scripts/check-seal-ack.sh scripts/boundary-paths.txt src/gate.rs
+base=$(fixture_commit "$repo" "$base" "test: seed boundary list" 1)
+printf 'src/allowlist.rs\n' > "$repo/scripts/boundary-paths.txt"
+printf '// unacknowledged change\n' >> "$repo/src/gate.rs"
+git -C "$repo" add scripts/boundary-paths.txt src/gate.rs
+fixture_commit "$repo" "$base" "test: weaken boundary list" 0 >/dev/null
+expect_runner_rejected "weakened head list" "$repo" "$base" "src/gate.rs"
+
+# WO-175@v1: report every base-copy bypass in one deterministic fixture run.
+if [ "$RUNNER_FAILURES" -ne 0 ]; then
+  exit 1
+fi

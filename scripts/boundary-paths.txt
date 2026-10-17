@@ -17,3 +17,5 @@ macos-es-proof/package-release.sh
 scripts/boundary-paths.txt
 # WO-140@v1: weakening the acknowledgement check must require acknowledgement.
 scripts/check-seal-ack.sh
+# WO-175@v1: the base-copy runner selects the checker and list used for judgement.
+scripts/run-seal-ack.sh

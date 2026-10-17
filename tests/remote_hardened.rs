@@ -54,9 +54,13 @@ fn ssh_hardened_allows_grant_denies_outside() {
         needle.display()
     );
 
+    // WO-153@v1: stream the binary under test, not an installed remote copy.
     let out = Command::new(bin())
-        .args(["ssh", TARGET, "--deploy", "never", "--hardened", "--allow"])
+        .args(["ssh", TARGET, "--deploy", "scp", "--hardened", "--allow"])
         .arg(&grant)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .output()
         .expect("spawn bulwark ssh --hardened");
@@ -83,10 +87,15 @@ fn ssh_hardened_allows_grant_denies_outside() {
 /// mix locally, before any ssh, with a clear message.
 #[test]
 fn ssh_hardened_rejects_protect() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = scratch("rejects-protect").join("state.toml");
     let out = Command::new(bin())
         .args([
             "ssh",
             TARGET,
+            // WO-149@v1: isolate the integrity state for this dispatch.
+            "--state",
+            state.to_str().unwrap(),
             "--hardened",
             "--allow",
             "/tmp/x",
@@ -108,8 +117,13 @@ fn ssh_hardened_rejects_protect() {
 /// `--hardened` with no `--allow` is rejected (no default floor).
 #[test]
 fn ssh_hardened_requires_allow() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = scratch("requires-allow").join("state.toml");
     let out = Command::new(bin())
-        .args(["ssh", TARGET, "--hardened", "--", "true"])
+        // WO-149@v1: isolate the integrity state for this dispatch.
+        .args(["ssh", TARGET, "--state"])
+        .arg(&state)
+        .args(["--hardened", "--", "true"])
         .output()
         .expect("spawn");
     let err = String::from_utf8_lossy(&out.stderr);

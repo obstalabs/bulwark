@@ -128,9 +128,10 @@ jobs:
           exit 1
 
       # WO-151@v1: exercise the unreadable-state path before privileged tests.
+      # WO-176@v1: print Cargo diagnostics before failing the non-root check.
       - name: Integrity EACCES test (non-root)
         run: |
-          output=$(cargo test --bin bulwark integrity::tests::eacces_state_file_starts_tainted_and_preserves_evidence -- --ignored --exact 2>&1)
+          output=$(cargo test --bin bulwark integrity::tests::eacces_state_file_starts_tainted_and_preserves_evidence -- --ignored --exact 2>&1) || { printf '%s\n' "$output"; exit 1; }
           printf '%s\n' "$output"
           grep -qF 'test result: ok. 1 passed;' <<<"$output"
 
@@ -150,6 +151,13 @@ jobs:
             echo "::error::integration tests need root but this runner is non-root and has no sudo"
             exit 1
           fi
+
+      # WO-149@v1: the root suites use per-test state files; record the host default
+      # so a suite that falls back to it fails the run instead of tainting the next.
+      - name: Snapshot host integrity state
+        run: |
+          ${{ steps.priv.outputs.run }} sh -c 'if [ -e /var/lib/bulwark/state.toml ]; then sha256sum /var/lib/bulwark/state.toml; else echo absent; fi' > "$RUNNER_TEMP/host-state.before"
+          cat "$RUNNER_TEMP/host-state.before"
 
       - name: Integration tests (live fanotify gate, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_integration -- --ignored --test-threads=1
@@ -181,6 +189,17 @@ jobs:
       - name: Supervisor reaping tests (fault-injection, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test gate_supervisor --features fault-injection -- --ignored --test-threads=1
 
+      # WO-149@v1: no root suite may read-modify-write the host default state file.
+      - name: Host integrity state untouched by root suites
+        if: ${{ !cancelled() }}
+        run: |
+          ${{ steps.priv.outputs.run }} sh -c 'if [ -e /var/lib/bulwark/state.toml ]; then sha256sum /var/lib/bulwark/state.toml; else echo absent; fi' > "$RUNNER_TEMP/host-state.after"
+          cat "$RUNNER_TEMP/host-state.after"
+          cmp -s "$RUNNER_TEMP/host-state.before" "$RUNNER_TEMP/host-state.after" || {
+            echo "::error::a root suite changed /var/lib/bulwark/state.toml; pass --state to every bulwark invocation"
+            exit 1
+          }
+
   # WO-140@v1: flag pull requests that cross the hardware-sealed boundary.
   hardware-seal-ack:
     name: hardware seal acknowledgement
@@ -193,11 +212,20 @@ jobs:
           fetch-depth: 0
 
       # WO-140@v1: require the exact marker for paths in boundary-paths.txt.
+      # WO-175@v1: select the base runner before it selects the base checker and list.
       - name: Check hardware seal acknowledgement
         # WO-140@v1: keep the expression value out of shell source text.
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: scripts/check-seal-ack.sh "origin/$BASE_REF" HEAD
+        run: |
+          runner="$RUNNER_TEMP/run-seal-ack.sh"
+          if git show "origin/$BASE_REF:scripts/run-seal-ack.sh" > "$runner" 2>/dev/null; then
+            :
+          else
+            echo "[bulwark] base branch lacks the seal-ack runner; using the head copy"
+            git show "HEAD:scripts/run-seal-ack.sh" > "$runner"
+          fi
+          bash "$runner" "origin/$BASE_REF"
 
   supply-chain:
     name: supply-chain (cargo-deny)

@@ -32,12 +32,28 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-bulwark-notary}"
 OUT="${OUT:-/tmp/bulwark-pkg}"
 mkdir -p "$OUT"
 
+# WO-174@v1: compare the verified leaf authority with the requested application identity.
+cli_signing_authority() {
+  codesign -dvvv "$1" 2>&1 | awk -F= '
+    /^Authority=/ { print substr($0, index($0, "=") + 1); found = 1; exit }
+    END { if (!found) exit 1 }
+  '
+}
+
 for triple in x86_64-apple-darwin aarch64-apple-darwin; do
   bin="target/${triple}/release/bulwark"
   [ -x "$bin" ] || { echo "!! $bin missing — cargo build --release --target $triple"; exit 1; }
 
-  echo "==> [$triple] re-sign the CLI (Developer ID Application + hardened runtime)"
-  codesign --force --sign "$APP_ID" --keychain "$KEYCHAIN" --options runtime --timestamp "$bin"
+  # WO-174@v1: preserve the exact pre-seal bytes when the intended signer is present.
+  authority=""
+  if codesign --verify --strict "$bin" >/dev/null 2>&1 \
+    && authority=$(cli_signing_authority "$bin") \
+    && [ "$authority" = "$APP_ID" ]; then
+    echo "==> [$triple] keep the verified Developer ID Application signature"
+  else
+    echo "==> [$triple] re-sign the CLI (Developer ID Application + hardened runtime)"
+    codesign --force --sign "$APP_ID" --keychain "$KEYCHAIN" --options runtime --timestamp "$bin"
+  fi
 
   echo "==> [$triple] stage + pkgbuild"
   root="$OUT/root-${triple}"

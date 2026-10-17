@@ -22,12 +22,16 @@ the normal run. CI runs them on a Linux runner.
 Before opening a PR: `make fmt-check && make lint && make test` should pass.
 
 <!-- WO-140@v1: keep enforcement-boundary changes tied to reproducible seal evidence. -->
+<!-- WO-175@v1: explain which revision supplies the acknowledgement control. -->
 Changes matching [`scripts/boundary-paths.txt`](scripts/boundary-paths.txt) must
 carry the exact commit-body line `Seal-required: acknowledged`; macOS seal receipts
 bind the tested binary, source commit, and signed gate, and the release upload
 refuses evidence from another build. Every defect observed in use must produce a
 reproduction and a permanent unit, integration, or seal check, plus a new boundary
-path when the defect crossed that boundary through a path the list did not cover.
+path when the defect crossed that boundary through a path the list did not cover. The
+check runs from the base branch, so a pull request cannot weaken the control that judges
+it; workflow edits remain protected by branch protection and required approval, not by
+this job.
 
 ## Sign your commits (DCO)
 
