@@ -28,6 +28,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI prints Cargo output before failing the non-root integrity-state check.
 <!-- WO-175@v1: pull requests must not supply the seal control that judges them. -->
 - CI evaluates hardware-seal acknowledgement with the base branch's control files.
+<!-- WO-153@v1: reserve remote run paths before placing HiveBus material. -->
+- Remote HiveBus dispatches create each run and key directory exactly once instead of
+  colliding with the consent lane's anti-squatting guard.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
   enumerator documents its non-Linux fallback.

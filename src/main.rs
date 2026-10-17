@@ -902,6 +902,11 @@ fn rand_token() -> String {
 
 // WO-85@v1: compose streamed remote deployment into the gate bootstrap script.
 // WO-87@v1: remove both run and deployment directories on every script exit.
+// WO-153@v1: create the remote run directory once before any material is placed.
+fn build_remote_run_dir_command(remote_dir: &str) -> String {
+    format!("mkdir -m 700 {remote_dir}")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_gate_script(
     remote_dir: &str,
@@ -942,6 +947,8 @@ fn build_gate_script(
     // verdict/prompt FIFO already exists, so the gate never adopts a FIFO it did
     // not create (which an attacker could otherwise read prompts from or write
     // forged verdicts into to self-answer the off-band consent).
+    // WO-153@v1: the exclusive mkdir now runs before material placement; this
+    // script accepts only the same login user's directory before creating lanes.
     format!(
         r#"set -e
 cleanup() {{
@@ -951,7 +958,7 @@ cleanup() {{
   exit "$rc"
 }}
 trap cleanup EXIT INT TERM HUP
-mkdir {dir}
+[ -d {dir} ] && [ -O {dir} ] || {{ echo "[bulwark] remote run directory is missing or not owned by the login user" >&2; exit 73; }}
 mkfifo -m 600 {pl} {vl}
 {deploy}{invoke} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
@@ -1266,6 +1273,11 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         .collect::<Vec<_>>()
         .join(" ");
 
+    // WO-153@v1: reserve the unpredictable run path exactly once as the SSH
+    // login user, before optional material placement can create descendants.
+    run_remote_quiet(target, &build_remote_run_dir_command(&remote_dir), None)
+        .context("create remote run directory")?;
+
     // WO-29: carry hivebus key material to the remote BEFORE the gate runs the
     // agent, so the worker there has a trustworthy first key introduction. The
     // material is placed by a separate, synchronous ssh session that pipes each
@@ -1509,6 +1521,15 @@ struct HivebusPlaced {
     architect_fingerprint: Option<String>,
 }
 
+// WO-153@v1: create the HiveBus directory exclusively inside the reserved run path.
+fn build_hivebus_dir_command(hb_dir: &str, worker_uid: Option<u32>) -> String {
+    let chown_dir = match worker_uid {
+        Some(uid) => format!(" && sudo chown {uid} {hb_dir}"),
+        None => String::new(),
+    };
+    format!("sudo mkdir {hb_dir} && sudo chmod 0700 {hb_dir}{chown_dir}")
+}
+
 /// WO-29: place hivebus key material on the remote under `{remote_dir}/hivebus/`,
 /// per the WO-45 ownership contract: `worker.seed` mode 0600 and `architect.pub`
 /// mode 0644, both owned by the gate uid (root in the MVP — the placement runs
@@ -1551,13 +1572,9 @@ fn place_hivebus_material(
     // create the hivebus dir (0700) before placing files in it. When the worker
     // is dropped to a uid, chown the dir to it so the unprivileged agent can
     // traverse in and read its seed; otherwise it stays root-owned as today.
-    let chown_dir = match worker_uid {
-        Some(uid) => format!(" && sudo chown {uid} {hb_dir}"),
-        None => String::new(),
-    };
     run_remote_quiet(
         target,
-        &format!("sudo mkdir -p {hb_dir} && sudo chmod 0700 {hb_dir}{chown_dir}"),
+        &build_hivebus_dir_command(&hb_dir, worker_uid),
         None,
     )
     .context("create remote hivebus dir")?;
@@ -3530,7 +3547,7 @@ sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-
 exit \"$rc\"\n\
 }\n\
 trap cleanup EXIT INT TERM HUP\n\
-mkdir /tmp/bulwark-remote-42\n\
+[ -d /tmp/bulwark-remote-42 ] && [ -O /tmp/bulwark-remote-42 ] || { echo \"[bulwark] remote run directory is missing or not owned by the login user\" >&2; exit 73; }\n\
 mkfifo -m 600 /tmp/bulwark-remote-42/prompts /tmp/bulwark-remote-42/verdicts\n\
 sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\n  \
 --prompt-out /tmp/bulwark-remote-42/prompts --verdict-in /tmp/bulwark-remote-42/verdicts \\\n  \
@@ -3544,6 +3561,90 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         assert!(
             !script.contains("hivebus"),
             "gate script must not carry key material"
+        );
+    }
+
+    // WO-153@v1: the launch script must consume, not recreate, the run directory.
+    #[test]
+    fn gate_script_requires_exclusively_precreated_run_dir() {
+        let scratch = test_scratch_dir("wo153-run-dir");
+        let remote_dir = scratch.join("missing");
+        let marker = scratch.join("remote-invocation-ran");
+        let remote_dir = remote_dir.to_str().unwrap();
+        let prompt_lane = format!("{remote_dir}/prompts");
+        let verdict_lane = format!("{remote_dir}/verdicts");
+        let script = build_gate_script(
+            remote_dir,
+            &prompt_lane,
+            &verdict_lane,
+            &format!("touch {};", shell_quote(marker.to_str().unwrap())),
+            None,
+            None,
+            "nullbot@host",
+            "--protect '/etc/shadow'",
+            None,
+            "'agent'",
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(
+            !script.contains(&format!("\nmkdir {remote_dir}\n")),
+            "the launch script must not recreate the precreated run directory:\n{script}"
+        );
+        assert!(
+            script.contains(&format!("[ -d {remote_dir} ] && [ -O {remote_dir} ]")),
+            "the launch script must reject a missing or foreign-owned run directory:\n{script}"
+        );
+        assert_eq!(
+            status.code(),
+            Some(73),
+            "unexpected script status: {status}"
+        );
+        assert!(
+            !marker.exists(),
+            "the remote invocation ran despite the invalid run directory"
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    // WO-153@v1: one dispatch owns both exclusive directory creations.
+    #[test]
+    fn hivebus_setup_creates_each_directory_once_without_mkdir_p() {
+        let remote_dir = "/tmp/bulwark-remote-42";
+        let run_dir = build_remote_run_dir_command(remote_dir);
+        let hivebus_dir = build_hivebus_dir_command("/tmp/bulwark-remote-42/hivebus", Some(1000));
+        let script = build_gate_script(
+            remote_dir,
+            "/tmp/bulwark-remote-42/prompts",
+            "/tmp/bulwark-remote-42/verdicts",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            "nullbot@host",
+            "--protect '/etc/shadow'",
+            Some(1000),
+            "'agent'",
+        );
+        let sequence = format!("{run_dir}\n{hivebus_dir}\n{script}");
+
+        assert_eq!(run_dir, "mkdir -m 700 /tmp/bulwark-remote-42");
+        assert_eq!(
+            sequence.matches(&run_dir).count(),
+            1,
+            "the run directory must be created exactly once:\n{sequence}"
+        );
+        assert_eq!(
+            hivebus_dir,
+            "sudo mkdir /tmp/bulwark-remote-42/hivebus && sudo chmod 0700 \
+             /tmp/bulwark-remote-42/hivebus && sudo chown 1000 \
+             /tmp/bulwark-remote-42/hivebus"
+        );
+        assert!(
+            !hivebus_dir.contains("mkdir -p"),
+            "the HiveBus directory must reject an existing path: {hivebus_dir}"
         );
     }
 
