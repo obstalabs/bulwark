@@ -1896,7 +1896,7 @@ where
 
 // WO-15@v1: enumerate filesystems covered by default-deny allow-list mode.
 // WO-159@v1: avoid Linux mount reads and warnings on non-Linux gates.
-/// Enumerate the mount points of every real filesystem from `/proc/mounts`, so
+/// On Linux, enumerate the mount points of every real filesystem from `/proc/mounts`, so
 /// allow-list mode can mark them all. Marking only `/` would miss separate
 /// mounts (tmpfs, a data volume, network shares) and silently allow reads
 /// there — fatal for a default-deny guarantee. We skip a few pseudo
@@ -1904,6 +1904,7 @@ where
 /// event noise (`cgroup`, `devpts`, ...) but keep `proc`/`sysfs`/`tmpfs`/real
 /// block and network filesystems. On any error we fall back to `/` and warn —
 /// a noisy over-mark is safer than a silent gap.
+/// Off Linux, this returns `/` without reading `/proc/mounts`.
 fn real_mount_points() -> Vec<PathBuf> {
     let plan = mount_mark_plan_with_reader(|| std::fs::read_to_string("/proc/mounts"));
     #[cfg(target_os = "linux")]
