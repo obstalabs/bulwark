@@ -15,6 +15,20 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bulwark"))
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 /// Time a single open of `path` from OUTSIDE the supervised tree (a fresh `sh`
 /// process), bounded so a blocked open cannot hang the test thread — the
 /// stalled gate is recovered by the harness, releasing the open. Returns the
@@ -47,6 +61,8 @@ fn probe_open_ms(path: &Path) -> u128 {
 #[test]
 #[ignore = "requires Linux + root"]
 fn stalled_log_reader_does_not_block_outside_opens() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("stalled_log_reader_does_not_block_outside_opens");
     let fs = common::TestFs::new("wo154a");
     let protected = fs.path("secret");
     let allowed = fs.path("allowed.txt");
@@ -61,6 +77,9 @@ fn stalled_log_reader_does_not_block_outside_opens() {
     let mut gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -87,6 +106,8 @@ fn stalled_log_reader_does_not_block_outside_opens() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn pending_consent_does_not_delay_outside_opens() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("pending_consent_does_not_delay_outside_opens");
     let fs = common::TestFs::new("wo154b");
     let protected = fs.path("secret");
     let allowed = fs.path("allowed.txt");
@@ -108,6 +129,9 @@ fn pending_consent_does_not_delay_outside_opens() {
         .arg(&sock)
         .args(["--consent-timeout", "30", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -229,6 +253,8 @@ fn a_stalled_stderr_never_costs_the_receipts_file_a_line() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("the_supervised_tree_is_reaped_if_the_gate_is_killed");
     let fs = common::TestFs::new("wo155");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -242,6 +268,9 @@ fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
     let mut gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -703,6 +732,8 @@ impl Drop for RunGuard {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root + sudo"]
 fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer");
     let fs = common::TestFs::new("wo155pds");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -720,6 +751,9 @@ fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
         .env("BULWARK_TEST_NO_CGROUP", "1")
         .args(["run", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -752,6 +786,8 @@ fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_run_does_not_make_the_agents_stderr_nonblocking() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_run_does_not_make_the_agents_stderr_nonblocking");
     let fs = common::TestFs::new("wo154nonb");
     let protected = fs.path("secret");
     let allowed = fs.path("allowed.txt");
@@ -761,6 +797,9 @@ fn a_run_does_not_make_the_agents_stderr_nonblocking() {
     let out = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["python3", "-c", "import fcntl,os,sys; sys.exit(1 if fcntl.fcntl(2, fcntl.F_GETFL) & os.O_NONBLOCK else 0)"])
         .output()
@@ -971,6 +1010,8 @@ fn graceful_shutdown_denies_all_deferred_consents() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root + sudo"]
 fn the_cgroup_layer_reaps_a_reparented_grandchild() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("the_cgroup_layer_reaps_a_reparented_grandchild");
     let fs = common::TestFs::new("wo155gc");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -990,6 +1031,9 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1031,6 +1075,8 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
 #[cfg(not(feature = "fault-injection"))]
 #[ignore = "requires Linux + root"]
 fn default_build_ignores_the_reaping_switches() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("default_build_ignores_the_reaping_switches");
     let fs = common::TestFs::new("wo155def");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1048,6 +1094,9 @@ fn default_build_ignores_the_reaping_switches() {
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1083,6 +1132,8 @@ fn default_build_ignores_the_reaping_switches() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root + sudo"]
 fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild");
     let fs = common::TestFs::new("wo155gc2");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1108,6 +1159,9 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1164,6 +1218,8 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn normal_exit_reaps_a_daemonized_grandchild() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("normal_exit_reaps_a_daemonized_grandchild");
     let fs = common::TestFs::new("wo155exit");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1183,6 +1239,9 @@ fn normal_exit_reaps_a_daemonized_grandchild() {
     let mut gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1239,6 +1298,8 @@ fn normal_exit_reaps_a_daemonized_grandchild() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails");
     let fs = common::TestFs::new("wo155freeze");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1260,6 +1321,9 @@ fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
         .env("BULWARK_TEST_NO_CGROUP", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1313,6 +1377,8 @@ fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_second_protected_read_during_teardown_is_denied_not_released() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_second_protected_read_during_teardown_is_denied_not_released");
     let fs = common::TestFs::new("wo155twice");
     let protected = fs.path("secret");
     let leak1 = fs.path("leak1.txt");
@@ -1338,6 +1404,9 @@ fn a_second_protected_read_during_teardown_is_denied_not_released() {
         .arg(&sock)
         .args(["--consent-timeout", "30", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1371,6 +1440,8 @@ fn a_second_protected_read_during_teardown_is_denied_not_released() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("default_mode_refuses_without_a_reapable_scope_and_hardened_runs");
     let fs = common::TestFs::new("wo155refuse");
     let protected = fs.path("secret");
     fs::write(&protected, "SECRET-LINE\n").unwrap();
@@ -1381,6 +1452,9 @@ fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
         .env("BULWARK_TEST_NO_SCOPE", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", "echo should-not-run"])
         .output()
@@ -1404,6 +1478,9 @@ fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
         .env("BULWARK_TEST_NO_SCOPE", "1")
         .args([
             "run",
+            // WO-149@v1: isolate the integrity state for this run.
+            "--state",
+            state.to_str().unwrap(),
             "--hardened",
             "--allow-root",
             "--allow",
@@ -1430,6 +1507,8 @@ fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn default_mode_refuses_when_the_status_files_are_unreadable() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("default_mode_refuses_when_the_status_files_are_unreadable");
     let fs = common::TestFs::new("wo155refuse2");
     let protected = fs.path("secret");
     fs::write(&protected, "SECRET-LINE\n").unwrap();
@@ -1438,6 +1517,9 @@ fn default_mode_refuses_when_the_status_files_are_unreadable() {
         .env("BULWARK_TEST_NO_PROCS_EVENTS", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", "echo should-not-run"])
         .output()
@@ -1466,6 +1548,8 @@ fn default_mode_refuses_when_the_status_files_are_unreadable() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild");
     let fs = common::TestFs::new("wo155wfall");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1484,6 +1568,9 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
         .env("BULWARK_TEST_NO_CGROUP_KILL", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1539,6 +1626,9 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state =
+        isolated_state("the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail");
     let fs = common::TestFs::new("wo155wfc");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1558,6 +1648,9 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
         .env("BULWARK_TEST_EVENTS_READ_FAILS", "5")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1615,6 +1708,8 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn the_watcher_exits_when_its_scope_is_removed() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("the_watcher_exits_when_its_scope_is_removed");
     let fs = common::TestFs::new("wo155scope");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1634,6 +1729,9 @@ fn the_watcher_exits_when_its_scope_is_removed() {
     let gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1716,6 +1814,8 @@ fn the_watcher_exits_when_its_scope_is_removed() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("uncooperative_child_is_escalated_after_the_shutdown_grace");
     let fs = common::TestFs::new("wo155stubborn");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1733,6 +1833,9 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
     let mut gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1790,6 +1893,8 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_sigterm_cooperative_child_exits_before_the_reap_escalation");
     let fs = common::TestFs::new("wo155coop");
     let protected = fs.path("secret");
     let gcpid = fs.path("gc.pid");
@@ -1809,6 +1914,9 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
     let mut gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -1865,6 +1973,8 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_foreign_owned_receipts_file_is_refused_and_unchanged");
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
@@ -1898,6 +2008,9 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
         .arg(&protected)
         .args(["--receipts"])
         .arg(&receipts)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", "exit 0"])
         .output()
@@ -1935,6 +2048,8 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_successful_kill_still_waits_for_positive_proof_of_empty");
     let fs = common::TestFs::new("wo155hold");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -1954,6 +2069,9 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
         .env("BULWARK_TEST_PROCS_READ_FAILS", "999999999")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -2023,6 +2141,8 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn the_watcher_stays_alive_while_events_report_populated() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("the_watcher_stays_alive_while_events_report_populated");
     let fs = common::TestFs::new("wo155poll");
     let protected = fs.path("secret");
     let gcpid = fs.path("gc.pid");
@@ -2039,6 +2159,9 @@ fn the_watcher_stays_alive_while_events_report_populated() {
         .env("BULWARK_TEST_EVENTS_READ_POPULATED_FOR", "100")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())
@@ -2093,6 +2216,8 @@ fn the_watcher_stays_alive_while_events_report_populated() {
 #[cfg(feature = "fault-injection")]
 #[ignore = "requires Linux + root"]
 fn a_panicking_supervisor_leaves_a_reaping_watcher() {
+    // WO-149@v1: give this test its own integrity state, never the host default.
+    let state = isolated_state("a_panicking_supervisor_leaves_a_reaping_watcher");
     let fs = common::TestFs::new("wo155panic");
     let protected = fs.path("secret");
     let leak = fs.path("leak.txt");
@@ -2114,6 +2239,9 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
         .env("BULWARK_TEST_PANIC_AFTER_SPAWN", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-149@v1: isolate the integrity state for this run.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .args(["sh", "-c", &inner])
         .stdout(Stdio::null())

@@ -28,10 +28,34 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 // WO-14@v1: run one command under the hardened floor and return what it printed.
 fn run_hardened(grant: &str, cmd: &[&str]) -> String {
+    // WO-149@v1: each caller is one test, so each gets its own integrity state.
+    let state = isolated_state("hardened");
     let mut c = Command::new(bin());
-    c.args(["run", "--hardened", "--allow", grant, "--"]);
+    c.args([
+        "run",
+        "--state",
+        state.to_str().unwrap(),
+        "--hardened",
+        "--allow",
+        grant,
+        "--",
+    ]);
     for a in cmd {
         c.arg(a);
     }
@@ -114,6 +138,9 @@ fn hardened_rejects_symlink_widening_grant() {
     let out = Command::new(bin())
         .args(["run", "--hardened", "--allow"])
         .arg(&glink)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("symlink-widening"))
         .args(["--", "cat"])
         .arg(broad.join("sub/secret.env"))
         .output()
@@ -148,7 +175,10 @@ fn hardened_rejects_symlink_widening_grant() {
 #[ignore = "requires Linux"]
 fn hardened_rejects_relative_grant() {
     let out = Command::new(bin())
-        .args(["run", "--hardened", "--allow", "tmp/**", "--", "true"])
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .args(["run", "--state"])
+        .arg(isolated_state("relative"))
+        .args(["--hardened", "--allow", "tmp/**", "--", "true"])
         .output()
         .expect("spawn bulwark");
     assert!(
@@ -258,6 +288,9 @@ fn hardened_floor_grants_files_and_directories_alike() {
         .arg(format!("{}/**", d.display()))
         .arg("--allow")
         .arg(&f)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("files"))
         .args(["--", "/bin/sh", "-c", &script])
         .output()
         .expect("spawn bulwark");
@@ -361,6 +394,9 @@ fn hardened_floor_does_not_cover_other_processes_in_proc() {
     let out = Command::new(bin())
         .args(["run", "--hardened", "--allow"])
         .arg(format!("{}/**", dir.display()))
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("proc"))
         .args(["--", "/bin/sh", "-c", &script])
         .output()
         .expect("spawn bulwark");
@@ -420,6 +456,8 @@ fn run_hardened_as_root(
     let mut c = Command::new(bin());
     c.args(["run", "--hardened", "--allow", grant]);
     c.args(extra);
+    // WO-149@v1: each caller is one test, so each gets its own integrity state.
+    c.arg("--state").arg(isolated_state("hardened-root"));
     c.arg("--");
     c.args(cmd);
     c.env_remove("SUDO_UID").env_remove("SUDO_GID");
@@ -605,6 +643,9 @@ fn hardened_floor_grants_system_wide_proc_files_only() {
     let out = Command::new(bin())
         .args(["run", "--hardened", "--allow"])
         .arg(format!("{}/**", dir.display()))
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("procsys"))
         .args(["--", "/bin/sh", "-c", script])
         .output()
         .expect("spawn bulwark");

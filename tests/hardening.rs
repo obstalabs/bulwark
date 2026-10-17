@@ -32,6 +32,20 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+// WO-149@v1: give each root test its own integrity state, never the host default.
+fn isolated_state(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("state.toml")
+}
+
 // WO-12@v1: a bind-mounted alias of a protected inode is gated like the original path.
 #[test]
 #[ignore = "requires Linux + root for fanotify + mount"]
@@ -54,6 +68,9 @@ fn bind_mount_alias_is_gated() {
     let out = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("bind"))
         .arg("--")
         .arg("cat")
         .arg(&bindpoint)
@@ -99,6 +116,9 @@ fn graceful_sigterm_denies_held_read() {
         .arg(&sock)
         .args(["--consent-timeout", "30", "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("term"))
         .arg("--")
         .args(["bash", "-c", &inner])
         .spawn()
@@ -131,9 +151,14 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     fs::write(&secret, "SECRETVALUE=regress\n").unwrap();
     fs::write(&public, "public-ok\n").unwrap();
 
+    // WO-149@v1: one integrity state for both runs of this test, never the host default.
+    let state = isolated_state("regress");
     let denied = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this run's integrity state.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .arg("cat")
         .arg(&secret)
@@ -147,6 +172,9 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     let allowed = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this run's integrity state.
+        .arg("--state")
+        .arg(&state)
         .arg("--")
         .arg("cat")
         .arg(&public)
@@ -173,6 +201,9 @@ fn worker_uid_drops_agent_and_gate_still_denies() {
     let out = Command::new(bin())
         .args(["run", "--worker-uid", NOBODY, "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("workeruid"))
         .arg("--")
         .arg("bash")
         .arg("-c")
@@ -223,6 +254,9 @@ fn worker_uid_agent_cannot_kill_the_root_supervisor() {
     let out = Command::new(bin())
         .args(["run", "--worker-uid", NOBODY, "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("nokill"))
         .arg("--")
         .arg("bash")
         .arg("-c")
@@ -302,6 +336,9 @@ fn queue_overflow_fails_closed() {
         .arg(&secret)
         .arg("--receipts")
         .arg(&receipts)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("overflow"))
         .arg("--")
         .arg("bash")
         .arg("-c")
@@ -381,6 +418,9 @@ fn privilege_drop_is_irreversible_to_setuid_exec() {
     let out = Command::new(bin())
         .args(["run", "--protect"])
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(isolated_state("nnp"))
         .arg("--")
         .arg("bash")
         .arg("-c")

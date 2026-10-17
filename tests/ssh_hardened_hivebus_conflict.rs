@@ -54,6 +54,9 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_bulwark"))
             .arg("ssh")
             .arg("nobody@fixture.invalid")
+            // WO-149@v1: forward a per-fixture integrity state, never the host default.
+            .arg("--state")
+            .arg(self.root.join("state.toml"))
             .args(args)
             .env("PATH", std::env::join_paths(paths).unwrap())
             .env("FIXTURE_ROOT", &self.root)

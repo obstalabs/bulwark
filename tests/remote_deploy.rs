@@ -68,6 +68,9 @@ fn auto_allow_session_lets_second_read_through() {
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .output()
         .expect("spawn bulwark ssh");
@@ -113,6 +116,9 @@ fn interactive_operator_grants_locally() {
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -172,6 +178,9 @@ fn deploy_dist_fetches_and_runs() {
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", &inner])
         .output()
         .expect("spawn bulwark ssh");
@@ -235,6 +244,9 @@ fn hivebus_seed_placed_0600_and_fingerprint_printed() {
                 "--protect",
             ])
             .arg(&protect)
+            // WO-149@v1: each dispatch forwards its own scratch integrity state.
+            .arg("--state")
+            .arg(protect.with_file_name("state.toml"))
             .args(["--", "sleep", "4"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -395,6 +407,9 @@ fn hivebus_accepts_bulwark_seed_and_derives_same_fingerprint() {
             "--protect",
         ])
         .arg(&protect)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(protect.with_file_name("state.toml"))
         .args(["--", "sleep", "6"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -481,6 +496,9 @@ fn deploy_never_without_binary_errors_clearly() {
     let out = Command::new(bin())
         .args(["ssh", TARGET, "--deploy", "never", "--protect"])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--auto", "deny", "--auto-worker-uid"]) // WO-110@v4: isolate deployment diagnostics.
         .args(["--", "true"])
         .output()
@@ -521,6 +539,9 @@ fn auto_worker_uid_runs_as_anonymous_uid_no_orphan() {
             "--protect",
         ])
         .arg(&secret)
+        // WO-149@v1: forward this test's own integrity state to the remote run.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .args(["--", "bash", "-c", "id -u"])
         .output()
         .expect("spawn bulwark ssh --auto-worker-uid");

@@ -105,6 +105,9 @@ fn remote_split_denies_then_caches_allow_session() {
         .arg(&verdicts)
         .arg("--protect")
         .arg(&secret)
+        // WO-149@v1: isolate this test's integrity state from the host default.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
         .arg("--")
         .args(["bash", "-c", &inner])
         .status()

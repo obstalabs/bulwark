@@ -37,7 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stream the binary under test instead of using an installed copy.
 <!-- WO-149@v1: isolate remote integration runs from shared integrity state. -->
 - `bulwark ssh` accepts a hidden per-run integrity state path for isolated tests and
-  forwards it safely to the remote gate.
+  forwards it safely to the remote gate; every root test suite uses its own state file and
+  CI fails if one changes the host default.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
   enumerator documents its non-Linux fallback.
