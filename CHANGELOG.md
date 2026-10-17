@@ -31,6 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-153@v1: reserve remote run paths before placing HiveBus material. -->
 - Remote HiveBus dispatches create each run and key directory exactly once instead of
   colliding with the consent lane's anti-squatting guard.
+<!-- WO-149@v1: isolate remote integration runs from shared integrity state. -->
+- `bulwark ssh` accepts a hidden per-run integrity state path for isolated tests and
+  forwards it safely to the remote gate.
 <!-- WO-159@v1: macOS gates do not use Linux mount marks. -->
 - macOS allow-list runs no longer warn that `/proc/mounts` could not be read; the mount
   enumerator documents its non-Linux fallback.

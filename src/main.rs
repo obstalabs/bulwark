@@ -481,6 +481,11 @@ enum Cmd {
         #[arg(long = "auto-worker-uid", conflicts_with = "worker_uid")]
         auto_worker_uid: bool,
 
+        // WO-149@v1: let root integration dispatches isolate remote integrity state.
+        /// Path to the remote integrity state file. Hidden — primarily for tests.
+        #[arg(long = "state", value_name = "FILE", hide = true)]
+        state: Option<PathBuf>,
+
         /// Command (and arguments) to run on the remote host, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -730,6 +735,7 @@ fn main() -> Result<()> {
             hivebus_worker_seed_generate,
             worker_uid,
             auto_worker_uid,
+            state,
             command,
         } => {
             let mode = deploy::DeployMode::parse(&deploy)
@@ -749,6 +755,7 @@ fn main() -> Result<()> {
                 hivebus,
                 worker_uid,
                 auto_worker_uid,
+                state: state.as_deref(),
                 command: &command,
             };
             let code = cmd_ssh(ssh)?;
@@ -907,6 +914,14 @@ fn build_remote_run_dir_command(remote_dir: &str) -> String {
     format!("mkdir -m 700 {remote_dir}")
 }
 
+// WO-149@v1: quote a remote integrity-state path without changing the absent case.
+fn remote_state_arg(state: Option<&Path>) -> String {
+    match state {
+        Some(path) => format!("--state {} ", shell_quote(&path.to_string_lossy())),
+        None => String::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_gate_script(
     remote_dir: &str,
@@ -917,6 +932,7 @@ fn build_gate_script(
     deploy_cleanup_dir: Option<&str>,
     target: &str,
     protect_args: &str,
+    state: Option<&Path>,
     worker_uid: Option<u32>,
     agent: &str,
 ) -> String {
@@ -937,6 +953,7 @@ fn build_gate_script(
         None => String::new(),
     };
     let remote_invocation = invocation_with_worker_env(remote_invocation, &env_prefix);
+    let state = remote_state_arg(state);
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
 
@@ -962,7 +979,7 @@ trap cleanup EXIT INT TERM HUP
 mkfifo -m 600 {pl} {vl}
 {deploy}{invoke} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
-  {worker}{protect} -- {agent}
+  {state}{worker}{protect} -- {agent}
 "#,
         dir = remote_dir,
         pl = prompt_lane,
@@ -971,6 +988,7 @@ mkfifo -m 600 {pl} {vl}
         deploy = deploy_prelude,
         invoke = remote_invocation,
         hl = shell_quote(target),
+        state = state,
         worker = worker,
         protect = protect_args,
         agent = agent,
@@ -983,16 +1001,20 @@ mkfifo -m 600 {pl} {vl}
 /// supervisor, no consent lanes). So there are no FIFOs, no `--consent remote`, no
 /// prompt/verdict machinery — just the floor and the agent. Pure (no I/O) so the
 /// exact bytes are pinned by a unit test.
+// WO-149@v1: compose optional remote state with hardened mode arguments once.
+fn hardened_remote_args(allow_args: &str, state: Option<&Path>, no_base_set: bool) -> String {
+    let no_base = if no_base_set { "--no-base-set " } else { "" };
+    format!("{}{no_base}{allow_args}", remote_state_arg(state))
+}
+
 fn build_hardened_gate_script(
     remote_dir: &str,
     remote_invocation: &str,
     deploy_prelude: Option<&str>,
     deploy_cleanup_dir: Option<&str>,
-    allow_args: &str,
-    no_base_set: bool,
+    run_args: &str,
     agent: &str,
 ) -> String {
-    let no_base = if no_base_set { "--no-base-set " } else { "" };
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
     format!(
@@ -1005,14 +1027,13 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM HUP
 mkdir -p {dir}
-{deploy}{invoke} run --hardened {no_base}{allow} -- {agent}
+{deploy}{invoke} run --hardened {args} -- {agent}
 "#,
         dir = remote_dir,
         cleanup = cleanup_targets,
         deploy = deploy_prelude,
         invoke = remote_invocation,
-        no_base = no_base,
-        allow = allow_args,
+        args = run_args,
         agent = agent,
     )
 }
@@ -1140,6 +1161,8 @@ struct SshArgs<'a> {
     hivebus: HivebusDispatch<'a>,
     worker_uid: Option<u32>,
     auto_worker_uid: bool,
+    // WO-149@v1: forward a test-isolated integrity state path to remote runs.
+    state: Option<&'a Path>,
     command: &'a [String],
 }
 
@@ -1204,6 +1227,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         hivebus,
         worker_uid,
         auto_worker_uid,
+        state,
         command,
     } = args;
 
@@ -1222,7 +1246,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
             anyhow::bail!("--hardened requires at least one --allow <glob>");
         }
         reject_widening_hardened_grants(allow)?;
-        return cmd_ssh_hardened(target, allow, no_base_set, deploy_mode, command);
+        return cmd_ssh_hardened(target, allow, no_base_set, deploy_mode, state, command);
     }
     if protect.is_empty() {
         anyhow::bail!("--protect is required (or use --hardened with --allow)");
@@ -1337,6 +1361,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         remote_bulwark.cleanup_dir(),
         target,
         &protect_args,
+        state,
         worker_uid,
         &agent,
     );
@@ -1449,6 +1474,7 @@ fn cmd_ssh_hardened(
     allow: &[String],
     no_base_set: bool,
     deploy_mode: deploy::DeployMode,
+    state: Option<&Path>,
     command: &[String],
 ) -> Result<i32> {
     // Make a runnable bulwark available on the remote first (so the preflight can
@@ -1486,14 +1512,14 @@ fn cmd_ssh_hardened(
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
+    let run_args = hardened_remote_args(&allow_args, state, no_base_set);
 
     let remote_script = build_hardened_gate_script(
         &remote_dir,
         remote_bulwark.gate_invocation(),
         remote_bulwark.prelude(),
         remote_bulwark.cleanup_dir(),
-        &allow_args,
-        no_base_set,
+        &run_args,
         &agent,
     );
 
@@ -3537,6 +3563,7 @@ mod tests {
             "nullbot@host",
             "--protect '/etc/shadow'",
             None,
+            None,
             "'claude' '-p' 'fix it'",
         );
         let expected = "set -e\n\
@@ -3583,6 +3610,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             "nullbot@host",
             "--protect '/etc/shadow'",
             None,
+            None,
             "'agent'",
         );
         let status = std::process::Command::new("/bin/sh")
@@ -3625,6 +3653,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             "nullbot@host",
             "--protect '/etc/shadow'",
+            None,
             Some(1000),
             "'agent'",
         );
@@ -3684,6 +3713,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             "nullbot@host",
             "--protect '/etc/shadow'",
+            None,
             Some(1000),
             "'claude'",
         );
@@ -3705,6 +3735,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             "nullbot@host",
             "--protect '/etc/shadow'",
+            None,
             None,
             "'claude'",
         );
@@ -3736,6 +3767,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             "nullbot@host",
             "--protect '/etc/shadow'",
+            None,
             Some(60000),
             "'agent'",
         );
@@ -3774,6 +3806,63 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         }
     }
 
+    // WO-149@v1: the SSH command accepts a hidden per-dispatch integrity state path.
+    #[test]
+    fn ssh_state_flag_parses_for_remote_forwarding() {
+        let parsed = Cli::try_parse_from([
+            "bulwark",
+            "ssh",
+            "nullbot@host",
+            "--protect",
+            "/tmp/secret",
+            "--state",
+            "/tmp/isolated state.toml",
+            "--",
+            "true",
+        ]);
+        assert!(parsed.is_ok(), "ssh --state must parse");
+        let Cmd::Ssh { state, .. } = parsed.unwrap().cmd else {
+            panic!("expected ssh command");
+        };
+        assert_eq!(state, Some(PathBuf::from("/tmp/isolated state.toml")));
+    }
+
+    // WO-149@v1: forward the isolated path to every remote run mode with shell quoting.
+    #[test]
+    fn ssh_state_is_shell_quoted_in_remote_run_scripts() {
+        let state = Path::new("/tmp/isolated state.toml");
+        let consent = build_gate_script(
+            "/tmp/d",
+            "/tmp/d/p",
+            "/tmp/d/v",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            "nullbot@host",
+            "--protect '/etc/shadow'",
+            Some(state),
+            Some(60000),
+            "'agent'",
+        );
+        assert!(
+            consent.contains("--state '/tmp/isolated state.toml' --worker-uid 60000"),
+            "consent run must receive the quoted state path:\n{consent}"
+        );
+
+        let hardened = build_hardened_gate_script(
+            "/tmp/d",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            &hardened_remote_args("--allow '/x'", Some(state), false),
+            "'agent'",
+        );
+        assert!(
+            hardened.contains("run --hardened --state '/tmp/isolated state.toml' --allow '/x'"),
+            "hardened run must receive the quoted state path:\n{hardened}"
+        );
+    }
+
     #[test]
     fn remote_uid_pick_snippet_uses_getent_and_bounded_probe() {
         // WO-50: the uid picker must seed from the run id, probe with getent only
@@ -3797,8 +3886,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             "sudo /usr/local/bin/bulwark",
             None,
             None,
-            "--allow '/var/log/**'",
-            false,
+            &hardened_remote_args("--allow '/var/log/**'", None, false),
             "'claude'",
         );
         let expected = "set -e\n\
@@ -3847,8 +3935,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             "sudo /b",
             None,
             None,
-            "--allow '/x'",
-            true,
+            &hardened_remote_args("--allow '/x'", None, true),
             "'a'",
         );
         assert!(
@@ -3860,8 +3947,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             "sudo /b",
             None,
             None,
-            "--allow '/x'",
-            false,
+            &hardened_remote_args("--allow '/x'", None, false),
             "'a'",
         );
         assert!(!without.contains("--no-base-set"), "off => flag absent");
