@@ -2,9 +2,10 @@
 //!
 //! Linux fanotify MVP. `main` stays thin and delegates to the internal modules.
 
+// WO-173@v2: the crate-level allowance is gone; gates are per item.
 // The Linux gate exercises the full fanotify/Landlock/socket surface. Other
 // platforms compile the portable support code progressively as their gate
-// backends land, so scope the dead-code allowance away from Linux only.
+// backends land, so each Linux-only item carries its own `allow(dead_code)` gate.
 
 // WO-155@v1: the `fault-injection` feature exists for DEBUG-only tests (it lets
 // a test disable a reaping layer). It must never compile into a release binary —
