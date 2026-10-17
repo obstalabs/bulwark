@@ -127,6 +127,13 @@ jobs:
           printf '%s\n' "$err"
           exit 1
 
+      # WO-151@v1: exercise the unreadable-state path before privileged tests.
+      - name: Integrity EACCES test (non-root)
+        run: |
+          output=$(cargo test --bin bulwark integrity::tests::eacces_state_file_starts_tainted_and_preserves_evidence -- --ignored --exact 2>&1)
+          printf '%s\n' "$output"
+          grep -qF 'test result: ok. 1 passed;' <<<"$output"
+
       # WO-36: the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
       # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
       # This works on both a passwordless-sudo runner and a runner that runs as
