@@ -54,8 +54,9 @@ fn ssh_hardened_allows_grant_denies_outside() {
         needle.display()
     );
 
+    // WO-153@v1: stream the binary under test, not an installed remote copy.
     let out = Command::new(bin())
-        .args(["ssh", TARGET, "--deploy", "never", "--hardened", "--allow"])
+        .args(["ssh", TARGET, "--deploy", "scp", "--hardened", "--allow"])
         .arg(&grant)
         .args(["--", "bash", "-c", &inner])
         .output()

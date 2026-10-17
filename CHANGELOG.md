@@ -33,7 +33,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI evaluates hardware-seal acknowledgement with the base branch's control files.
 <!-- WO-153@v1: reserve remote run paths before placing HiveBus material. -->
 - Remote HiveBus dispatches create each run and key directory exactly once instead of
-  colliding with the consent lane's anti-squatting guard.
+  colliding with the consent lane's anti-squatting guard; the remote integration tests
+  stream the binary under test instead of using an installed copy.
 <!-- WO-149@v1: isolate remote integration runs from shared integrity state. -->
 - `bulwark ssh` accepts a hidden per-run integrity state path for isolated tests and
   forwards it safely to the remote gate.
