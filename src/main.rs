@@ -243,8 +243,10 @@ enum Cmd {
         #[arg(long = "consent", value_name = "MODE", default_value = "static")]
         consent: ConsentMode,
 
+        // WO-157@v1: disclose the verified lifecycle of the socket's lock directory.
         /// Path for the consent socket when `--consent socket` (default:
         /// `$XDG_RUNTIME_DIR/bulwark-consent.sock` or `/tmp/bulwark-consent.sock`).
+        /// Its sibling `.d` lock directory is removed after verified teardown.
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 
@@ -352,7 +354,9 @@ enum Cmd {
         #[arg(long = "receipts", value_name = "FILE")]
         receipts: Option<PathBuf>,
 
+        // WO-157@v1: disclose the verified lifecycle of the socket's lock directory.
         /// Path for the consent socket when the agent has `decision = "ask"`.
+        /// Its sibling `.d` lock directory is removed after verified teardown.
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 

@@ -4,6 +4,10 @@
 //! and a separate `bulwark consent` operator, so they are `#[ignore]` and run
 //! under `sudo` on Linux only — same gate as the other integration tests.
 
+// WO-178@v1: reuse the hard-kill scope guard; this suite needs no other helper.
+#[allow(dead_code)]
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -438,18 +442,21 @@ fn node_is_0600_socket_owned_by_invoking_user() {
     let dir = scratch("node");
     let sock = dir.join("consent.sock");
     let node = sock_node(&sock);
-    let mut gate = Command::new(bin())
-        .args(["run", "--consent", "socket", "--consent-socket"])
-        .arg(&sock)
-        // WO-149@v1: isolate this test's integrity state from the host default.
-        .arg("--state")
-        .arg(isolated_state("node"))
-        .args(["--consent-timeout", "4", "--protect", "/etc/hostname", "--"])
-        .args(["sleep", "8"])
-        .env("SUDO_UID", "65534")
-        .env("SUDO_GID", "65534")
-        .spawn()
-        .expect("spawn gate");
+    // WO-178@v1: the killed gate never removes its own cgroup scope.
+    let mut gate = common::HardKillScopeGuard::new(
+        Command::new(bin())
+            .args(["run", "--consent", "socket", "--consent-socket"])
+            .arg(&sock)
+            // WO-149@v1: isolate this test's integrity state from the host default.
+            .arg("--state")
+            .arg(isolated_state("node"))
+            .args(["--consent-timeout", "4", "--protect", "/etc/hostname", "--"])
+            .args(["sleep", "8"])
+            .env("SUDO_UID", "65534")
+            .env("SUDO_GID", "65534")
+            .spawn()
+            .expect("spawn gate"),
+    );
 
     for _ in 0..200 {
         if node.exists() {
@@ -487,25 +494,28 @@ fn root_default_socket_ignores_xdg_runtime_dir() {
     // WO-149@v1: isolate this test's integrity state from the host default.
     let state = isolated_state("rootdefault");
 
-    let mut gate = Command::new(bin())
-        .args([
-            "run",
-            "--state",
-            state.to_str().unwrap(),
-            "--consent",
-            "socket",
-            "--consent-timeout",
-            "4",
-            "--protect",
-            "/etc/hostname",
-            "--",
-        ])
-        .args(["sleep", "8"])
-        // sudo -E preserves a user-owned XDG_RUNTIME_DIR; as root the default
-        // must ignore it and bind under /run/bulwark instead.
-        .env("XDG_RUNTIME_DIR", &xdg)
-        .spawn()
-        .expect("spawn gate");
+    // WO-178@v1: the killed gate never removes its own cgroup scope.
+    let mut gate = common::HardKillScopeGuard::new(
+        Command::new(bin())
+            .args([
+                "run",
+                "--state",
+                state.to_str().unwrap(),
+                "--consent",
+                "socket",
+                "--consent-timeout",
+                "4",
+                "--protect",
+                "/etc/hostname",
+                "--",
+            ])
+            .args(["sleep", "8"])
+            // sudo -E preserves a user-owned XDG_RUNTIME_DIR; as root the default
+            // must ignore it and bind under /run/bulwark instead.
+            .env("XDG_RUNTIME_DIR", &xdg)
+            .spawn()
+            .expect("spawn gate"),
+    );
 
     for _ in 0..200 {
         if node.exists() {
@@ -677,27 +687,30 @@ fn root_parent_is_0711_under_umask_077_and_invoking_user_connects() {
     // WO-149@v1: isolate the integrity state; created before the umask changes.
     let state = isolated_state("rootparent");
     let old = unsafe { libc::umask(0o077) };
-    let mut gate = Command::new(bin())
-        .args([
-            "run",
-            "--state",
-            state.to_str().unwrap(),
-            "--allow-root",
-            "--consent",
-            "socket",
-            "--consent-timeout",
-            "20",
-            "--protect",
-            "/etc/hostname",
-            "--",
-        ])
-        .args([
-            "bash",
-            "-c",
-            "sleep 3; cat /etc/hostname > /dev/null 2>&1; echo done",
-        ])
-        .spawn()
-        .expect("spawn gate");
+    // WO-178@v1: the killed gate never removes its own cgroup scope.
+    let mut gate = common::HardKillScopeGuard::new(
+        Command::new(bin())
+            .args([
+                "run",
+                "--state",
+                state.to_str().unwrap(),
+                "--allow-root",
+                "--consent",
+                "socket",
+                "--consent-timeout",
+                "20",
+                "--protect",
+                "/etc/hostname",
+                "--",
+            ])
+            .args([
+                "bash",
+                "-c",
+                "sleep 3; cat /etc/hostname > /dev/null 2>&1; echo done",
+            ])
+            .spawn()
+            .expect("spawn gate"),
+    );
     unsafe { libc::umask(old) };
 
     let node = std::path::PathBuf::from("/run/bulwark/consent.sock.d/s");

@@ -74,7 +74,7 @@ fn stalled_log_reader_does_not_block_outside_opens() {
         "for i in $(seq 1 400); do cat {} >/dev/null; done",
         allowed.display()
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
@@ -86,6 +86,8 @@ fn stalled_log_reader_does_not_block_outside_opens() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: reap a deliberately killed gate before removing its empty scope.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     // Outside opens must complete fast throughout the flood.
     for _ in 0..40 {
@@ -118,7 +120,7 @@ fn pending_consent_does_not_delay_outside_opens() {
     // The agent opens the PROTECTED file, which holds a consent prompt for the
     // full timeout (no operator answers).
     let inner = format!("cat {} >/dev/null 2>&1; echo done", protected.display());
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .args([
             "run",
             "--allow-root",
@@ -138,6 +140,8 @@ fn pending_consent_does_not_delay_outside_opens() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: finish cgroup cleanup before the test filesystem unmounts.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     // Let the agent reach the protected open (the prompt is now pending).
     std::thread::sleep(Duration::from_millis(500));
@@ -265,7 +269,7 @@ fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
         protected.display(),
         leak.display()
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
@@ -277,6 +281,8 @@ fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: remove the hard-killed run's scope on success and panic paths.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     // Kill the gate after the agent is launched (1s), before its 3s read.
     std::thread::sleep(Duration::from_secs(1));
@@ -306,6 +312,82 @@ fn wait_for_path(path: &Path, budget: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     true
+}
+
+// WO-177@v1: wait for the writer's newline before parsing a published pid.
+fn read_complete_pid(path: &Path, budget: Duration) -> i32 {
+    read_complete_pid_with(path, budget, |_| {})
+}
+
+// WO-177@v1: expose incomplete observations so the pure regression test can synchronize.
+fn read_complete_pid_with<F>(path: &Path, budget: Duration, mut on_incomplete: F) -> i32
+where
+    F: FnMut(&[u8]),
+{
+    let deadline = Instant::now() + budget;
+    let mut bytes = Vec::new();
+    loop {
+        match fs::read(path) {
+            Ok(read) => bytes = read,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => bytes.clear(),
+            Err(error) => panic!(
+                "cannot read grandchild pid before {budget:?} deadline: {error}; bytes read: {bytes:?}"
+            ),
+        }
+        if bytes.ends_with(b"\n") {
+            let line = std::str::from_utf8(&bytes[..bytes.len() - 1]).unwrap_or_else(|error| {
+                panic!("grandchild pid is not UTF-8: {error}; bytes read: {bytes:?}")
+            });
+            return line.parse().unwrap_or_else(|error| {
+                panic!("cannot parse complete grandchild pid: {error}; bytes read: {bytes:?}")
+            });
+        }
+        on_incomplete(&bytes);
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {budget:?} waiting for a complete grandchild pid line; bytes read: {bytes:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+// WO-177@v1: an empty first read waits for the writer's complete newline-terminated pid.
+#[test]
+fn complete_pid_reader_waits_for_newline_without_sleep() {
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-pid-reader-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("grandchild.pid");
+    fs::write(&path, b"").unwrap();
+
+    let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let reader_path = path.clone();
+    let reader = std::thread::spawn(move || {
+        let mut first = true;
+        read_complete_pid_with(&reader_path, Duration::from_secs(1), |bytes| {
+            if first {
+                assert!(bytes.is_empty(), "first read must see the empty file");
+                observed_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                first = false;
+            }
+        })
+    });
+
+    observed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reader never observed the incomplete pid file");
+    fs::write(&path, b"1234\n").unwrap();
+    continue_tx.send(()).unwrap();
+    assert_eq!(reader.join().expect("pid reader panicked"), 1234);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 /// The number of open file descriptors the gate process holds (its `/proc/N/fd`).
@@ -388,15 +470,16 @@ fn proc_comm(pid: i32) -> Option<String> {
 /// fails closed: it panics on an empty pid list (before any destructive step) and
 /// on any pidfd_open error. Drop runs its teardown to completion and never aborts
 /// mid-sequence: (a) a gate that is not definitively reaped is SIGKILLed only (no
-/// blocking `wait()`), then (b)–(e) signal/kill/prove the watchers and the scope
-/// is rmdir'd, and only then a final reap polls the gate's `try_wait()` up to
-/// GATE_REAP_BOUND. Each failure — a nonzero gate kill, a watcher still un-exited
-/// after WATCHER_KILL_BOUND, a gate not reaped within GATE_REAP_BOUND — is
-/// collected; after full teardown Drop writes one line per failure to stderr and
-/// aborts the process, so the suite never continues racing a possibly-held
-/// fanotify group. (Non-Linux:
+/// blocking `wait()`), then (b)–(e) signal/kill/prove the watchers and attempts
+/// to remove the scope, and only then a final reap polls the gate's `try_wait()`
+/// up to GATE_REAP_BOUND. Each failure — a nonzero gate kill, a watcher still
+/// un-exited after WATCHER_KILL_BOUND, a remaining scope, a gate reap observation
+/// error, or a gate not reaped within GATE_REAP_BOUND — is collected; after full
+/// teardown Drop writes one line per failure to stderr and aborts the process, so
+/// the suite never continues racing a possibly-held fanotify group. (Non-Linux:
 /// these root tests are always ignored, so the guard is inert.)
 // WO-155@v1: own every process and cgroup resource used by watcher tests.
+// WO-158@v1: preserve teardown errors and require proof that the scope was removed.
 #[cfg(feature = "fault-injection")]
 struct RunGuard {
     gate: Option<std::process::Child>,
@@ -678,30 +761,57 @@ impl Drop for RunGuard {
                 unsafe { libc::close(fd) };
             }
 
+            // WO-158@v1: a remaining scope is a teardown failure, not silent residue.
             // The scope is now empty; remove it. The gate's own CgroupScope drop
             // never runs when the gate was SIGKILLed, so the guard owns this.
-            // Best-effort with a short retry, mirroring CgroupScope::drop.
             for _ in 0..50 {
                 if fs::remove_dir(&self.scope).is_ok() || !self.scope.exists() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            if self.scope.exists() {
+                failures.push(format!(
+                    "[bulwark] cgroup scope {} was not removed after teardown",
+                    self.scope.display()
+                ));
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = &self.scope;
 
-        // Final reap: only now that every other kill has been sent and the scope
-        // is rmdir'd, poll the (possibly SIGKILLed) gate's `try_wait()` up to
-        // GATE_REAP_BOUND. `Ok(Some(..))` = reaped; a timeout or Err records it
-        // as not reaped. No `Child::wait()` anywhere in Drop (that would block on
-        // a gate that refused to die).
+        // WO-158@v1: retain every reap observation error even if a later poll succeeds.
+        // Final reap: only now that every other kill has been sent and scope
+        // removal attempted, poll the (possibly SIGKILLed) gate's `try_wait()` up
+        // to GATE_REAP_BOUND. No `Child::wait()` appears in Drop because it could
+        // block on a gate that refused to die.
         if let Some(mut gate) = gate_to_reap.take() {
             let reap_deadline = Instant::now() + GATE_REAP_BOUND;
-            let mut reaped = matches!(gate.try_wait(), Ok(Some(_)));
-            while !reaped && Instant::now() < reap_deadline {
+            let mut reaped = false;
+            let mut reap_error = None;
+            loop {
+                match gate.try_wait() {
+                    Ok(Some(_)) => {
+                        reaped = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if reap_error.is_none() {
+                            reap_error = Some(error.to_string());
+                        }
+                    }
+                }
+                if Instant::now() >= reap_deadline {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(10));
-                reaped = matches!(gate.try_wait(), Ok(Some(_)));
+            }
+            if let Some(error) = reap_error {
+                failures.push(format!(
+                    "[bulwark] gate pid {} reap observation failed: {error}",
+                    gate.id()
+                ));
             }
             if !reaped {
                 failures.push(format!(
@@ -747,7 +857,7 @@ fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
         protected.display(),
         leak.display()
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP", "1")
         .args(["run", "--protect"])
         .arg(&protected)
@@ -760,6 +870,8 @@ fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: own hard-kill cleanup even when the cgroup layer is disabled.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&ready, Duration::from_secs(5)),
@@ -1027,7 +1139,7 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
         leak = leak.display(),
         done = gc_done.display(),
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--protect"])
         .arg(&protected)
@@ -1040,6 +1152,8 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: clean the cgroup scope after the parent-death proof completes.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&ready, Duration::from_secs(5)),
@@ -1089,7 +1203,7 @@ fn default_build_ignores_the_reaping_switches() {
         protected.display(),
         leak.display()
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP", "1")
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--allow-root", "--protect"])
@@ -1103,6 +1217,8 @@ fn default_build_ignores_the_reaping_switches() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: clean the default build's hard-killed run scope on every exit.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&ready, Duration::from_secs(5)),
@@ -1155,7 +1271,7 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
         pid = gcpid.display(),
         ready = ready.display(),
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
         .args(["run", "--protect"])
         .arg(&protected)
@@ -1168,6 +1284,8 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: wait for cgroup emptiness and remove the killed run's scope.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&ready, Duration::from_secs(5)),
@@ -1177,11 +1295,8 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     // Let the grandchild settle into its wait loop before the kill.
     std::thread::sleep(Duration::from_millis(300));
 
@@ -1253,11 +1368,8 @@ fn normal_exit_reaps_a_daemonized_grandchild() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
 
     // The gate must exit promptly (it reaps the orphan, not waits out 30 s).
     let exit_deadline = Instant::now() + Duration::from_secs(8);
@@ -1335,11 +1447,8 @@ fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
 
     let exit_deadline = Instant::now() + Duration::from_secs(8);
     let st = loop {
@@ -1564,7 +1673,7 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
         leak = leak.display(),
         pid = gcpid.display(),
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP_KILL", "1")
         .args(["run", "--allow-root", "--protect"])
         .arg(&protected)
@@ -1577,16 +1686,15 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: remove the freeze-fallback run's scope after positive emptiness proof.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1643,7 +1751,7 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
         leak = leak.display(),
         pid = gcpid.display(),
     );
-    let mut gate = Command::new(bin())
+    let gate = Command::new(bin())
         .env("BULWARK_TEST_KILL_WRITE_FAIL", "1")
         .env("BULWARK_TEST_EVENTS_READ_FAILS", "5")
         .args(["run", "--allow-root", "--protect"])
@@ -1657,16 +1765,15 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn gate");
+    // WO-158@v1: clean the fail-closed watcher's scope after it empties the tree.
+    let mut gate = common::HardKillScopeGuard::new(gate);
 
     assert!(
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1847,11 +1954,8 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1928,7 +2032,8 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -2086,7 +2191,8 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     // Pin the watcher (a child of the supervisor) BEFORE the kill; the guard
@@ -2256,7 +2362,8 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     // Pin the watcher (a child of the supervisor) BEFORE the panic; the guard

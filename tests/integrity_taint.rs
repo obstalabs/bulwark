@@ -6,6 +6,10 @@
 //! taint lifecycle end-to-end: a clean run does not taint; an unclean restart
 //! and object-identity drift both taint; and `bulwark reset` clears it.
 
+// WO-178@v1: reuse the hard-kill scope guard; this suite needs no other helper.
+#[allow(dead_code)]
+mod common;
+
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -86,15 +90,18 @@ fn unclean_restart_taints_then_reset_clears() {
 
     // Run 1: a gate that sleeps long enough for us to SIGKILL it mid-flight, so
     // mark_clean_shutdown never runs.
-    let mut child = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
-        .arg(&secret)
-        .arg("--state")
-        .arg(&state)
-        .arg("--")
-        .args(["sleep", "30"])
-        .spawn()
-        .expect("spawn gate");
+    // WO-178@v1: the SIGKILLed gate never removes its own cgroup scope.
+    let mut child = common::HardKillScopeGuard::new(
+        Command::new(bin())
+            .args(["run", "--allow-root", "--protect"])
+            .arg(&secret)
+            .arg("--state")
+            .arg(&state)
+            .arg("--")
+            .args(["sleep", "30"])
+            .spawn()
+            .expect("spawn gate"),
+    );
     // Let it install the gate and write begin_run state.
     std::thread::sleep(Duration::from_millis(1500));
     // SIGKILL the supervisor: no graceful path, no clean marker.
@@ -179,15 +186,18 @@ fn taint_receipt_is_recorded() {
     fs::write(&secret, "SECRET=1\n").unwrap();
 
     // Cause an unclean restart.
-    let mut child = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
-        .arg(&secret)
-        .arg("--state")
-        .arg(&state)
-        .arg("--")
-        .args(["sleep", "30"])
-        .spawn()
-        .expect("spawn gate");
+    // WO-178@v1: the SIGKILLed gate never removes its own cgroup scope.
+    let mut child = common::HardKillScopeGuard::new(
+        Command::new(bin())
+            .args(["run", "--allow-root", "--protect"])
+            .arg(&secret)
+            .arg("--state")
+            .arg(&state)
+            .arg("--")
+            .args(["sleep", "30"])
+            .spawn()
+            .expect("spawn gate"),
+    );
     std::thread::sleep(Duration::from_millis(1500));
     unsafe {
         libc::kill(child.id() as i32, libc::SIGKILL);

@@ -86,6 +86,8 @@ set -eu
 /usr/bin/mkfifo "$@"
 shift 2
 printf '%s\n' "$@" > "$FIXTURE_ROOT/lanes"
+# WO-83@v1: preserve each real FIFO's mode and owner before remote cleanup.
+for lane do /bin/ls -ldn "$lane" >> "$FIXTURE_ROOT/lane-metadata"; done
 "#,
         );
         fixture.script(
@@ -267,6 +269,41 @@ fn distinct_worker_launches_and_cleans_lanes() {
     assert_eq!(f.contents("queries"), "identity\n");
     assert!(String::from_utf8_lossy(&out.stderr)
         .contains(&format!("worker dropped to uid {WORKER_UID}")));
+}
+
+// WO-83@v1: prove both login-owned 0600 lanes grant a distinct worker no access bits.
+#[test]
+fn distinct_worker_has_no_permissions_on_the_consent_lanes() {
+    let f = RemoteFixture::new();
+    let login_uid = unsafe { libc::geteuid() }.to_string();
+    let worker_uid = if login_uid == WORKER_UID {
+        "42004"
+    } else {
+        WORKER_UID
+    };
+    let out = f.run(
+        &["--protect", "/fixture-secret", "--worker-uid", worker_uid],
+        &[("FIXTURE_LOGIN_UID", &login_uid)],
+    );
+
+    f.assert_launched(&out, worker_uid, false);
+    let metadata = f.contents("lane-metadata");
+    let lanes: Vec<&str> = metadata.lines().collect();
+    assert_eq!(lanes.len(), 2, "metadata must cover both consent FIFOs");
+    for lane in lanes {
+        let fields: Vec<&str> = lane.split_whitespace().collect();
+        assert!(fields.len() >= 3, "unexpected FIFO metadata: {lane}");
+        let mode = fields[0].trim_end_matches(['@', '+']);
+        assert_eq!(mode, "prw-------", "lane must be a mode-600 FIFO");
+        assert_eq!(
+            fields[2], login_uid,
+            "lane must belong to the SSH login uid"
+        );
+        assert_ne!(
+            fields[2], worker_uid,
+            "the selected worker must own neither read nor write bits on a lane"
+        );
+    }
 }
 
 // WO-110@v4: a root SSH login may launch only a separately selected non-root worker.
