@@ -308,6 +308,82 @@ fn wait_for_path(path: &Path, budget: Duration) -> bool {
     true
 }
 
+// WO-177@v1: wait for the writer's newline before parsing a published pid.
+fn read_complete_pid(path: &Path, budget: Duration) -> i32 {
+    read_complete_pid_with(path, budget, |_| {})
+}
+
+// WO-177@v1: expose incomplete observations so the pure regression test can synchronize.
+fn read_complete_pid_with<F>(path: &Path, budget: Duration, mut on_incomplete: F) -> i32
+where
+    F: FnMut(&[u8]),
+{
+    let deadline = Instant::now() + budget;
+    let mut bytes = Vec::new();
+    loop {
+        match fs::read(path) {
+            Ok(read) => bytes = read,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => bytes.clear(),
+            Err(error) => panic!(
+                "cannot read grandchild pid before {budget:?} deadline: {error}; bytes read: {bytes:?}"
+            ),
+        }
+        if bytes.ends_with(b"\n") {
+            let line = std::str::from_utf8(&bytes[..bytes.len() - 1]).unwrap_or_else(|error| {
+                panic!("grandchild pid is not UTF-8: {error}; bytes read: {bytes:?}")
+            });
+            return line.parse().unwrap_or_else(|error| {
+                panic!("cannot parse complete grandchild pid: {error}; bytes read: {bytes:?}")
+            });
+        }
+        on_incomplete(&bytes);
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {budget:?} waiting for a complete grandchild pid line; bytes read: {bytes:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+// WO-177@v1: an empty first read waits for the writer's complete newline-terminated pid.
+#[test]
+fn complete_pid_reader_waits_for_newline_without_sleep() {
+    let dir = std::env::temp_dir().join(format!(
+        "bulwark-pid-reader-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("grandchild.pid");
+    fs::write(&path, b"").unwrap();
+
+    let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let reader_path = path.clone();
+    let reader = std::thread::spawn(move || {
+        let mut first = true;
+        read_complete_pid_with(&reader_path, Duration::from_secs(1), |bytes| {
+            if first {
+                assert!(bytes.is_empty(), "first read must see the empty file");
+                observed_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                first = false;
+            }
+        })
+    });
+
+    observed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reader never observed the incomplete pid file");
+    fs::write(&path, b"1234\n").unwrap();
+    continue_tx.send(()).unwrap();
+    assert_eq!(reader.join().expect("pid reader panicked"), 1234);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// The number of open file descriptors the gate process holds (its `/proc/N/fd`).
 // WO-154@v1: bound descriptor retention while consent work is queued.
 fn fd_count(pid: i32) -> usize {
@@ -1177,11 +1253,8 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     // Let the grandchild settle into its wait loop before the kill.
     std::thread::sleep(Duration::from_millis(300));
 
@@ -1253,11 +1326,8 @@ fn normal_exit_reaps_a_daemonized_grandchild() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
 
     // The gate must exit promptly (it reaps the orphan, not waits out 30 s).
     let exit_deadline = Instant::now() + Duration::from_secs(8);
@@ -1335,11 +1405,8 @@ fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
 
     let exit_deadline = Instant::now() + Duration::from_secs(8);
     let st = loop {
@@ -1582,11 +1649,8 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1662,11 +1726,8 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1847,11 +1908,8 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid)
-        .expect("read grandchild pid")
-        .trim()
-        .parse()
-        .expect("parse grandchild pid");
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -1928,7 +1986,8 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     unsafe {
@@ -2086,7 +2145,8 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     // Pin the watcher (a child of the supervisor) BEFORE the kill; the guard
@@ -2256,7 +2316,8 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
         wait_for_path(&gcpid, Duration::from_secs(5)),
         "the grandchild never daemonized"
     );
-    let pid: i32 = fs::read_to_string(&gcpid).unwrap().trim().parse().unwrap();
+    // WO-177@v1: wait for the complete pid line, not merely the created path.
+    let pid = read_complete_pid(&gcpid, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(300));
 
     // Pin the watcher (a child of the supervisor) BEFORE the panic; the guard
