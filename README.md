@@ -32,6 +32,28 @@ sudo bulwark run --protect ~/.ssh -- claude
 sudo env "PATH=$PATH" "$(which bulwark)" run --protect ~/.ssh -- claude
 ```
 
+## Why an independent layer
+
+<!-- WO-190@v1: name the tested strengths up front, each backed by a public doc. -->
+Coding agents ship their own sandboxes. Each is configured, relaxed and enforced
+by the same product whose agent it contains, and a team running several agents
+gets one policy per vendor. Bulwark wraps any process tree from the outside and
+lets the kernel enforce the answer:
+
+- **Vendor-agnostic.** One policy for every agent, whatever language it is
+  written in or whoever ships it.
+- **Decided by inode.** Renames, symlinks and hard links reach the same verdict
+  ([docs/containment-boundaries.md](docs/containment-boundaries.md)).
+- **Crash-safe on Linux.** With `--hardened`, killing the supervisor does not
+  widen what the agent can read ([docs/hardened-mode.md](docs/hardened-mode.md)).
+- **Approval from your machine.** Consent travels off-band; the agent cannot
+  answer its own prompt ([docs/offband-consent.md](docs/offband-consent.md)).
+- **A receipt for every decision.** The file, the verdict and the process chain
+  that asked ([docs/policy-receipts.md](docs/policy-receipts.md)).
+- **Tested on real hosts.** The gate and the known escape routes are exercised
+  on a Linux kernel ([docs/vm-evidence.md](docs/vm-evidence.md)) and on macOS
+  hardware ([docs/macos-behavior-matrix.md](docs/macos-behavior-matrix.md)).
+
 ## What Bulwark is
 
 It supervises a process tree, installs a fanotify `FAN_OPEN_PERM` mark, and
@@ -239,21 +261,15 @@ as plainly as the ones it does — see **Known limitations** below and
 
 ## Roadmap
 
-- The managed remote trust channel (mutual-TLS, signed grants) — the Pro
-  hardening of `bulwark ssh`.
-- Fleet control plane, centralized audit, signed managed daemons (Pro).
+<!-- WO-190@v1: no paid tier or fleet control plane is planned; only research items remain. -->
 - Windows support (minifilter gate) — under research.
 
 ## License & positioning
 
-**Local enforcement is open. Managed trust is paid.**
+<!-- WO-190@v1: Bulwark is open source end to end; paid work is an assessment, not a tier. -->
+**Open source, end to end.**
 
-The line is architectural, not a feature flag: if it runs entirely on your own
-machines, it is open source; if it depends on Obsta-operated trust, identity,
-availability, fleet policy, audit, or signed grants, it is the commercial tier.
-
-**Bulwark Core** is licensed **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) and
-covers self-managed local enforcement:
+**Bulwark** is licensed **AGPL-3.0-or-later** (see [LICENSE](LICENSE)):
 
 - the read gate (`bulwark run --protect`)
 - local off-band consent (`--consent socket`)
@@ -262,22 +278,11 @@ covers self-managed local enforcement:
 - the peer `bulwark ssh` mechanism, when you own both ends
 
 You can read exactly what the gate does and how it decides; the security
-boundary is inspectable by design. Local Linux functionality is never gated by a
-license check.
+boundary is inspectable by design. No functionality is gated by a license check.
 
-**Bulwark Pro / Fleet** is the commercial tier — managed trust for teams, which
-is the part you do not want to run yourself:
-
-- the remote trust channel: mutual-TLS / certificate issuance and a signed-grant
-  authority (the production hardening of `bulwark ssh`)
-- managed daemon identity and fleet policy distribution
-- a centralized, tamper-evident audit pipeline
-- team approval flows and an operator cockpit
-- an SLA on the consent and trust channel
-
-`bulwark ssh` is the *mechanism* and is open; the *managed trust* around it —
-reliable authority across machines, users, agents, and audit boundaries — is the
-product. The local enforcement is open; the managed infrastructure on top is the
-paid line.
+**Paid help, not a paid tier.** Obsta Labs runs a fixed-price containment
+assessment: one real incident scenario, your agent under Bulwark on your staging
+host, and a written map of what was denied, what was not and why. Details at
+[obstalabs.dev/bulwark](https://obstalabs.dev/bulwark).
 
 Copyright © 2026 Obsta Labs.
