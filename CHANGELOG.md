@@ -47,6 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
+<!-- WO-158@v1: hard-kill tests must release their cgroup and filesystem fixtures. -->
+- Supervisor hard-kill tests prove their cgroup is empty, remove it and unmount their test filesystem on every exit path.
 <!-- WO-173@v2: per-item platform gates expose unrelated dead code on non-Linux builds. -->
 - Non-Linux builds scope dead-code allowances to the specific Linux-only items that need them;
   the crate comment names that per-item gate.
