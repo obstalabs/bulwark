@@ -6,6 +6,11 @@
 //! client connects to the same socket, shows the request, and sends the
 //! operator's choice back.
 //!
+//! WO-157@v1: each successful bind owns `<requested>.d`, its lock and its socket
+//! node. Teardown removes all three only while the original directory and lock
+//! identities are still pinned; a racing bind rechecks the lock identity and
+//! retries instead of publishing through an orphaned lock.
+//!
 //! Off-band is enforced structurally, not by obscurity: on accept, the
 //! supervisor reads the peer's process identity (`SO_PEERCRED` on Linux,
 //! `LOCAL_PEERPID` on macOS) and REJECTS any
@@ -36,6 +41,9 @@ const ANCESTRY_MAX_DEPTH: usize = 16;
 /// operator. A longer reply is malformed — and a bounded read defeats a peer
 /// that trickles an unbounded line to hold the event open — so it is denied.
 const VERDICT_LINE_MAX: usize = 64;
+
+// WO-157@v1: bound retries when teardown replaces a lock during bind.
+const LOCK_IDENTITY_RETRIES: usize = 8;
 
 // WO-8@v1: authenticate Linux operator peers by kernel-reported process identity.
 /// Read the peer PID of a connected Unix socket via `SO_PEERCRED`.
@@ -217,6 +225,97 @@ struct PreparedDir {
     fd: RawFd,
     dev: libc::dev_t,
     ino: libc::ino_t,
+}
+
+/// A verified socket directory whose in-directory lock is exclusively held and
+/// still names the lock path in that pinned directory.
+// WO-157@v1: carry one coherent directory-and-lock identity into socket bind.
+struct PreparedLock {
+    dir: PreparedDir,
+    lock_fd: RawFd,
+}
+
+// WO-157@v1: prove a held lock fd still names the pinned directory's lock path.
+fn lock_matches_path(lock_fd: RawFd, dirfd: RawFd) -> bool {
+    let lock = CString::new("lock").expect("static lock leaf has no NUL");
+    let mut fd_st: libc::stat = unsafe { std::mem::zeroed() };
+    let mut path_st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: both stats write to valid out-params; fstatat stays under dirfd and
+    // never follows a replacement symlink at the lock leaf.
+    unsafe {
+        libc::fstat(lock_fd, &mut fd_st) == 0
+            && libc::fstatat(
+                dirfd,
+                lock.as_ptr(),
+                &mut path_st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) == 0
+            && (path_st.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && (fd_st.st_dev, fd_st.st_ino) == (path_st.st_dev, path_st.st_ino)
+    }
+}
+
+/// Open and lock `<sock>.d/lock`, then prove the held fd still names that path.
+/// An unlink/rmdir race closes both stale fds and retries from directory setup.
+// WO-157@v1: prevent a delayed binder from acquiring an orphaned lock inode.
+fn prepare_socket_lock<F>(dir: &Path, requested: &Path, mut after_open: F) -> Result<PreparedLock>
+where
+    F: FnMut(usize),
+{
+    let lock = CString::new("lock").expect("static lock leaf has no NUL");
+    for attempt in 0..LOCK_IDENTITY_RETRIES {
+        let prepared = prepare_socket_dir(dir)?;
+        // SAFETY: openat within the pinned dir fd, no symlink follow, close-on-exec.
+        // SAFETY: openat stays inside the pinned directory and never follows a
+        // lock-leaf symlink.
+        let lock_fd = unsafe {
+            libc::openat(
+                prepared.fd,
+                lock.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if lock_fd < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { libc::close(prepared.fd) };
+            return Err(anyhow!(error)).with_context(|| "open consent socket lock");
+        }
+
+        after_open(attempt);
+        // SAFETY: flock on the held lock fd; EWOULDBLOCK means another run still
+        // owns the node.
+        if unsafe { libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(lock_fd);
+                libc::close(prepared.fd);
+            }
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                anyhow::bail!(
+                    "another bulwark run is using consent socket {}; pass --consent-socket <other path>",
+                    requested.display()
+                );
+            }
+            return Err(anyhow!(error)).with_context(|| "flock consent socket lock");
+        }
+
+        if lock_matches_path(lock_fd, prepared.fd) {
+            return Ok(PreparedLock {
+                dir: prepared,
+                lock_fd,
+            });
+        }
+
+        unsafe {
+            libc::close(lock_fd);
+            libc::close(prepared.fd);
+        }
+    }
+
+    anyhow::bail!(
+        "consent socket lock changed during acquisition after {LOCK_IDENTITY_RETRIES} attempts"
+    )
 }
 
 /// WO-147@v1: prepare the socket directory. Create it fresh with
@@ -446,6 +545,19 @@ impl SocketProvider {
     /// (0600, to the invoking user under sudo), so the agent cannot rename or
     /// replace the node. Peer checks are unchanged.
     pub fn bind(path: &Path, supervised_root: i32, timeout: Duration) -> Result<Self> {
+        Self::bind_with_lock_hook(path, supervised_root, timeout, |_| {})
+    }
+
+    // WO-157@v1: expose the lock-open boundary for deterministic bind-race proof.
+    fn bind_with_lock_hook<F>(
+        path: &Path,
+        supervised_root: i32,
+        timeout: Duration,
+        after_lock_open: F,
+    ) -> Result<Self>
+    where
+        F: FnMut(usize),
+    {
         // WO-147@v1: resolve a relative request against the cwd before deriving
         // the node, so the supervisor and the client reach the same absolute path.
         let path = absolutize(path);
@@ -478,46 +590,16 @@ impl SocketProvider {
         // WO-147@v1: the parent must be a directory root/euid cannot
         // have renamed out from under us before mkdir of <sock>.d.
         check_parent(parent)?;
-        let prepared = prepare_socket_dir(dir)?;
-        let dir_dev = prepared.dev;
-        let dir_ino = prepared.ino;
-        let dirfd = prepared.fd;
-
         // WO-147@v1: take an exclusive run lock inside <sock>.d before
         // ever unlinking a stale node, so a second run on the same path cannot
         // silently steal the first run's live socket and its verdicts. The lock
         // fd is held for the provider's lifetime.
-        let lock = CString::new("lock").expect("static lock leaf has no NUL");
-        // SAFETY: openat within the pinned dir fd, no symlink follow, close-on-exec.
-        let lock_fd = unsafe {
-            libc::openat(
-                dirfd,
-                lock.as_ptr(),
-                libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if lock_fd < 0 {
-            let e = std::io::Error::last_os_error();
-            unsafe { libc::close(dirfd) };
-            return Err(anyhow!(e)).with_context(|| "open consent socket lock");
-        }
-        // SAFETY: flock on the held lock fd; EWOULDBLOCK means another run still
-        // owns the node.
-        if unsafe { libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let e = std::io::Error::last_os_error();
-            unsafe {
-                libc::close(lock_fd);
-                libc::close(dirfd);
-            }
-            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                anyhow::bail!(
-                    "another bulwark run is using consent socket {}; pass --consent-socket <other path>",
-                    path.display()
-                );
-            }
-            return Err(anyhow!(e)).with_context(|| "flock consent socket lock");
-        }
+        // WO-157@v1: after locking, prove the fd still names the pinned lock path.
+        let prepared = prepare_socket_lock(dir, &path, after_lock_open)?;
+        let dir_dev = prepared.dir.dev;
+        let dir_ino = prepared.dir.ino;
+        let dirfd = prepared.dir.fd;
+        let lock_fd = prepared.lock_fd;
 
         // Remove a stale node from a prior run (ours; through the dir fd, so a
         // path swap cannot redirect it). Only after the lock is held may the
@@ -764,12 +846,20 @@ impl SocketProvider {
 // WO-8@v1: remove the consent socket when its provider is released.
 impl Drop for SocketProvider {
     // WO-147@v1: remove the consent node through its verified directory identity.
+    // WO-157@v1: remove the verified lock and directory before releasing the lock.
     fn drop(&mut self) {
         // Unlink the node while still holding the run lock, then release the
         // lock last — so a racing second bind cannot publish its node while this
         // run's teardown is still live and have it deleted out from under it.
         // The lock file itself is never unlinked: it is a permanent sibling.
-        remove_consent_node(&self.path, self.dir_dev, self.dir_ino);
+        // WO-157@v1: the preceding line records the superseded WO-147 contract.
+        // Teardown now unlinks the verified lock and directory before releasing
+        // the lock; a binder with the old fd must recheck its inode and retry.
+        if let Some(warning) =
+            remove_consent_node(&self.path, self.dir_dev, self.dir_ino, self.lock_fd)
+        {
+            self.warn(&warning);
+        }
         unsafe { libc::close(self.lock_fd) };
     }
 }
@@ -779,24 +869,117 @@ impl Drop for SocketProvider {
 /// pinned at bind (`dir_dev`/`dir_ino`), so a real-directory swap is never
 /// touched. The lock file (and the directory) are left in place: the lock is a
 /// permanent sibling and the directory is re-validated and reused on every bind.
-fn remove_consent_node(node: &Path, dir_dev: libc::dev_t, dir_ino: libc::ino_t) {
-    let Some(dir) = node.parent() else { return };
+///
+/// WO-157@v1: the preceding two lines record the superseded WO-147 contract.
+/// While the exclusive lock is still held, also verify that the held lock fd
+/// names `lock`, unlink it, and rmdir the verified directory through its parent
+/// fd. Any identity mismatch leaves every artifact in place and returns one
+/// warning; the caller releases the held lock only after this function.
+fn remove_consent_node(
+    node: &Path,
+    dir_dev: libc::dev_t,
+    dir_ino: libc::ino_t,
+    lock_fd: RawFd,
+) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(dir) = node.parent() else {
+        return Some("consent socket teardown has no socket directory".to_string());
+    };
+    let Some(parent) = dir.parent() else {
+        return Some(format!(
+            "consent socket teardown has no parent for {}",
+            dir.display()
+        ));
+    };
+    let Some(dir_leaf) = dir.file_name() else {
+        return Some(format!(
+            "consent socket teardown has no directory leaf for {}",
+            dir.display()
+        ));
+    };
+    let Ok(dir_leaf) = CString::new(dir_leaf.as_bytes()) else {
+        return Some(format!(
+            "consent socket teardown directory contains a NUL: {}",
+            dir.display()
+        ));
+    };
     let Ok(dirfd) = open_dir_nofollow(dir) else {
-        return;
+        return Some(format!(
+            "consent socket teardown left {} in place: cannot open the pinned directory",
+            dir.display()
+        ));
+    };
+    let Ok(parentfd) = open_dir_nofollow(parent) else {
+        unsafe { libc::close(dirfd) };
+        return Some(format!(
+            "consent socket teardown left {} in place: cannot open its parent directory",
+            dir.display()
+        ));
     };
     let mut fd_st: libc::stat = unsafe { std::mem::zeroed() };
+    let mut path_st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat on the held fd; the stat is a valid out-param. The held
     // `O_DIRECTORY|O_NOFOLLOW` fd names whatever the path currently resolves to,
     // so comparing its dev/ino against the pinned pair detects a swapped-in dir.
-    let same = unsafe { libc::fstat(dirfd, &mut fd_st) } == 0
-        && fd_st.st_dev == dir_dev
-        && fd_st.st_ino == dir_ino;
-    if same {
-        let leaf = CString::new("s").expect("static leaf has no NUL");
-        // SAFETY: unlinkat on the pinned dir fd; ignores a missing node.
-        unsafe { libc::unlinkat(dirfd, leaf.as_ptr(), 0) };
+    let same = unsafe {
+        libc::fstat(dirfd, &mut fd_st) == 0
+            && libc::fstatat(
+                parentfd,
+                dir_leaf.as_ptr(),
+                &mut path_st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) == 0
+            && fd_st.st_dev == dir_dev
+            && fd_st.st_ino == dir_ino
+            && (path_st.st_dev, path_st.st_ino) == (dir_dev, dir_ino)
+            && lock_matches_path(lock_fd, dirfd)
+    };
+    if !same {
+        unsafe {
+            libc::close(parentfd);
+            libc::close(dirfd);
+        }
+        return Some(format!(
+            "consent socket teardown left {} in place: directory or lock identity changed",
+            dir.display()
+        ));
     }
-    unsafe { libc::close(dirfd) };
+
+    let node_leaf = CString::new("s").expect("static node leaf has no NUL");
+    let lock_leaf = CString::new("lock").expect("static lock leaf has no NUL");
+    // SAFETY: all operations stay under pinned directory fds. The lock remains
+    // held until the caller closes lock_fd after this function returns.
+    let result = unsafe {
+        // SAFETY: unlinkat on the pinned dir fd; ignores a missing node.
+        let node_rc = libc::unlinkat(dirfd, node_leaf.as_ptr(), 0);
+        let node_error = std::io::Error::last_os_error();
+        if node_rc != 0 && node_error.raw_os_error() != Some(libc::ENOENT) {
+            Err(format!("cannot unlink consent node: {node_error}"))
+        } else if libc::unlinkat(dirfd, lock_leaf.as_ptr(), 0) != 0 {
+            Err(format!(
+                "cannot unlink consent lock: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else if libc::unlinkat(parentfd, dir_leaf.as_ptr(), libc::AT_REMOVEDIR) != 0 {
+            Err(format!(
+                "cannot remove consent socket directory: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    unsafe {
+        libc::close(parentfd);
+        libc::close(dirfd);
+    }
+    result.err().map(|error| {
+        format!(
+            "consent socket teardown left {} in place: {error}",
+            dir.display()
+        )
+    })
 }
 
 // WO-154@v1: expose deadline-aware consent through the gate provider contract.
@@ -1024,6 +1207,77 @@ mod tests {
     use super::*;
     use crate::protect::InodeKey;
 
+    // WO-157@v1: remove test-owned filesystem fixtures on success and unwinding.
+    struct TestPathCleanup {
+        path: PathBuf,
+    }
+
+    // WO-157@v1: register cleanup before a socket test can create its fixture.
+    impl TestPathCleanup {
+        fn directory(path: &Path) -> Self {
+            TestPathCleanup {
+                path: path.to_path_buf(),
+            }
+        }
+
+        fn socket(requested: &Path) -> Self {
+            TestPathCleanup {
+                path: bound_path(requested)
+                    .parent()
+                    .expect("derived socket node has a directory")
+                    .to_path_buf(),
+            }
+        }
+    }
+
+    // WO-157@v1: leave no test scratch directory behind after panic or return.
+    impl Drop for TestPathCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    // WO-157@v1: prove panic unwinding removes every registered socket scratch dir.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_test_guards_remove_all_registered_lock_dirs_on_unwind() {
+        let sockets = [
+            unique_sock("guard-lock"),
+            unique_sock("guard-rt"),
+            unique_sock("guard-to"),
+        ];
+        let dirs: Vec<PathBuf> = sockets
+            .iter()
+            .map(|socket| {
+                bound_path(socket)
+                    .parent()
+                    .expect("derived socket node has a directory")
+                    .to_path_buf()
+            })
+            .collect();
+
+        let result = std::panic::catch_unwind(|| {
+            let _guards: Vec<TestPathCleanup> = sockets
+                .iter()
+                .map(|socket| TestPathCleanup::socket(socket))
+                .collect();
+            for dir in &dirs {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(dir.join("lock"), b"fixture").unwrap();
+            }
+            panic!("exercise cleanup during unwinding");
+        });
+
+        assert!(result.is_err(), "the cleanup proof must exercise unwinding");
+        for dir in &dirs {
+            assert!(
+                !dir.exists(),
+                "socket test guard left scratch directory {}",
+                dir.display()
+            );
+        }
+    }
+
     // WO-8@v1: build a deterministic protected-open request for socket tests.
     fn req() -> ConsentRequest {
         ConsentRequest {
@@ -1091,6 +1345,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean this test's directory even when an assertion panics.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         let fd = open_dir_nofollow(&base).expect("open scratch dir");
         // u32::MAX is never this process's euid, so the fd names a directory the
@@ -1135,6 +1391,8 @@ mod tests {
                         "bulwark-umask-bind-{}-{n}.sock",
                         std::process::id()
                     ));
+                    // WO-157@v1: clean each stress-test lock directory on every iteration.
+                    let _cleanup = TestPathCleanup::socket(&sock);
                     attempted.fetch_add(1, Ordering::Relaxed);
                     if SocketProvider::bind(&sock, i32::MAX, Duration::from_millis(1)).is_ok() {
                         succeeded.fetch_add(1, Ordering::Relaxed);
@@ -1226,6 +1484,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean swapped-directory fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         // The parent of <sock>.d must be non-group/other-writable for bind's
         // parent check; force a safe mode regardless of the process umask.
@@ -1280,6 +1540,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean real-swap fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let requested = base.join("consent.sock");
@@ -1326,6 +1588,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean refused-parent fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).unwrap();
         let requested = base.join("consent.sock");
@@ -1357,6 +1621,8 @@ mod tests {
     #[test]
     fn bind_refuses_a_second_run_on_the_same_path_while_the_first_lives() {
         let sock = unique_sock("lock");
+        // WO-157@v1: remove this test's lock directory even if an assertion panics.
+        let _cleanup = TestPathCleanup::socket(&sock);
         let mut first = SocketProvider::bind(&sock, i32::MAX, Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("first bind {} failed: {e}", sock.display()));
 
@@ -1390,6 +1656,8 @@ mod tests {
     // WO-147@v1: teardown must never unlink the run lock. Red when drop removed
     // the lock file (so a successor run's lock could vanish under it); green once
     // the lock is a permanent sibling and only `s` is unlinked.
+    // WO-157@v1: the verified post-lock identity check replaces that contract:
+    // clean teardown removes the directory, while an identity failure preserves it.
     #[test]
     fn drop_leaves_the_lock_file_in_place() {
         use std::os::unix::fs::PermissionsExt;
@@ -1401,20 +1669,112 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean lock-lifecycle fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let requested = base.join("consent.sock");
-        let lock = bound_path(&requested).parent().unwrap().join("lock");
+        let clean_requested = base.join("clean.sock");
+        let clean_dir = bound_path(&clean_requested).parent().unwrap().to_path_buf();
 
         let provider =
-            SocketProvider::bind(&requested, i32::MAX, Duration::from_millis(1)).unwrap();
+            SocketProvider::bind(&clean_requested, i32::MAX, Duration::from_millis(1)).unwrap();
         drop(provider);
 
         assert!(
-            lock.exists(),
-            "the run lock must survive teardown (never unlinked); got gone"
+            !clean_dir.exists(),
+            "clean teardown must remove the socket node, lock and directory"
         );
-        let _ = std::fs::remove_dir_all(&base);
+
+        let swapped_requested = base.join("swapped.sock");
+        let swapped_dir = bound_path(&swapped_requested)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let provider =
+            SocketProvider::bind(&swapped_requested, i32::MAX, Duration::from_millis(1)).unwrap();
+        let moved = base.join("moved-socket-dir");
+        std::fs::rename(&swapped_dir, &moved).unwrap();
+
+        drop(provider);
+
+        assert!(
+            moved.join("s").exists() && moved.join("lock").exists(),
+            "an identity failure must leave the original node and lock in place"
+        );
+    }
+
+    // WO-157@v1: a binder holding an opened old lock must retry after teardown.
+    #[test]
+    fn bind_retries_when_teardown_unlinks_an_opened_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let base = std::path::PathBuf::from(format!(
+            "/tmp/bulwark-lockrace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = TestPathCleanup::directory(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let requested = base.join("consent.sock");
+        let node = bound_path(&requested);
+        let socket_dir = node.parent().unwrap().to_path_buf();
+        let first = SocketProvider::bind(&requested, i32::MAX, Duration::from_millis(1)).unwrap();
+
+        let opened = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let opened_in_binder = Arc::clone(&opened);
+        let release_in_binder = Arc::clone(&release);
+        let requested_in_binder = requested.clone();
+        let binder = std::thread::spawn(move || {
+            SocketProvider::bind_with_lock_hook(
+                &requested_in_binder,
+                i32::MAX,
+                Duration::from_millis(1),
+                |attempt| {
+                    if attempt == 0 {
+                        opened_in_binder.wait();
+                        release_in_binder.wait();
+                    }
+                },
+            )
+        });
+
+        opened.wait();
+        drop(first);
+        assert!(
+            !socket_dir.exists(),
+            "the first provider must remove its lock directory before the old fd continues"
+        );
+        release.wait();
+
+        let second = binder
+            .join()
+            .expect("second binder thread")
+            .expect("second binder must retry on a fresh lock");
+        assert!(
+            node.exists(),
+            "the retried binder must publish its socket node"
+        );
+
+        let third = match SocketProvider::bind(&requested, i32::MAX, Duration::from_millis(1)) {
+            Ok(_) => panic!("only the retried provider may hold the socket path"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{third:#}").contains("another bulwark run is using consent socket"),
+            "the retried provider must exclusively hold the fresh lock: {third:#}"
+        );
+
+        drop(second);
+        assert!(
+            !socket_dir.exists(),
+            "the retried provider must remove its verified lock directory"
+        );
     }
 
     // WO-147@v1: the safe-path walk must catch a writable ANCESTOR, not just the
@@ -1432,6 +1792,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean ancestor-check fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         // base is group/other-writable and NOT sticky: an attacker in the same
         // group (or any user, at 0777) can rename the whole subtree away.
@@ -1471,6 +1833,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean relative-path fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         // euid-owned so the safe-path walk of this (relative) cwd passes.
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1516,6 +1880,8 @@ mod tests {
     #[test]
     fn socket_round_trip_operator_allows() {
         let sock = unique_sock("rt");
+        // WO-157@v1: remove this test's lock directory even if an assertion panics.
+        let _cleanup = TestPathCleanup::socket(&sock);
 
         // Use i32::MAX as the supervised root: nothing descends from it, so the
         // test's own connection is never refused by the off-band check. The
@@ -1543,6 +1909,8 @@ mod tests {
     #[test]
     fn socket_times_out_to_deny_when_no_operator() {
         let sock = unique_sock("to");
+        // WO-157@v1: remove this test's lock directory even if an assertion panics.
+        let _cleanup = TestPathCleanup::socket(&sock);
         let mut provider =
             SocketProvider::bind(&sock, i32::MAX, Duration::from_millis(200)).unwrap();
         let (verdict, source) = provider.request(&req());
@@ -1569,6 +1937,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean deadline-test fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let requested = base.join("consent.sock");
@@ -1629,6 +1999,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean trickle-test fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let requested = base.join("consent.sock");
@@ -1679,6 +2051,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean zero-deadline fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let requested = base.join("consent.sock");
@@ -1727,6 +2101,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        // WO-157@v1: clean delayed-operator fixtures on every exit path.
+        let _cleanup = TestPathCleanup::directory(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let requested = base.join("consent.sock");
