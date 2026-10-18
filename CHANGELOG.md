@@ -48,7 +48,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
 <!-- WO-158@v1: hard-kill tests must release their cgroup and filesystem fixtures. -->
-- Supervisor hard-kill tests prove their cgroup is empty, remove it and unmount their test filesystem on every exit path.
+- Supervisor hard-kill tests prove their cgroup is empty, remove it and unmount their test filesystem on every exit path, retrying transiently busy unmounts to a bounded deadline.
 <!-- WO-157@v1: verified lock identity makes consent socket directory removal race-safe. -->
 - Consent socket teardown removes its verified node, lock and directory without allowing a racing binder to use an orphaned lock.
 <!-- WO-83@v1: remote consent tests prove the worker cannot access either control FIFO. -->

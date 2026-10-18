@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,61 @@ use std::time::{Duration, Instant};
 const SCOPE_CLEANUP_BOUND: Duration = Duration::from_secs(10);
 // WO-158@v1: avoid a busy loop while waiting for the cgroup state to settle.
 const SCOPE_CLEANUP_POLL: Duration = Duration::from_millis(10);
+// WO-158@v1: bound retries while killed processes release the test filesystem.
+const TESTFS_UNMOUNT_BOUND: Duration = Duration::from_secs(10);
+// WO-158@v1: retry transiently busy unmounts without a busy loop.
+const TESTFS_UNMOUNT_POLL: Duration = Duration::from_millis(10);
+
+// WO-158@v1: retry transient cleanup failures only until the bounded deadline.
+fn retry_unmount<F>(bound: Duration, poll: Duration, mut attempt: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let deadline = Instant::now() + bound;
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                std::thread::sleep(poll.min(remaining));
+            }
+        }
+    }
+}
+
+// WO-158@v1: preserve the final command error for bounded Drop diagnostics.
+fn unmount_once(path: &Path) -> Result<(), String> {
+    let output = Command::new("umount")
+        .arg(path)
+        .output()
+        .map_err(|error| format!("cannot run umount: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        Err(format!("umount exited with {}", output.status))
+    } else {
+        Err(stderr.to_string())
+    }
+}
+
+// WO-158@v1: distinguish a lingering mount from an already-detached fixture.
+fn testfs_is_mounted(path: &Path) -> Result<bool, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("mount path is not UTF-8: {}", path.display()))?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("cannot read /proc/self/mountinfo: {error}"))?;
+    Ok(mountinfo
+        .lines()
+        .any(|line| line.split_whitespace().nth(4) == Some(path)))
+}
 
 /// A test-owned tmpfs mount. Protected and allowed fixtures live here so
 /// `FAN_MARK_FILESYSTEM` marks only this filesystem — never the root filesystem
@@ -65,8 +120,27 @@ impl Drop for TestFs {
     // WO-154@v1: unmount before removing the permission-loop fixture root.
     // WO-155@v1: leave no mounted supervised-tree fixture behind.
     fn drop(&mut self) {
-        let _ = Command::new("umount").arg(&self.root).status();
-        let _ = fs::remove_dir_all(&self.root);
+        // WO-158@v1: wait for killed processes to release the mount before removal.
+        match retry_unmount(TESTFS_UNMOUNT_BOUND, TESTFS_UNMOUNT_POLL, || {
+            unmount_once(&self.root)
+        }) {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+            Err(unmount_error) => match testfs_is_mounted(&self.root) {
+                Ok(true) => eprintln!(
+                    "[bulwark] test filesystem {} remained mounted after {:?}: {unmount_error}",
+                    self.root.display(),
+                    TESTFS_UNMOUNT_BOUND
+                ),
+                Ok(false) => {}
+                Err(mount_error) => eprintln!(
+                    "[bulwark] could not verify test filesystem {} after {:?}: {mount_error}; last umount error: {unmount_error}",
+                    self.root.display(),
+                    TESTFS_UNMOUNT_BOUND
+                ),
+            },
+        }
     }
 }
 
@@ -178,5 +252,41 @@ impl Drop for HardKillScopeGuard {
                 panic!("hard-kill cleanup failed: {message}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // WO-158@v1: transient busy unmounts must be retried before cleanup gives up.
+    #[test]
+    fn unmount_retry_survives_transient_busy_failures() {
+        let mut attempts = 0;
+        let result = retry_unmount(Duration::from_millis(50), Duration::from_millis(1), || {
+            attempts += 1;
+            if attempts < 3 {
+                Err("target is busy".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts, 3, "cleanup must retry each transient failure");
+    }
+
+    // WO-158@v1: a bounded cleanup reports the final unmount error without looping.
+    #[test]
+    fn unmount_retry_returns_the_last_error_at_its_deadline() {
+        let mut attempts = 0;
+        let error = retry_unmount(Duration::ZERO, Duration::from_millis(1), || {
+            attempts += 1;
+            Err(format!("busy-{attempts}"))
+        })
+        .expect_err("a zero-duration bound must return the first failure");
+
+        assert_eq!(attempts, 1, "the deadline must stop further attempts");
+        assert_eq!(error, "busy-1");
     }
 }
