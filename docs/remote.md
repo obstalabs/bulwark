@@ -59,6 +59,11 @@ too. A failed, empty, or malformed identity query refuses the dispatch before
 deployment, key handoff, lane creation, or agent launch; it never falls back to
 the login user or root. Only `--hardened`, which has no consent lanes, is exempt.
 
+<!-- WO-83@v1: state why the selected worker cannot open either control lane. -->
+With that worker drop, both FIFOs remain mode `600` and owned by the SSH login
+user while the agent runs under the distinct selected uid. That uid has no read
+or write permission on either the prompt lane or the verdict lane.
+
 ## Grants are scoped, not bare inodes
 
 An `allow-session` does not authorize "this inode for anyone." Each grant is
@@ -242,12 +247,13 @@ finished production trust channel:
 
 <!-- WO-110: state the shipped refusal without claiming a privileged FIFO proof. -->
 <!-- WO-114: the refusal covers --auto. -->
+<!-- WO-83@v1: the lane fixture now proves both FIFO permission directions. -->
 - **Consent dispatch refuses unsafe worker identities, `--auto` included.** Choose
   `--auto-worker-uid` or a `--worker-uid` other than root and the SSH login user
   that owns the mode-600 FIFOs; missing or unverified identities refuse launch. See
   [Control lanes, not terminal chatter](#control-lanes-not-terminal-chatter)
-  for the required worker drop. Host-independent CLI tests cover refusal and
-  dispatch, not kernel FIFO permissions; the privileged EACCES proof remains WO-83.
+  for the required worker drop. CLI tests cover refusal and dispatch, and the lane
+  fixture verifies both FIFO permissions against the selected worker identity.
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
