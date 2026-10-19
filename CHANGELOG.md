@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Fixed
+<!-- WO-181@v1: remote prompt backpressure must never delay a permission decision. -->
+- Remote consent prompts use a bounded writer queue, so a stalled prompt lane cannot delay protected-open denials.
 <!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->
 - Corrupt or unreadable integrity state now starts tainted and is preserved before an
   atomic replacement; only an absent state file starts clean; CI exercises EACCES before

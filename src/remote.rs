@@ -159,6 +159,81 @@ impl RemoteCache {
     }
 }
 
+// WO-181@v1: 256 slots absorb short bursts while bounding a stalled lane's memory.
+#[cfg(any(test, target_os = "linux"))]
+const PROMPT_QUEUE_BOUND: usize = 256;
+
+// WO-181@v1: retain prompt-loss evidence after the queue writer moves to its thread.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone)]
+pub struct PromptQueueStats {
+    dropped: Arc<AtomicU64>,
+}
+
+// WO-181@v1: expose prompt drops for the remote run's terminal summary.
+#[cfg(any(test, target_os = "linux"))]
+impl PromptQueueStats {
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+
+// WO-181@v1: make prompt submission bounded and nonblocking on the decision path.
+#[cfg(any(test, target_os = "linux"))]
+pub struct PromptQueueWriter {
+    sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    dropped: Arc<AtomicU64>,
+}
+
+// WO-181@v1: isolate blocking prompt-lane writes on a dedicated worker thread.
+#[cfg(any(test, target_os = "linux"))]
+impl PromptQueueWriter {
+    pub fn spawn<W: Write + Send + 'static>(
+        mut sink: W,
+    ) -> std::io::Result<(Self, PromptQueueStats)> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(PROMPT_QUEUE_BOUND);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let writer_dropped = Arc::clone(&dropped);
+        std::thread::Builder::new()
+            .name("bulwark-remote-prompts".into())
+            .spawn(move || {
+                while let Ok(line) = receiver.recv() {
+                    if sink.write_all(&line).and_then(|()| sink.flush()).is_err() {
+                        writer_dropped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })?;
+        let stats = PromptQueueStats {
+            dropped: Arc::clone(&dropped),
+        };
+        Ok((Self { sender, dropped }, stats))
+    }
+}
+
+// WO-181@v1: treat a full or closed queue as a counted prompt drop, never a wait.
+#[cfg(any(test, target_os = "linux"))]
+impl Write for PromptQueueWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        match self.sender.try_send(buf.to_vec()) {
+            Ok(()) => {}
+            Err(
+                std::sync::mpsc::TrySendError::Full(_)
+                | std::sync::mpsc::TrySendError::Disconnected(_),
+            ) => {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // WO-9@v1: bind a grant to the kernel identity that requested the remote open.
 // WO-173@v2: Linux-only: read fanotify requester identity from procfs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -588,5 +663,57 @@ mod tests {
         let deny = verdict_line(Verdict::Deny, grant);
         let (v2, _) = parse_verdict_reply(&deny).unwrap();
         assert_eq!(v2, Verdict::Deny);
+    }
+
+    // WO-181@v1: a blocked prompt sink must not stall or hide queue overflow.
+    struct BlockingPromptWriter {
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    // WO-181@v1: hold the prompt writer after it takes one item from the queue.
+    impl Write for BlockingPromptWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.started.try_send(());
+            let _ = self.release.recv();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // WO-181@v1: prove a full prompt queue drops and counts without blocking.
+    #[test]
+    fn prompt_queue_drops_and_counts_when_full_without_blocking() {
+        const CALLER_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (mut prompt_out, stats) = PromptQueueWriter::spawn(BlockingPromptWriter {
+            started: started_tx,
+            release: release_rx,
+        })
+        .expect("spawn prompt writer");
+
+        prompt_out.write_all(b"blocked\n").unwrap();
+        started_rx
+            .recv_timeout(CALLER_BOUND)
+            .expect("writer must take the first prompt");
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            for _ in 0..=PROMPT_QUEUE_BOUND {
+                prompt_out.write_all(b"queued\n").unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(CALLER_BOUND)
+            .expect("a full prompt queue must not block the caller");
+        assert_eq!(stats.dropped(), 1, "the overflowed prompt must be counted");
+        release_tx.send(()).unwrap();
     }
 }

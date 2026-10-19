@@ -2854,10 +2854,13 @@ fn cmd_run_remote(
             .append(true)
             .open(&prompt_path)
             .with_context(|| format!("cannot open prompt lane {}", prompt_path.display()))?;
+        // WO-181@v1: keep a stalled prompt lane off the remote decision path.
+        let (prompt_writer, prompt_stats) = remote::PromptQueueWriter::spawn(prompt_file)
+            .context("cannot start remote prompt writer")?;
 
         let decider = remote::AsyncRemoteProvider::new(
             cache,
-            prompt_file,
+            prompt_writer,
             args.host_label.clone(),
             session_id,
             policy_epoch,
@@ -2868,7 +2871,8 @@ fn cmd_run_remote(
             verdict_path.display()
         );
         let mode = GateMode::DenyList { protected };
-        gate::run(
+        // WO-181@v1: report prompt loss after teardown without delaying a deny.
+        let outcome = gate::run(
             mode,
             Some(Box::new(decider)),
             Duration::from_secs(args.consent_timeout),
@@ -2876,8 +2880,12 @@ fn cmd_run_remote(
             args.receipts,
             args.command,
             worker,
-        )
-        .map(|o| o.exit_code)
+        );
+        let dropped = prompt_stats.dropped();
+        if dropped != 0 {
+            eprintln!("[bulwark] remote gate: {dropped} prompt line(s) dropped");
+        }
+        outcome.map(|o| o.exit_code)
     }
 }
 
