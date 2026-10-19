@@ -34,7 +34,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses GNU `dd`'s `conv=nocreat` mode so unsupported hosts fail before consent starts.
 <!-- WO-192@v1: failed remote cleanup must release processes blocked opening a lane. -->
 - Failed remote runs no longer leave a consent-lane process and SSH session behind on
-  the remote host.
+  the remote host, even when a lane cannot be reopened during cleanup.
 <!-- WO-181@v1: remote prompt backpressure must never delay a permission decision. -->
 - Remote consent prompts use a bounded writer queue, so a stalled prompt lane cannot delay protected-open denials.
 <!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->

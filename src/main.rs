@@ -971,21 +971,22 @@ fn build_gate_script(
     // WO-153@v1: the exclusive mkdir now runs before material placement; this
     // script accepts only the same login user's directory before creating lanes.
     // WO-192@v1: hold both FIFO ends across removal to release blocked control opens.
+    // WO-192@v1: command makes fatal special-builtin redirection errors catchable.
     format!(
         r#"set -e
 cleanup() {{
   rc=$?
   trap - EXIT INT TERM HUP
-  # WO-192@v1: release blocked lane opens without following a planted symlink.
+  # WO-192@v2: command contains fatal special-builtin redirection errors.
   if [ -p {pl} ] && [ ! -h {pl} ]; then
-    exec 8<>{pl} || true
+    command exec 8<>{pl} 2>/dev/null || true
   fi
   if [ -p {vl} ] && [ ! -h {vl} ]; then
-    exec 9<>{vl} || true
+    command exec 9<>{vl} 2>/dev/null || true
   fi
   sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
-  exec 8>&- 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
+  command exec 8>&- 2>/dev/null || true
+  command exec 9>&- 2>/dev/null || true
   exit "$rc"
 }}
 trap cleanup EXIT INT TERM HUP
@@ -3897,16 +3898,16 @@ mod tests {
 cleanup() {\n  \
 rc=$?\n  \
 trap - EXIT INT TERM HUP\n  \
-# WO-192@v1: release blocked lane opens without following a planted symlink.\n  \
+# WO-192@v2: command contains fatal special-builtin redirection errors.\n  \
 if [ -p /tmp/bulwark-remote-42/prompts ] && [ ! -h /tmp/bulwark-remote-42/prompts ]; then\n    \
-exec 8<>/tmp/bulwark-remote-42/prompts || true\n  \
+command exec 8<>/tmp/bulwark-remote-42/prompts 2>/dev/null || true\n  \
 fi\n  \
 if [ -p /tmp/bulwark-remote-42/verdicts ] && [ ! -h /tmp/bulwark-remote-42/verdicts ]; then\n    \
-exec 9<>/tmp/bulwark-remote-42/verdicts || true\n  \
+command exec 9<>/tmp/bulwark-remote-42/verdicts 2>/dev/null || true\n  \
 fi\n  \
 sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-42 2>/dev/null || true\n  \
-exec 8>&- 2>/dev/null || true\n  \
-exec 9>&- 2>/dev/null || true\n  \
+command exec 8>&- 2>/dev/null || true\n  \
+command exec 9>&- 2>/dev/null || true\n  \
 exit \"$rc\"\n\
 }\n\
 trap cleanup EXIT INT TERM HUP\n\
@@ -4647,6 +4648,86 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         );
         drop(reader);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // WO-192@v1: a failed lane reopen must not terminate the POSIX cleanup trap.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remote_cleanup_survives_a_lane_that_cannot_be_opened() {
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+
+        // WO-192@v1: bound the real generated cleanup without fixed sleeps.
+        const REMOTE_CLEANUP_BOUND: Duration = Duration::from_secs(2);
+
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("remote cleanup EACCES proof requires a non-root uid");
+            return;
+        }
+
+        let run_dir = test_scratch_dir("remote-cleanup-unopenable-lane");
+        let prompt_lane = run_dir.join("prompts");
+        let verdict_lane = run_dir.join("verdicts");
+        for lane in [&prompt_lane, &verdict_lane] {
+            let lane_c = std::ffi::CString::new(lane.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(lane_c.as_ptr(), 0o000) }, 0);
+        }
+
+        let script = build_gate_script(
+            run_dir.to_str().unwrap(),
+            prompt_lane.to_str().unwrap(),
+            verdict_lane.to_str().unwrap(),
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            "fixture.invalid",
+            "--protect '/etc/shadow'",
+            None,
+            None,
+            "'/bin/true'",
+        );
+        let cleanup_start = script.find("cleanup() {").expect("cleanup definition");
+        let trap_line = "trap cleanup EXIT INT TERM HUP";
+        let trap_end = script[cleanup_start..]
+            .find(trap_line)
+            .map(|offset| cleanup_start + offset + trap_line.len())
+            .expect("cleanup trap");
+        let cleanup_probe = format!("set -e\n{}\nexit 7\n", &script[cleanup_start..trap_end]);
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", &cleanup_probe])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cleanup probe");
+        let mut stderr = child.stderr.take().expect("piped cleanup stderr");
+        let deadline = std::time::Instant::now() + REMOTE_CLEANUP_BOUND;
+        let status = loop {
+            match child.try_wait().expect("poll cleanup probe") {
+                Some(status) => break status,
+                None if std::time::Instant::now() < deadline => std::thread::yield_now(),
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("remote cleanup did not exit before the deadline");
+                }
+            }
+        };
+        let mut cleanup_stderr = Vec::new();
+        stderr
+            .read_to_end(&mut cleanup_stderr)
+            .expect("read cleanup stderr");
+        let run_dir_survived = run_dir.exists();
+        if run_dir_survived {
+            let _ = std::fs::remove_dir_all(&run_dir);
+        }
+        let cleanup_stderr = String::from_utf8_lossy(&cleanup_stderr);
+
+        assert_eq!(status.code(), Some(7), "cleanup stderr: {cleanup_stderr}");
+        assert!(!run_dir_survived, "cleanup left the remote run directory");
+        assert!(!cleanup_stderr.contains("cannot create"));
+        assert!(!cleanup_stderr.contains("Permission denied"));
     }
 
     // WO-182@v1: distinguish missing lanes from ordinary control teardown.
