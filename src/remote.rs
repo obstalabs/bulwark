@@ -32,10 +32,11 @@
 //!
 //! ## A grant is SCOPED, not a bare inode (prototype-grade)
 //!
+// WO-179@v1: state that every process of the requester uid shares the session grant.
 //! `allow-session` does not authorize "this inode for anyone." It is scoped to
-//! the requester identity, the session, and the policy epoch — so a different
-//! process in the same remote environment touching the same file does not
-//! inherit the grant. The full production grant also carries `remote_host`,
+//! the requester identity, the session, and the policy epoch — so any process
+//! running as the requester uid in the same remote session inherits the grant;
+//! another uid does not. The full production grant also carries `remote_host`,
 //! `expires_at`, and an operator verdict signature; this prototype carries the
 //! identity/session/epoch scope and leaves signing + expiry as a documented
 //! follow-up (this is not yet the production trust channel).

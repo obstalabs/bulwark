@@ -25,7 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 <!-- WO-179@v1: preserve the single-use scope of remote allow-once verdicts. -->
 - Remote `allow-once` verdicts authorize exactly one matching open instead of the
-  rest of the session; `allow-session` remains reusable.
+  rest of the session; `allow-session` remains reusable and is shared by processes
+  running as the requester uid in that session.
 <!-- WO-182@v1: remote consent must reject substituted or absent control lanes. -->
 - Remote consent opens existing FIFO lanes without following links or creating missing
   verdict paths, validates their ownership, and fails the launcher when a lane stays absent;

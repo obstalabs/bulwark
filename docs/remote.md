@@ -66,10 +66,11 @@ or write permission on either the prompt lane or the verdict lane.
 
 ## Grants are scoped, not bare inodes
 
+<!-- WO-179@v1: state that every process of the requester uid shares the session grant. -->
 An `allow-session` does not authorize "this inode for anyone." Each grant is
-scoped to the requester identity (uid), the session, and the policy epoch — so a
-different process in the same remote environment touching the same file does not
-inherit the grant, and a policy change invalidates old grants.
+scoped to the requester identity (uid), the session, and the policy epoch — so any
+process running as that uid in the same remote session inherits the grant, while a
+different uid does not, and a policy change invalidates old grants.
 
 <!-- WO-179@v1: distinguish single-use and reusable remote verdicts. -->
 A remote `allow-once` lets exactly the next matching open pass; the following open
