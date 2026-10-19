@@ -266,7 +266,8 @@ as plainly as the ones it does — see **Known limitations** below and
 
 ## License & positioning
 
-<!-- WO-190@v1: Bulwark is open source end to end; paid work is an assessment, not a tier. -->
+<!-- WO-190@v1: Bulwark is open source end to end. -->
+<!-- WO-193@v1: no paid service is offered, matching obstalabs.dev/bulwark. -->
 **Open source, end to end.**
 
 **Bulwark** is licensed **AGPL-3.0-or-later** (see [LICENSE](LICENSE)):
@@ -279,10 +280,5 @@ as plainly as the ones it does — see **Known limitations** below and
 
 You can read exactly what the gate does and how it decides; the security
 boundary is inspectable by design. No functionality is gated by a license check.
-
-**Paid help, not a paid tier.** Obsta Labs runs a fixed-price containment
-assessment: one real incident scenario, your agent under Bulwark on your staging
-host, and a written map of what was denied, what was not and why. Details at
-[obstalabs.dev/bulwark](https://obstalabs.dev/bulwark).
 
 Copyright © 2026 Obsta Labs.

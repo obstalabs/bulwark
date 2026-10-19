@@ -57,8 +57,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
-- README leads with why an independent layer matters, drops the Pro / Fleet tier
-  and its roadmap items, and links the paid containment assessment.
+<!-- WO-193@v1: the site no longer offers an assessment, so the README does not either. -->
+- README leads with why an independent layer matters and drops the Pro / Fleet tier,
+  its roadmap items and any paid offer.
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
 <!-- WO-158@v1: hard-kill tests must release their cgroup and filesystem fixtures. -->
