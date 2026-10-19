@@ -16,6 +16,8 @@ static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 const STARTUP_BOUND: Duration = Duration::from_secs(15);
 const OUTSIDE_OPEN_BOUND: Duration = Duration::from_secs(2);
 const DECISION_BOUND: Duration = Duration::from_secs(20);
+// WO-182@v1: bound each real gate case so a blocked FIFO open cannot hang the suite.
+const GATE_CASE_BOUND: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 // WO-182@v1: give the launcher time to observe closed controls before releasing the gate.
 const CONTROL_EXIT_OBSERVATION_BOUND: Duration = Duration::from_millis(250);
@@ -496,11 +498,19 @@ impl GateLaneFixture {
         let case = self.root.join(tag);
         let evidence = case.join("evidence");
         fs::create_dir(&case).expect("create lane case");
-        fs::set_permissions(&case, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(&case, fs::Permissions::from_mode(0o711))
             .expect("set lane case permissions");
         fs::create_dir(&evidence).expect("create lane evidence");
-        fs::set_permissions(&evidence, fs::Permissions::from_mode(0o777))
+        fs::set_permissions(&evidence, fs::Permissions::from_mode(0o700))
             .expect("make lane evidence writable by the worker");
+        let evidence_path =
+            std::ffi::CString::new(evidence.as_os_str().as_encoded_bytes().to_vec())
+                .expect("evidence path has no nul");
+        assert_eq!(
+            unsafe { libc::chown(evidence_path.as_ptr(), self.worker_uid, self.worker_uid) },
+            0,
+            "chown lane evidence directory"
+        );
 
         let prompt = case.join("prompts");
         let verdict = case.join("verdicts");
@@ -514,7 +524,11 @@ impl GateLaneFixture {
 
         let marker = evidence.join("agent-ran");
         let agent = format!("printf '%s\\n' ran > {}", marker.display());
-        let output = Command::new(env!("CARGO_BIN_EXE_bulwark"))
+        let stdout_path = case.join("stdout");
+        let stderr_path = case.join("stderr");
+        let stdout = File::create(&stdout_path).expect("create gate stdout capture");
+        let stderr = File::create(&stderr_path).expect("create gate stderr capture");
+        let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
             .args([
                 "run",
                 "--consent",
@@ -533,8 +547,19 @@ impl GateLaneFixture {
             .arg(self.root.join("protected"))
             .args(["--", "/bin/sh", "-c", &agent])
             .stdin(Stdio::null())
-            .output()
-            .expect("run real remote gate");
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .process_group(0)
+            .spawn()
+            .expect("spawn real remote gate");
+        // WO-182@v1: the shared guard kills and reaps the whole gate process group on timeout.
+        let mut gate = RunningCli::new(child);
+        let status = gate.wait(GATE_CASE_BOUND);
+        let output = std::process::Output {
+            status,
+            stdout: fs::read(stdout_path).expect("read gate stdout capture"),
+            stderr: fs::read(stderr_path).expect("read gate stderr capture"),
+        };
         (output, marker.is_file(), sentinels)
     }
 }
@@ -552,18 +577,39 @@ impl Drop for GateLaneFixture {
 fn remote_gate_refuses_symlink_and_regular_lanes() {
     let fixture = GateLaneFixture::new();
     let cases = [
-        ("prompt-symlink", LaneShape::Symlink, LaneShape::Fifo),
-        ("prompt-regular", LaneShape::Regular, LaneShape::Fifo),
-        ("verdict-symlink", LaneShape::Fifo, LaneShape::Symlink),
-        ("verdict-regular", LaneShape::Fifo, LaneShape::Regular),
+        (
+            "prompt-symlink",
+            LaneShape::Symlink,
+            LaneShape::Fifo,
+            "cannot open existing prompt FIFO without following links",
+        ),
+        (
+            "prompt-regular",
+            LaneShape::Regular,
+            LaneShape::Fifo,
+            "prompt lane is not a FIFO",
+        ),
+        (
+            "verdict-symlink",
+            LaneShape::Fifo,
+            LaneShape::Symlink,
+            "cannot open existing verdict FIFO without following links",
+        ),
+        (
+            "verdict-regular",
+            LaneShape::Fifo,
+            LaneShape::Regular,
+            "verdict lane is not a FIFO",
+        ),
     ];
 
-    for (tag, prompt, verdict) in cases {
+    for (tag, prompt, verdict, expected_error) in cases {
         let (output, marker, sentinels) = fixture.run_case(tag, prompt, verdict);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{tag} was accepted:\n{stderr}");
         assert!(
-            !output.status.success(),
-            "{tag} was accepted:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr.contains(expected_error),
+            "{tag} did not report {expected_error:?}:\n{stderr}"
         );
         assert!(!marker, "{tag} launched the agent");
         for (path, expected) in sentinels {
