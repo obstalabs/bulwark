@@ -1216,6 +1216,81 @@ fn remote_consent_worker_uid(
     Ok(uid)
 }
 
+// WO-182@v1: bound remote FIFO discovery without falling through on absence.
+const REMOTE_LANE_WAIT_ATTEMPTS: u16 = 100;
+// WO-182@v1: retain the existing ten-second discovery window in named form.
+const REMOTE_LANE_WAIT_INTERVAL: &str = "0.1";
+// WO-182@v1: observe control-session failure without blocking on the primary gate.
+const REMOTE_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+// WO-182@v1: make a missing or non-FIFO remote lane a terminal launcher error.
+fn build_remote_lane_wait(fifo: &str, attempts: u16, interval: &str) -> String {
+    let fifo = shell_quote(fifo);
+    format!(
+        r#"# WO-182@v1: bound FIFO discovery and refuse absence after the deadline.
+i=0
+while [ "$i" -lt {attempts} ]; do
+  [ -p {fifo} ] && break
+  i=$((i + 1))
+  sleep {interval}
+done
+# WO-182@v1: stop instead of letting a following command create or miss the lane.
+[ -p {fifo} ] || {{ echo "[bulwark] remote FIFO did not appear: {fifo}" >&2; exit 74; }}"#
+    )
+}
+
+// WO-182@v1: read prompts only after the existing FIFO passes the bounded wait.
+fn build_remote_prompt_reader(fifo: &str, attempts: u16, interval: &str) -> String {
+    format!(
+        "{}\n# WO-182@v1: stream only the verified existing prompt FIFO.\nexec cat {}",
+        build_remote_lane_wait(fifo, attempts, interval),
+        shell_quote(fifo)
+    )
+}
+
+// WO-182@v1: stream verdicts through an existing FIFO without O_CREAT redirection.
+fn build_remote_verdict_writer(fifo: &str, attempts: u16, interval: &str) -> String {
+    format!(
+        "{}\n# WO-182@v1: nocreat makes a removal after the wait fail closed.\n\
+         while IFS= read -r l; do printf '%s\\n' \"$l\"; done | \
+         dd bs=1 of={} oflag=nocreat status=none",
+        build_remote_lane_wait(fifo, attempts, interval),
+        shell_quote(fifo)
+    )
+}
+
+// WO-182@v1: fail the launcher if either control session exits before the gate.
+fn wait_remote_gate_and_controls(
+    gate: &mut std::process::Child,
+    prompt_reader: &mut std::process::Child,
+    verdict_writer: &mut std::process::Child,
+) -> Result<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = gate.try_wait().context("poll remote gate session")? {
+            return Ok(status);
+        }
+        if let Some(status) = prompt_reader
+            .try_wait()
+            .context("poll remote prompt lane")?
+        {
+            let _ = gate.kill();
+            let _ = verdict_writer.kill();
+            let _ = gate.wait();
+            anyhow::bail!("remote prompt lane closed before the gate (status {status})");
+        }
+        if let Some(status) = verdict_writer
+            .try_wait()
+            .context("poll remote verdict lane")?
+        {
+            let _ = gate.kill();
+            let _ = prompt_reader.kill();
+            let _ = gate.wait();
+            anyhow::bail!("remote verdict lane closed before the gate (status {status})");
+        }
+        std::thread::sleep(REMOTE_CONTROL_POLL_INTERVAL);
+    }
+}
+
 // WO-9@v1: coordinate the remote gate and its prompt and verdict lanes.
 fn cmd_ssh(args: SshArgs) -> Result<i32> {
     use std::io::{BufRead, BufReader, Write};
@@ -1394,12 +1469,14 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // before that runs — without the wait, `cat` would fail on a missing path,
     // the reader would die, and the gate would block forever opening the prompt
     // FIFO with no reader. The bounded wait avoids that startup race.
-    let wait_for =
-        |fifo: &str| format!("for _ in $(seq 1 100); do [ -p {fifo} ] && break; sleep 0.1; done");
     let mut prompt_reader = std::process::Command::new("ssh")
         .args(["-o", "StrictHostKeyChecking=accept-new"])
         .arg(target)
-        .arg(format!("{}; cat {prompt_lane}", wait_for(&prompt_lane)))
+        .arg(build_remote_prompt_reader(
+            &prompt_lane,
+            REMOTE_LANE_WAIT_ATTEMPTS,
+            REMOTE_LANE_WAIT_INTERVAL,
+        ))
         .stdout(std::process::Stdio::piped())
         // Null its stdin: an inherited stdin would make this ssh consume the
         // operator's keystrokes (ssh forwards stdin to the remote), starving the
@@ -1411,12 +1488,14 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
     // block-buffers its output to the FIFO, so a verdict would not reach the gate
     // until EOF (after the agent already finished). Opening the FIFO once for the
     // whole loop and `printf`-ing each line gives an unbuffered write per verdict.
+    // WO-182@v1: dd opens without O_CREAT and writes each byte as it arrives.
     let mut verdict_writer = std::process::Command::new("ssh")
         .args(["-o", "StrictHostKeyChecking=accept-new"])
         .arg(target)
-        .arg(format!(
-            "{}; while IFS= read -r l; do printf '%s\\n' \"$l\"; done > {verdict_lane}",
-            wait_for(&verdict_lane)
+        .arg(build_remote_verdict_writer(
+            &verdict_lane,
+            REMOTE_LANE_WAIT_ATTEMPTS,
+            REMOTE_LANE_WAIT_INTERVAL,
         ))
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -1459,7 +1538,8 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         }
     });
 
-    let status = gate.wait().context("remote gate session failed")?;
+    // WO-182@v1: a lane startup failure terminates the dispatch instead of hanging.
+    let status = wait_remote_gate_and_controls(&mut gate, &mut prompt_reader, &mut verdict_writer)?;
 
     // The gate exited (agent done): tear down the control channels.
     let _ = prompt_reader.kill();
@@ -2792,6 +2872,115 @@ fn cmd_reset(state: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+// WO-182@v1: accept only a FIFO owned by the pinned run directory's owner.
+#[cfg(any(target_os = "linux", test))]
+fn validate_remote_lane_metadata(
+    mode: libc::mode_t,
+    owner_uid: libc::uid_t,
+    expected_uid: libc::uid_t,
+    label: &str,
+) -> Result<()> {
+    if mode & libc::S_IFMT != libc::S_IFIFO {
+        anyhow::bail!("{label} lane is not a FIFO");
+    }
+    if owner_uid != expected_uid {
+        anyhow::bail!(
+            "{label} lane owner uid {owner_uid} does not match {expected_uid} from the run directory"
+        );
+    }
+    Ok(())
+}
+
+// WO-182@v1: open one lane beneath a pinned dirfd without following or creating it.
+#[cfg(target_os = "linux")]
+fn open_remote_lane_at(
+    run_dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    expected_uid: libc::uid_t,
+    label: &str,
+) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = std::ffi::CString::new(name.as_bytes())
+        .with_context(|| format!("{label} lane name contains a nul byte"))?;
+    let fd = unsafe {
+        libc::openat(
+            run_dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot open existing {label} FIFO without following links"));
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot inspect {label} lane"));
+    }
+    validate_remote_lane_metadata(stat.st_mode, stat.st_uid, expected_uid, label)?;
+
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } != 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot set blocking I/O on {label} lane"));
+    }
+    Ok(file)
+}
+
+// WO-182@v1: pin one run directory and validate both control lanes beneath it.
+#[cfg(target_os = "linux")]
+fn open_remote_control_lanes(
+    prompt_path: &Path,
+    verdict_path: &Path,
+) -> Result<(std::fs::File, std::fs::File)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let run_dir_path = prompt_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("prompt lane has no run directory"))?;
+    if verdict_path.parent() != Some(run_dir_path) {
+        anyhow::bail!("remote prompt and verdict lanes must share one run directory");
+    }
+    let prompt_name = prompt_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("prompt lane has no file name"))?;
+    let verdict_name = verdict_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("verdict lane has no file name"))?;
+    let run_dir_name = std::ffi::CString::new(run_dir_path.as_os_str().as_bytes())
+        .context("remote run directory contains a nul byte")?;
+    let run_dir_fd = unsafe {
+        libc::open(
+            run_dir_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if run_dir_fd < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "cannot open remote run directory {} without following links",
+                run_dir_path.display()
+            )
+        });
+    }
+    let run_dir = unsafe { std::fs::File::from_raw_fd(run_dir_fd) };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(run_dir.as_raw_fd(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot inspect remote run directory");
+    }
+
+    let verdict = open_remote_lane_at(&run_dir, verdict_name, stat.st_uid, "verdict")?;
+    let prompt = open_remote_lane_at(&run_dir, prompt_name, stat.st_uid, "prompt")?;
+    Ok((verdict, prompt))
+}
+
 /// Remote gate side (driven by `bulwark ssh`): a protected open is denied
 /// immediately and a prompt is appended to the prompt lane; a background thread
 /// reads operator allow-session replies from the verdict lane and updates the
@@ -2838,22 +3027,15 @@ fn cmd_run_remote(
         // FIFO, the open does NOT block waiting for a writer (a read-only FIFO open
         // blocks until a writer connects — which would deadlock startup) and the
         // reader never sees EOF when a transient writer disconnects.
-        let verdict_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&verdict_path)
-            .with_context(|| format!("cannot open verdict lane {}", verdict_path.display()))?;
+        // WO-182@v1: pin the run directory and validate both existing lane FIFOs.
+        let (verdict_file, prompt_file) = open_remote_control_lanes(&prompt_path, &verdict_path)?;
         let intake_cache = cache.clone();
         std::thread::spawn(move || {
             remote::intake_verdicts(BufReader::new(verdict_file), intake_cache);
         });
 
         // Prompt lane: append-only file the local side tails.
-        let prompt_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&prompt_path)
-            .with_context(|| format!("cannot open prompt lane {}", prompt_path.display()))?;
+        // WO-182@v1: the verified FIFO above is never created by the root gate.
         // WO-181@v1: keep a stalled prompt lane off the remote decision path.
         let (prompt_writer, prompt_stats) = remote::PromptQueueWriter::spawn(prompt_file)
             .context("cannot start remote prompt writer")?;
@@ -4196,5 +4378,45 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(err
             .to_string()
             .contains("agent empty has neither protect nor allow policy configured"));
+    }
+
+    // WO-182@v1: only a FIFO owned by the pinned run directory's owner is valid.
+    #[test]
+    fn remote_lane_metadata_requires_fifo_owned_by_run_dir() {
+        let fifo_mode = libc::S_IFIFO | 0o600;
+        validate_remote_lane_metadata(fifo_mode, 1000, 1000, "prompt").unwrap();
+
+        let wrong_type = validate_remote_lane_metadata(libc::S_IFREG | 0o600, 1000, 1000, "prompt")
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_type.contains("prompt lane is not a FIFO"));
+
+        let wrong_owner = validate_remote_lane_metadata(fifo_mode, 1001, 1000, "verdict")
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_owner.contains("verdict lane owner uid 1001 does not match 1000"));
+    }
+
+    // WO-182@v1: a missing verdict FIFO must fail without redirection creating it.
+    #[test]
+    fn remote_lane_verdict_writer_refuses_a_missing_lane_without_creating_it() {
+        let dir = test_scratch_dir("remote-missing-lane");
+        let lane = dir.join("verdicts");
+        let command = build_remote_verdict_writer(lane.to_str().unwrap(), 1, "0");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(74));
+        assert!(!lane.exists(), "the verdict writer created a missing lane");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("remote FIFO did not appear"),
+            "missing-lane error was not reported: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

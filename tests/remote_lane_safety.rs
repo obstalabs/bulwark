@@ -403,3 +403,341 @@ fn stopped_prompt_reader_never_blocks_remote_decisions() {
         "queue overflow was not reported\n{stderr}"
     );
 }
+
+// WO-182@v1: enumerate the only lane shapes the gate-side root proof plants.
+#[derive(Clone, Copy)]
+enum LaneShape {
+    Fifo,
+    Regular,
+    Symlink,
+}
+
+// WO-182@v1: isolate direct remote-gate invocations from launcher transport.
+struct GateLaneFixture {
+    root: PathBuf,
+    worker_uid: u32,
+}
+
+// WO-182@v1: exercise the real CLI against attacker-controlled lane entries.
+impl GateLaneFixture {
+    fn new() -> Self {
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "run this root proof with sudo"
+        );
+        let worker_uid = std::env::var("SUDO_UID")
+            .expect("SUDO_UID must name the non-root worker for this root proof")
+            .parse::<u32>()
+            .expect("SUDO_UID must be numeric");
+        assert_ne!(worker_uid, 0, "the worker must be non-root");
+
+        let root = PathBuf::from(format!(
+            "/var/tmp/bulwark-wo182-gate-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create gate fixture root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("set gate fixture permissions");
+        fs::write(root.join("protected"), b"protected\n").expect("write protected fixture");
+        Self { root, worker_uid }
+    }
+
+    // WO-182@v1: create a FIFO, regular file, or symlink without shared setup races.
+    fn plant_lane(&self, path: &Path, shape: LaneShape) -> Option<PathBuf> {
+        match shape {
+            LaneShape::Fifo => {
+                let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes().to_vec())
+                    .expect("lane path has no nul");
+                assert_eq!(
+                    unsafe { libc::mkfifo(path.as_ptr(), 0o600) },
+                    0,
+                    "create lane FIFO"
+                );
+                None
+            }
+            LaneShape::Regular => {
+                fs::write(path, b"sentinel\n").expect("write regular lane");
+                Some(path.to_path_buf())
+            }
+            LaneShape::Symlink => {
+                let target = path.with_extension("target");
+                fs::write(&target, b"sentinel\n").expect("write symlink target");
+                std::os::unix::fs::symlink(&target, path).expect("plant lane symlink");
+                Some(target)
+            }
+        }
+    }
+
+    // WO-182@v1: run one lane pair through the actual remote-gate command path.
+    fn run_case(
+        &self,
+        tag: &str,
+        prompt_shape: LaneShape,
+        verdict_shape: LaneShape,
+    ) -> (std::process::Output, bool, Vec<(PathBuf, Vec<u8>)>) {
+        let case = self.root.join(tag);
+        let evidence = case.join("evidence");
+        fs::create_dir(&case).expect("create lane case");
+        fs::set_permissions(&case, fs::Permissions::from_mode(0o700))
+            .expect("set lane case permissions");
+        fs::create_dir(&evidence).expect("create lane evidence");
+        fs::set_permissions(&evidence, fs::Permissions::from_mode(0o777))
+            .expect("make lane evidence writable by the worker");
+
+        let prompt = case.join("prompts");
+        let verdict = case.join("verdicts");
+        let mut sentinels = Vec::new();
+        if let Some(path) = self.plant_lane(&prompt, prompt_shape) {
+            sentinels.push((path, b"sentinel\n".to_vec()));
+        }
+        if let Some(path) = self.plant_lane(&verdict, verdict_shape) {
+            sentinels.push((path, b"sentinel\n".to_vec()));
+        }
+
+        let marker = evidence.join("agent-ran");
+        let agent = format!("printf '%s\\n' ran > {}", marker.display());
+        let output = Command::new(env!("CARGO_BIN_EXE_bulwark"))
+            .args([
+                "run",
+                "--consent",
+                "remote",
+                "--host-label",
+                "fixture.invalid",
+            ])
+            .arg("--prompt-out")
+            .arg(&prompt)
+            .arg("--verdict-in")
+            .arg(&verdict)
+            .arg("--state")
+            .arg(case.join("state.toml"))
+            .args(["--worker-uid", &self.worker_uid.to_string()])
+            .arg("--protect")
+            .arg(self.root.join("protected"))
+            .args(["--", "/bin/sh", "-c", &agent])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run real remote gate");
+        (output, marker.is_file(), sentinels)
+    }
+}
+
+// WO-182@v1: remove direct gate artifacts after every success and refusal.
+impl Drop for GateLaneFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+// WO-182@v1: refuse planted lane objects and preserve their target bytes.
+#[test]
+#[ignore = "requires root and Linux fanotify"]
+fn remote_gate_refuses_symlink_and_regular_lanes() {
+    let fixture = GateLaneFixture::new();
+    let cases = [
+        ("prompt-symlink", LaneShape::Symlink, LaneShape::Fifo),
+        ("prompt-regular", LaneShape::Regular, LaneShape::Fifo),
+        ("verdict-symlink", LaneShape::Fifo, LaneShape::Symlink),
+        ("verdict-regular", LaneShape::Fifo, LaneShape::Regular),
+    ];
+
+    for (tag, prompt, verdict) in cases {
+        let (output, marker, sentinels) = fixture.run_case(tag, prompt, verdict);
+        assert!(
+            !output.status.success(),
+            "{tag} was accepted:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!marker, "{tag} launched the agent");
+        for (path, expected) in sentinels {
+            assert_eq!(
+                fs::read(&path).expect("read planted target"),
+                expected,
+                "{tag} changed {}",
+                path.display()
+            );
+        }
+    }
+}
+
+// WO-182@v1: preserve the normal two-FIFO remote gate path after validation.
+#[test]
+#[ignore = "requires root and Linux fanotify"]
+fn remote_gate_accepts_owned_fifo_lanes() {
+    let fixture = GateLaneFixture::new();
+    let (output, marker, sentinels) = fixture.run_case("normal", LaneShape::Fifo, LaneShape::Fifo);
+    assert!(sentinels.is_empty());
+    assert!(
+        output.status.success(),
+        "normal FIFO lanes failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(marker, "the normal FIFO path did not run the agent");
+}
+
+// WO-182@v1: isolate a launcher whose primary channel lives but lanes stay absent.
+struct MissingLaneFixture {
+    root: PathBuf,
+    worker_uid: u32,
+}
+
+// WO-182@v1: drive the actual launcher through bounded missing-lane control sessions.
+impl MissingLaneFixture {
+    fn new() -> Self {
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "run this root proof with sudo"
+        );
+        let worker_uid = std::env::var("SUDO_UID")
+            .expect("SUDO_UID must name the non-root worker for this root proof")
+            .parse::<u32>()
+            .expect("SUDO_UID must be numeric");
+        assert_ne!(worker_uid, 0, "the worker must be non-root");
+
+        let root = PathBuf::from(format!(
+            "/var/tmp/bulwark-wo182-launcher-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create launcher fixture root");
+        fs::create_dir(root.join("bin")).expect("create launcher fixture bin");
+        fs::create_dir(root.join("home")).expect("create launcher fixture home");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("set launcher fixture permissions");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_bulwark"), root.join("bin/bulwark"))
+            .expect("link bulwark under launcher PATH");
+        let hold =
+            std::ffi::CString::new(root.join("hold").as_os_str().as_encoded_bytes().to_vec())
+                .expect("hold path has no nul");
+        assert_eq!(
+            unsafe { libc::mkfifo(hold.as_ptr(), 0o600) },
+            0,
+            "create hold FIFO"
+        );
+
+        let fixture = Self { root, worker_uid };
+        fixture.script(
+            "ssh",
+            r#"#!/bin/sh
+set -eu
+# WO-182@v1: execute the final ssh argument as the fake remote command.
+for remote_command do :; done
+case "$remote_command" in
+  'id -u')
+    printf '%s\n' 0
+    exit 0
+    ;;
+  'mkdir -m 700 '*)
+    # WO-182@v1: retain the generated run path so teardown removes it.
+    remote_dir=${remote_command#mkdir -m 700 }
+    /bin/sh -c "$remote_command"
+    printf '%s\n' "$remote_dir" > "$FIXTURE_ROOT/remote-dir"
+    exit 0
+    ;;
+  *'run --consent remote'*)
+    printf '%s\n' started > "$FIXTURE_ROOT/primary-started"
+    # WO-182@v1: keep the primary channel live until the launcher kills it.
+    exec /bin/cat "$FIXTURE_ROOT/hold"
+    ;;
+esac
+# WO-182@v1: run identity, deployment and control commands unchanged.
+exec /bin/sh -c "$remote_command"
+"#,
+        );
+        fixture
+    }
+
+    // WO-182@v1: install the fake transport without replacing launcher logic.
+    fn script(&self, name: &str, contents: &str) {
+        let path = self.root.join("bin").join(name);
+        fs::write(&path, contents).expect("write launcher fixture script");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .expect("make launcher fixture script executable");
+    }
+
+    // WO-182@v1: launch the real ssh command with bounded process-group cleanup.
+    fn spawn(&self) -> RunningCli {
+        let stdout = File::create(self.root.join("stdout")).expect("create stdout capture");
+        let stderr = File::create(self.root.join("stderr")).expect("create stderr capture");
+        let mut paths = vec![self.root.join("bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        ));
+        let marker = self.root.join("agent-ran");
+        let agent = format!("printf '%s\\n' ran > {}", marker.display());
+        let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
+            .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            .args(["--worker-uid", &self.worker_uid.to_string()])
+            .arg("--state")
+            .arg(self.root.join("state.toml"))
+            .arg("--protect")
+            .arg(self.root.join("guarded"))
+            .args(["--auto", "deny", "--", "/bin/sh", "-c", &agent])
+            .env(
+                "PATH",
+                std::env::join_paths(paths).expect("join launcher PATH"),
+            )
+            .env("HOME", self.root.join("home"))
+            .env("XDG_STATE_HOME", self.root.join("home"))
+            .env("FIXTURE_ROOT", &self.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .process_group(0)
+            .spawn()
+            .expect("spawn missing-lane launcher");
+        RunningCli::new(child)
+    }
+
+    // WO-182@v1: expose launcher evidence after the bounded failure.
+    fn contents(&self, relative: &str) -> String {
+        fs::read_to_string(self.root.join(relative)).unwrap_or_default()
+    }
+}
+
+// WO-182@v1: remove the generated remote directory and local launcher fixture.
+impl Drop for MissingLaneFixture {
+    fn drop(&mut self) {
+        let remote_dir = self.contents("remote-dir");
+        let remote_dir = PathBuf::from(remote_dir.trim());
+        if remote_dir.starts_with("/tmp")
+            && remote_dir
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"bulwark-remote-"))
+        {
+            let _ = fs::remove_dir_all(remote_dir);
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+// WO-182@v1: missing remote FIFOs must fail the launcher before any agent runs.
+#[test]
+#[ignore = "requires Linux root for the remote launcher fixture"]
+fn missing_remote_fifos_fail_the_launcher_before_agent_start() {
+    let fixture = MissingLaneFixture::new();
+    let mut cli = fixture.spawn();
+    wait_for_file(
+        &fixture.root.join("primary-started"),
+        STARTUP_BOUND,
+        "primary remote channel",
+    );
+    let status = cli.wait(DECISION_BOUND);
+    let stderr = fixture.contents("stderr");
+
+    assert!(!status.success(), "missing lanes were accepted\n{stderr}");
+    assert!(
+        stderr.contains("remote FIFO did not appear"),
+        "bounded lane error was not reported\n{stderr}"
+    );
+    assert!(
+        stderr.contains("lane closed before the gate"),
+        "the launcher did not propagate control-session failure\n{stderr}"
+    );
+    assert!(
+        !fixture.root.join("agent-ran").exists(),
+        "the agent ran without control FIFOs"
+    );
+}
