@@ -23,6 +23,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CONTROL_EXIT_OBSERVATION_BOUND: Duration = Duration::from_millis(250);
 // WO-181@v1: exceed the product's 256 queued prompts after the FIFO is full.
 const QUEUE_OVERFLOW_MARGIN: usize = 512;
+// WO-192@v1: bound a launcher whose fake gate refuses before opening either lane.
+const EARLY_FAILURE_BOUND: Duration = Duration::from_secs(15);
+// WO-192@v1: bound proof that no process retains the removed remote run directory.
+const LANE_PROCESS_EXIT_BOUND: Duration = Duration::from_secs(5);
 
 // WO-181@v1: isolate the real remote CLI and its stopped prompt reader.
 struct RemoteLaneFixture {
@@ -894,4 +898,238 @@ exec /bin/sh -c "$remote_command"
         !stderr.contains("lane closed before the gate"),
         "normal gate completion was misreported as a lane failure\n{stderr}"
     );
+}
+
+// WO-192@v1: run every remote command locally while the fake gate refuses unopened FIFOs.
+struct EarlyExitLaneFixture {
+    root: PathBuf,
+    worker_uid: u32,
+}
+
+// WO-192@v1: expose blocked control opens without intercepting generated SSH commands.
+impl EarlyExitLaneFixture {
+    fn new() -> Self {
+        let login_uid = unsafe { libc::geteuid() };
+        let worker_uid = login_uid
+            .checked_add(1)
+            .expect("fixture login uid must leave room for a distinct worker");
+        let root = PathBuf::from(format!(
+            "/var/tmp/bulwark-wo192-lanes-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create early-exit fixture root");
+        fs::create_dir(root.join("bin")).expect("create early-exit fixture bin");
+        fs::create_dir(root.join("home")).expect("create early-exit fixture home");
+        fs::write(root.join("guarded"), b"guarded\n").expect("write protected fixture");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_bulwark"), root.join("bin/bulwark"))
+            .expect("link bulwark under early-exit PATH");
+
+        let fixture = Self { root, worker_uid };
+        fixture.script(
+            "ssh",
+            r#"#!/bin/sh
+set -eu
+# WO-192@v1: execute every generated remote command instead of matching a prefix.
+for remote_command do :; done
+exec /bin/sh -c "$remote_command"
+"#,
+        );
+        fixture.script(
+            "sudo",
+            r#"#!/bin/sh
+set -eu
+[ "${1-}" != -n ] || shift
+case " $* " in
+  *' --prompt-out '*)
+    prompt=
+    verdict=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --prompt-out)
+          shift
+          prompt=${1-}
+          ;;
+        --verdict-in)
+          shift
+          verdict=${1-}
+          ;;
+      esac
+      shift
+    done
+    [ -n "$prompt" ] && [ -n "$verdict" ] || exit 72
+    [ -p "$prompt" ] && [ -p "$verdict" ] || exit 73
+    printf '%s\n' checked > "$FIXTURE_ROOT/gate-checked"
+    # WO-192@v1: refuse without opening a lane, reproducing early remote failure.
+    exit 71
+    ;;
+esac
+# WO-192@v1: preserve cleanup and deployment commands outside the fake gate.
+exec "$@"
+"#,
+        );
+        fixture.script(
+            "mkfifo",
+            r#"#!/bin/sh
+set -eu
+/usr/bin/mkfifo "$@"
+shift 2
+# WO-192@v1: publish the exact real FIFO paths for process-reference checks.
+printf '%s\n%s\n' "$1" "$2" > "$FIXTURE_ROOT/lanes"
+"#,
+        );
+        fixture
+    }
+
+    // WO-192@v1: install executable transport fixtures without replacing launcher logic.
+    fn script(&self, name: &str, contents: &str) {
+        let path = self.root.join("bin").join(name);
+        fs::write(&path, contents).expect("write early-exit fixture script");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .expect("make early-exit fixture script executable");
+    }
+
+    // WO-192@v1: keep the whole local transport tree in one killable process group.
+    fn spawn(&self) -> RunningCli {
+        let stdout = File::create(self.root.join("stdout")).expect("create stdout capture");
+        let stderr = File::create(self.root.join("stderr")).expect("create stderr capture");
+        let mut paths = vec![self.root.join("bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH is set"),
+        ));
+        let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
+            .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            .args(["--worker-uid", &self.worker_uid.to_string()])
+            .arg("--state")
+            .arg(self.root.join("state.toml"))
+            .arg("--protect")
+            .arg(self.root.join("guarded"))
+            .args(["--auto", "deny", "--", "/bin/true"])
+            .env(
+                "PATH",
+                std::env::join_paths(paths).expect("join early-exit fixture PATH"),
+            )
+            .env("HOME", self.root.join("home"))
+            .env("XDG_STATE_HOME", self.root.join("home"))
+            .env("FIXTURE_ROOT", &self.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .process_group(0)
+            .spawn()
+            .expect("spawn early-exit launcher");
+        RunningCli::new(child)
+    }
+
+    // WO-192@v1: read fixture evidence after the bounded launcher exit.
+    fn contents(&self, relative: &str) -> String {
+        fs::read_to_string(self.root.join(relative)).unwrap_or_default()
+    }
+
+    // WO-192@v1: recover the generated run directory without predicting its token.
+    fn remote_dir(&self) -> Option<PathBuf> {
+        let lane = self.contents("lanes").lines().next()?.to_string();
+        PathBuf::from(lane).parent().map(Path::to_path_buf)
+    }
+}
+
+// WO-192@v1: remove local evidence and any safely identified generated run directory.
+impl Drop for EarlyExitLaneFixture {
+    fn drop(&mut self) {
+        if let Some(remote_dir) = self.remote_dir() {
+            if remote_dir.starts_with("/tmp")
+                && remote_dir
+                    .file_name()
+                    .is_some_and(|name| name.as_encoded_bytes().starts_with(b"bulwark-remote-"))
+            {
+                let _ = fs::remove_dir_all(remote_dir);
+            }
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+// WO-192@v1: find command lines or open descriptors retaining one generated run path.
+fn remote_process_references(remote_dir: &Path) -> Vec<String> {
+    let needle = remote_dir.as_os_str().as_encoded_bytes();
+    assert!(!needle.is_empty(), "remote run directory must not be empty");
+    let mut references = Vec::new();
+    for entry in fs::read_dir("/proc").expect("read /proc") {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let pid = match entry.file_name().to_string_lossy().parse::<u32>() {
+            Ok(pid) => pid,
+            Err(_) => continue,
+        };
+        let proc_path = entry.path();
+        if fs::read(proc_path.join("cmdline"))
+            .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        {
+            references.push(format!("pid {pid} command line"));
+        }
+        let fds = match fs::read_dir(proc_path.join("fd")) {
+            Ok(fds) => fds,
+            Err(_) => continue,
+        };
+        for fd in fds.flatten() {
+            let target = match fs::read_link(fd.path()) {
+                Ok(target) => target,
+                Err(_) => continue,
+            };
+            if target
+                .as_os_str()
+                .as_encoded_bytes()
+                .windows(needle.len())
+                .any(|window| window == needle)
+            {
+                references.push(format!("pid {pid} fd {}", fd.file_name().to_string_lossy()));
+            }
+        }
+    }
+    references
+}
+
+// WO-192@v1: poll to a named deadline without sleeping past process exit.
+fn wait_for_remote_process_release(remote_dir: &Path, bound: Duration) {
+    let deadline = Instant::now() + bound;
+    loop {
+        let references = remote_process_references(remote_dir);
+        if references.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "remote lane processes outlived cleanup for {}: {references:?}",
+            remote_dir.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
+// WO-192@v1: an early gate refusal must release both blocked control-lane opens.
+#[test]
+fn failed_remote_run_releases_blocked_lane_processes() {
+    let fixture = EarlyExitLaneFixture::new();
+    let mut cli = fixture.spawn();
+    wait_for_file(
+        &fixture.root.join("gate-checked"),
+        STARTUP_BOUND,
+        "fake gate lane checks",
+    );
+    let status = cli.wait(EARLY_FAILURE_BOUND);
+    assert!(!status.success(), "the refusing fake gate was accepted");
+    assert_eq!(fixture.contents("gate-checked").trim(), "checked");
+
+    let lanes = fixture.contents("lanes");
+    let lane_paths = lanes.lines().map(PathBuf::from).collect::<Vec<_>>();
+    assert_eq!(lane_paths.len(), 2, "fixture did not record both lanes");
+    let remote_dir = lane_paths[0].parent().expect("prompt lane parent");
+    assert_eq!(lane_paths[1].parent(), Some(remote_dir));
+    assert!(
+        !remote_dir.exists(),
+        "remote run directory survived cleanup"
+    );
+    wait_for_remote_process_release(remote_dir, LANE_PROCESS_EXIT_BOUND);
 }

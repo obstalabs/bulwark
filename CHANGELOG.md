@@ -32,6 +32,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verdict paths, validates their ownership, and fails the launcher when a lane stays absent;
   control exits during normal gate teardown preserve the gate's status, and verdict delivery
   uses GNU `dd`'s `conv=nocreat` mode so unsupported hosts fail before consent starts.
+<!-- WO-192@v1: failed remote cleanup must release processes blocked opening a lane. -->
+- Failed remote runs no longer leave a consent-lane process and SSH session behind on
+  the remote host.
 <!-- WO-181@v1: remote prompt backpressure must never delay a permission decision. -->
 - Remote consent prompts use a bounded writer queue, so a stalled prompt lane cannot delay protected-open denials.
 <!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->

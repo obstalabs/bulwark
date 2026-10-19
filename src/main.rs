@@ -970,12 +970,22 @@ fn build_gate_script(
     // forged verdicts into to self-answer the off-band consent).
     // WO-153@v1: the exclusive mkdir now runs before material placement; this
     // script accepts only the same login user's directory before creating lanes.
+    // WO-192@v1: hold both FIFO ends across removal to release blocked control opens.
     format!(
         r#"set -e
 cleanup() {{
   rc=$?
   trap - EXIT INT TERM HUP
+  # WO-192@v1: release blocked lane opens without following a planted symlink.
+  if [ -p {pl} ] && [ ! -h {pl} ]; then
+    exec 8<>{pl} || true
+  fi
+  if [ -p {vl} ] && [ ! -h {vl} ]; then
+    exec 9<>{vl} || true
+  fi
   sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
+  exec 8>&- 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
   exit "$rc"
 }}
 trap cleanup EXIT INT TERM HUP
@@ -3863,6 +3873,7 @@ mod tests {
     // WO-29@v1: keep hivebus handoff outside the gate bootstrap connection.
     // WO-85@v1: pin deployment prelude placement in the remote gate script.
     // WO-87@v1: pin teardown of the remote run and deployment directories.
+    // WO-192@v1: pin release of blocked control opens before lane removal.
     #[test]
     fn gate_script_keeps_lanes_out_of_hivebus_and_cleans_up() {
         // WO-29 acceptance: with no hivebus flags, `bulwark ssh` must behave
@@ -3886,7 +3897,16 @@ mod tests {
 cleanup() {\n  \
 rc=$?\n  \
 trap - EXIT INT TERM HUP\n  \
+# WO-192@v1: release blocked lane opens without following a planted symlink.\n  \
+if [ -p /tmp/bulwark-remote-42/prompts ] && [ ! -h /tmp/bulwark-remote-42/prompts ]; then\n    \
+exec 8<>/tmp/bulwark-remote-42/prompts || true\n  \
+fi\n  \
+if [ -p /tmp/bulwark-remote-42/verdicts ] && [ ! -h /tmp/bulwark-remote-42/verdicts ]; then\n    \
+exec 9<>/tmp/bulwark-remote-42/verdicts || true\n  \
+fi\n  \
 sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-42 2>/dev/null || true\n  \
+exec 8>&- 2>/dev/null || true\n  \
+exec 9>&- 2>/dev/null || true\n  \
 exit \"$rc\"\n\
 }\n\
 trap cleanup EXIT INT TERM HUP\n\
