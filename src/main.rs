@@ -1220,12 +1220,17 @@ fn remote_consent_worker_uid(
 const REMOTE_LANE_WAIT_ATTEMPTS: u16 = 100;
 // WO-182@v1: retain the existing ten-second discovery window in named form.
 const REMOTE_LANE_WAIT_INTERVAL: &str = "0.1";
+// WO-182@v1: share the missing-lane sentinel between the shell and its watcher.
+const REMOTE_LANE_ABSENT_EXIT_CODE: i32 = 74;
 // WO-182@v1: observe control-session failure without blocking on the primary gate.
 const REMOTE_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// WO-182@v1: allow the primary SSH session to report a gate that just closed its FIFOs.
+const REMOTE_CONTROL_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 // WO-182@v1: make a missing or non-FIFO remote lane a terminal launcher error.
 fn build_remote_lane_wait(fifo: &str, attempts: u16, interval: &str) -> String {
     let fifo = shell_quote(fifo);
+    let absent_code = REMOTE_LANE_ABSENT_EXIT_CODE;
     format!(
         r#"# WO-182@v1: bound FIFO discovery and refuse absence after the deadline.
 i=0
@@ -1235,7 +1240,7 @@ while [ "$i" -lt {attempts} ]; do
   sleep {interval}
 done
 # WO-182@v1: stop instead of letting a following command create or miss the lane.
-[ -p {fifo} ] || {{ echo "[bulwark] remote FIFO did not appear: {fifo}" >&2; exit 74; }}"#
+[ -p {fifo} ] || {{ echo "[bulwark] remote FIFO did not appear: {fifo}" >&2; exit {absent_code}; }}"#
     )
 }
 
@@ -1259,35 +1264,151 @@ fn build_remote_verdict_writer(fifo: &str, attempts: u16, interval: &str) -> Str
     )
 }
 
-// WO-182@v1: fail the launcher if either control session exits before the gate.
+// WO-182@v1: classify a control exit without conflating normal teardown with absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteControlExitAction {
+    WaitForGate,
+    ReturnGate,
+    FailLane,
+}
+
+// WO-182@v1: keep the lane-absence sentinel immediate while bounding ordinary EOF grace.
+fn classify_remote_control_exit(
+    control_code: Option<i32>,
+    gate_exited: bool,
+    grace_expired: bool,
+) -> RemoteControlExitAction {
+    if control_code == Some(REMOTE_LANE_ABSENT_EXIT_CODE) {
+        RemoteControlExitAction::FailLane
+    } else if gate_exited {
+        RemoteControlExitAction::ReturnGate
+    } else if grace_expired {
+        RemoteControlExitAction::FailLane
+    } else {
+        RemoteControlExitAction::WaitForGate
+    }
+}
+
+// WO-182@v1: retain the first ordinary control exit while the gate reports its status.
+struct PendingRemoteControlExit {
+    lane: &'static str,
+    status: std::process::ExitStatus,
+    deadline: std::time::Instant,
+}
+
+// WO-182@v1: reap every SSH session before returning any control-watch failure.
+fn stop_remote_gate_and_controls(
+    gate: &mut std::process::Child,
+    prompt_reader: &mut std::process::Child,
+    verdict_writer: &mut std::process::Child,
+) {
+    let _ = gate.kill();
+    let _ = prompt_reader.kill();
+    let _ = verdict_writer.kill();
+    let _ = gate.wait();
+    let _ = prompt_reader.wait();
+    let _ = verdict_writer.wait();
+}
+
+// WO-182@v1: fail absent lanes immediately and let normal teardown report gate status.
 fn wait_remote_gate_and_controls(
     gate: &mut std::process::Child,
     prompt_reader: &mut std::process::Child,
     verdict_writer: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus> {
+    let mut prompt_closed = false;
+    let mut verdict_closed = false;
+    let mut pending: Option<PendingRemoteControlExit> = None;
+
     loop {
-        if let Some(status) = gate.try_wait().context("poll remote gate session")? {
+        let gate_status = match gate.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                stop_remote_gate_and_controls(gate, prompt_reader, verdict_writer);
+                return Err(error).context("poll remote gate session");
+            }
+        };
+
+        if !prompt_closed {
+            match prompt_reader.try_wait() {
+                Ok(Some(status)) => {
+                    prompt_closed = true;
+                    let exit = PendingRemoteControlExit {
+                        lane: "prompt",
+                        status,
+                        deadline: std::time::Instant::now() + REMOTE_CONTROL_EXIT_GRACE,
+                    };
+                    if status.code() == Some(REMOTE_LANE_ABSENT_EXIT_CODE) {
+                        pending = Some(exit);
+                    } else {
+                        pending.get_or_insert(exit);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_remote_gate_and_controls(gate, prompt_reader, verdict_writer);
+                    return Err(error).context("poll remote prompt lane");
+                }
+            }
+        }
+
+        if !verdict_closed {
+            match verdict_writer.try_wait() {
+                Ok(Some(status)) => {
+                    verdict_closed = true;
+                    let exit = PendingRemoteControlExit {
+                        lane: "verdict",
+                        status,
+                        deadline: std::time::Instant::now() + REMOTE_CONTROL_EXIT_GRACE,
+                    };
+                    if status.code() == Some(REMOTE_LANE_ABSENT_EXIT_CODE) {
+                        pending = Some(exit);
+                    } else {
+                        pending.get_or_insert(exit);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_remote_gate_and_controls(gate, prompt_reader, verdict_writer);
+                    return Err(error).context("poll remote verdict lane");
+                }
+            }
+        }
+
+        if let Some(exit) = pending.as_ref() {
+            match classify_remote_control_exit(
+                exit.status.code(),
+                gate_status.is_some(),
+                std::time::Instant::now() >= exit.deadline,
+            ) {
+                RemoteControlExitAction::ReturnGate => {
+                    return Ok(gate_status.expect("classified exited gate"));
+                }
+                RemoteControlExitAction::FailLane => {
+                    let message = format!(
+                        "remote {} lane closed before the gate (status {})",
+                        exit.lane, exit.status
+                    );
+                    stop_remote_gate_and_controls(gate, prompt_reader, verdict_writer);
+                    anyhow::bail!(message);
+                }
+                RemoteControlExitAction::WaitForGate => {}
+            }
+        } else if let Some(status) = gate_status {
             return Ok(status);
         }
-        if let Some(status) = prompt_reader
-            .try_wait()
-            .context("poll remote prompt lane")?
-        {
-            let _ = gate.kill();
-            let _ = verdict_writer.kill();
-            let _ = gate.wait();
-            anyhow::bail!("remote prompt lane closed before the gate (status {status})");
+
+        let wait = pending
+            .as_ref()
+            .map(|exit| {
+                exit.deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(REMOTE_CONTROL_POLL_INTERVAL)
+            })
+            .unwrap_or(REMOTE_CONTROL_POLL_INTERVAL);
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
         }
-        if let Some(status) = verdict_writer
-            .try_wait()
-            .context("poll remote verdict lane")?
-        {
-            let _ = gate.kill();
-            let _ = prompt_reader.kill();
-            let _ = gate.wait();
-            anyhow::bail!("remote verdict lane closed before the gate (status {status})");
-        }
-        std::thread::sleep(REMOTE_CONTROL_POLL_INTERVAL);
     }
 }
 
@@ -4418,5 +4539,26 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             String::from_utf8_lossy(&output.stderr)
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // WO-182@v1: distinguish missing lanes from ordinary control teardown.
+    #[test]
+    fn remote_control_exit_classification_preserves_gate_status() {
+        assert!(matches!(
+            classify_remote_control_exit(Some(REMOTE_LANE_ABSENT_EXIT_CODE), false, false),
+            RemoteControlExitAction::FailLane
+        ));
+        assert!(matches!(
+            classify_remote_control_exit(Some(0), true, false),
+            RemoteControlExitAction::ReturnGate
+        ));
+        assert!(matches!(
+            classify_remote_control_exit(Some(1), false, false),
+            RemoteControlExitAction::WaitForGate
+        ));
+        assert!(matches!(
+            classify_remote_control_exit(Some(1), false, true),
+            RemoteControlExitAction::FailLane
+        ));
     }
 }

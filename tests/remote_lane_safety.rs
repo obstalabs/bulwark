@@ -17,6 +17,8 @@ const STARTUP_BOUND: Duration = Duration::from_secs(15);
 const OUTSIDE_OPEN_BOUND: Duration = Duration::from_secs(2);
 const DECISION_BOUND: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+// WO-182@v1: give the launcher time to observe closed controls before releasing the gate.
+const CONTROL_EXIT_OBSERVATION_BOUND: Duration = Duration::from_millis(250);
 // WO-181@v1: exceed the product's 256 queued prompts after the FIFO is full.
 const QUEUE_OVERFLOW_MARGIN: usize = 512;
 
@@ -256,6 +258,20 @@ impl RunningCli {
             );
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    // WO-182@v1: observe a premature launcher exit without surrendering cleanup ownership.
+    fn try_wait(&mut self) -> Option<ExitStatus> {
+        let status = self
+            .child
+            .as_mut()
+            .expect("child exists while polling")
+            .try_wait()
+            .expect("poll bulwark ssh");
+        if status.is_some() {
+            self.child.take();
+        }
+        status
     }
 }
 
@@ -739,5 +755,97 @@ fn missing_remote_fifos_fail_the_launcher_before_agent_start() {
     assert!(
         !fixture.root.join("agent-ran").exists(),
         "the agent ran without control FIFOs"
+    );
+}
+
+// WO-182@v1: a completed gate owns the result when its control lanes close first.
+#[test]
+#[ignore = "requires Linux root for the remote launcher fixture"]
+fn finished_remote_gate_is_not_reported_as_a_lane_failure() {
+    let fixture = MissingLaneFixture::new();
+    fixture.script(
+        "ssh",
+        r#"#!/bin/sh
+set -eu
+# WO-182@v1: execute the final ssh argument as the fake remote command.
+for remote_command do :; done
+case "$remote_command" in
+  'id -u')
+    printf '%s\n' 0
+    exit 0
+    ;;
+  'mkdir -m 700 '*)
+    # WO-182@v1: retain the generated run path so teardown removes it.
+    remote_dir=${remote_command#mkdir -m 700 }
+    /bin/sh -c "$remote_command"
+    printf '%s\n' "$remote_dir" > "$FIXTURE_ROOT/remote-dir"
+    exit 0
+    ;;
+  *'run --consent remote'*)
+    printf '%s\n' started > "$FIXTURE_ROOT/primary-started"
+    # WO-182@v1: let both controls close before the primary reports normal completion.
+    i=0
+    while [ ! -f "$FIXTURE_ROOT/release-gate" ]; do
+      i=$((i + 1))
+      [ "$i" -lt 1500 ] || exit 70
+      sleep 0.01
+    done
+    exit 0
+    ;;
+  */prompts*)
+    # WO-182@v1: model prompt EOF immediately before normal gate completion.
+    printf '%s\n' closed > "$FIXTURE_ROOT/prompt-closed"
+    exit 0
+    ;;
+  */verdicts*)
+    # WO-182@v1: model the verdict writer's broken-pipe exit at normal teardown.
+    printf '%s\n' closed > "$FIXTURE_ROOT/verdict-closed"
+    exit 1
+    ;;
+esac
+# WO-182@v1: preserve identity and deployment commands outside the control proof.
+exec /bin/sh -c "$remote_command"
+"#,
+    );
+
+    let mut cli = fixture.spawn();
+    wait_for_file(
+        &fixture.root.join("primary-started"),
+        STARTUP_BOUND,
+        "primary remote channel",
+    );
+    wait_for_file(
+        &fixture.root.join("prompt-closed"),
+        STARTUP_BOUND,
+        "closed prompt control",
+    );
+    wait_for_file(
+        &fixture.root.join("verdict-closed"),
+        STARTUP_BOUND,
+        "closed verdict control",
+    );
+
+    let observation_deadline = Instant::now() + CONTROL_EXIT_OBSERVATION_BOUND;
+    let mut early_status = None;
+    while Instant::now() < observation_deadline {
+        if let Some(status) = cli.try_wait() {
+            early_status = Some(status);
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    if early_status.is_none() {
+        fs::write(fixture.root.join("release-gate"), b"release\n").expect("release gate");
+    }
+    let status = early_status.unwrap_or_else(|| cli.wait(DECISION_BOUND));
+    let stderr = fixture.contents("stderr");
+
+    assert!(
+        status.success(),
+        "normal gate completion failed: {status}\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("lane closed before the gate"),
+        "normal gate completion was misreported as a lane failure\n{stderr}"
     );
 }

@@ -28,7 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rest of the session; `allow-session` remains reusable.
 <!-- WO-182@v1: remote consent must reject substituted or absent control lanes. -->
 - Remote consent opens existing FIFO lanes without following links or creating missing
-  verdict paths, validates their ownership, and fails the launcher when a lane stays absent.
+  verdict paths, validates their ownership, and fails the launcher when a lane stays absent;
+  control exits during normal gate teardown preserve the gate's status.
 <!-- WO-181@v1: remote prompt backpressure must never delay a permission decision. -->
 - Remote consent prompts use a bounded writer queue, so a stalled prompt lane cannot delay protected-open denials.
 <!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->
