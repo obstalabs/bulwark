@@ -4615,6 +4615,16 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
                 child_exited = child.try_wait().unwrap().is_some();
             }
             if fifo_closed && child_exited {
+                // WO-182@v1: drain bytes queued between stale EOF and writer exit.
+                loop {
+                    let mut trailing = [0_u8; 128];
+                    match reader.read(&mut trailing) {
+                        Ok(0) => break,
+                        Ok(n) => received.extend_from_slice(&trailing[..n]),
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(err) => panic!("cannot drain verdict FIFO: {err}"),
+                    }
+                }
                 break;
             }
             if std::time::Instant::now() >= deadline {

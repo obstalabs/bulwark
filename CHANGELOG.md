@@ -65,6 +65,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its roadmap items and any paid offer.
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
+<!-- WO-182@v1: the verdict delivery test must not lose a line written just before the writer exits. -->
+- The remote verdict delivery test drains the FIFO after the writer exits, so a line written just before exit is never missed.
 <!-- WO-158@v1: hard-kill tests must release their cgroup and filesystem fixtures. -->
 - Supervisor hard-kill tests prove their cgroup is empty, remove it and unmount their test filesystem on every exit path, retrying transiently busy unmounts to a bounded deadline.
 <!-- WO-157@v1: verified lock identity makes consent socket directory removal race-safe. -->
