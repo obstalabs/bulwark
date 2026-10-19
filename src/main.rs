@@ -1255,10 +1255,11 @@ fn build_remote_prompt_reader(fifo: &str, attempts: u16, interval: &str) -> Stri
 
 // WO-182@v1: stream verdicts through an existing FIFO without O_CREAT redirection.
 fn build_remote_verdict_writer(fifo: &str, attempts: u16, interval: &str) -> String {
+    // WO-182@v1: GNU dd spells the no-create conversion as conv=nocreat.
     format!(
-        "{}\n# WO-182@v1: nocreat makes a removal after the wait fail closed.\n\
+        "{}\n# WO-182@v1: GNU dd accepts nocreat as a conversion, preserving fail-closed removal.\n\
          while IFS= read -r l; do printf '%s\\n' \"$l\"; done | \
-         dd bs=1 of={} oflag=nocreat status=none",
+         dd bs=1 of={} conv=nocreat status=none",
         build_remote_lane_wait(fifo, attempts, interval),
         shell_quote(fifo)
     )
@@ -4538,6 +4539,83 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             "missing-lane error was not reported: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // WO-182@v1: prove the real remote writer delivers through an existing FIFO.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remote_lane_verdict_writer_delivers_a_line_to_an_existing_fifo() {
+        use std::io::{Read, Write};
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // WO-182@v1: bound both FIFO delivery and writer exit without fixed sleeps.
+        const REMOTE_VERDICT_DELIVERY_BOUND: Duration = Duration::from_secs(2);
+
+        let dir = test_scratch_dir("remote-existing-lane");
+        let lane = dir.join("verdicts");
+        let lane_c = std::ffi::CString::new(lane.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(lane_c.as_ptr(), 0o600) }, 0);
+
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&lane)
+            .unwrap();
+        let command = build_remote_verdict_writer(lane.to_str().unwrap(), 1, "0");
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let payload = b"allow-session 5:12:1000:42:3\n";
+        child.stdin.take().unwrap().write_all(payload).unwrap();
+
+        let deadline = std::time::Instant::now() + REMOTE_VERDICT_DELIVERY_BOUND;
+        let mut received = Vec::new();
+        let mut child_exited = false;
+        loop {
+            let mut chunk = [0_u8; 128];
+            let fifo_closed = match reader.read(&mut chunk) {
+                Ok(0) => true,
+                Ok(n) => {
+                    received.extend_from_slice(&chunk[..n]);
+                    false
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(err) => panic!("cannot read verdict FIFO: {err}"),
+            };
+
+            if !child_exited {
+                child_exited = child.try_wait().unwrap().is_some();
+            }
+            if fifo_closed && child_exited {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("remote verdict writer did not exit before the deadline");
+            }
+            std::thread::yield_now();
+        }
+
+        let status = child.wait().unwrap();
+        let mut writer_stderr = Vec::new();
+        stderr.read_to_end(&mut writer_stderr).unwrap();
+        assert_eq!(received, payload);
+        assert!(status.success(), "writer exited with {status}");
+        assert!(
+            writer_stderr.is_empty(),
+            "writer stderr was not empty: {}",
+            String::from_utf8_lossy(&writer_stderr)
+        );
+        drop(reader);
         let _ = std::fs::remove_dir_all(dir);
     }
 

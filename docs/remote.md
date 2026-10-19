@@ -259,6 +259,10 @@ finished production trust channel:
   [Control lanes, not terminal chatter](#control-lanes-not-terminal-chatter)
   for the required worker drop. CLI tests cover refusal and dispatch, and the lane
   fixture verifies both FIFO permissions against the selected worker identity.
+<!-- WO-182@v1: document the verdict writer dependency and fail-closed behavior. -->
+- **Consent runs need GNU coreutils `dd` on the remote host.** The verdict lane is
+  opened without creating it (`conv=nocreat`), so a BusyBox-only host such as Alpine
+  without coreutils refuses to start consent lanes rather than running unprotected.
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
