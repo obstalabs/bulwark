@@ -71,6 +71,10 @@ scoped to the requester identity (uid), the session, and the policy epoch — so
 different process in the same remote environment touching the same file does not
 inherit the grant, and a policy change invalidates old grants.
 
+<!-- WO-179@v1: distinguish single-use and reusable remote verdicts. -->
+A remote `allow-once` lets exactly the next matching open pass; the following open
+is denied and prompts again, while `allow-session` remains reusable for the run.
+
 ## Carrying hivebus key material at dispatch (optional)
 
 A freshly dispatched remote worker often needs a trustworthy *first* key

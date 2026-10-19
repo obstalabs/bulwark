@@ -40,7 +40,7 @@
 //! identity/session/epoch scope and leaves signing + expiry as a documented
 //! follow-up (this is not yet the production trust channel).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,10 +50,12 @@ use crate::protect::InodeKey;
 
 // WO-9@v1: scope remote grants to object, identity, session, and policy state.
 // WO-173@v2: Linux-only: fanotify remote grants bind opened inode identity.
+// WO-179@v1: state the process coverage of the uid-scoped remote grant.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// A scoped allow grant. The key is deliberately NOT a bare inode: it binds the
-/// inode to the requester identity, the session, and the policy epoch, so a
-/// grant cannot over-authorize a different process or a stale policy.
+/// inode to the requester uid, the session, and the policy epoch. Any process
+/// running as that uid can use it in that session; another uid or policy epoch
+/// cannot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GrantKey {
     pub dev: u64,
@@ -124,6 +126,8 @@ impl GrantKey {
 #[derive(Clone, Default)]
 pub struct RemoteCache {
     allow_session: Arc<Mutex<HashSet<GrantKey>>>,
+    // WO-179@v1: count each single-use verdict until one matching open consumes it.
+    allow_once: Arc<Mutex<HashMap<GrantKey, usize>>>,
     /// Count of prompts emitted, for diagnostics/tests.
     prompts_emitted: Arc<AtomicU64>,
 }
@@ -144,11 +148,33 @@ impl RemoteCache {
         self.allow_session.lock().unwrap().insert(key);
     }
 
+    // WO-179@v1: retain one consumable authorization per allow-once reply.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn allow_once(&self, key: GrantKey) {
+        let mut once = self.allow_once.lock().unwrap();
+        *once.entry(key).or_insert(0) += 1;
+    }
+
     // WO-9@v1: decide remote opens only from an exact scoped grant match.
     // WO-173@v2: Linux-only: match fanotify remote opens to scoped grants.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_allowed(&self, key: &GrantKey) -> bool {
         self.allow_session.lock().unwrap().contains(key)
+    }
+
+    // WO-179@v1: consume exactly one matching single-use authorization.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn consume_once(&self, key: &GrantKey) -> bool {
+        let mut once = self.allow_once.lock().unwrap();
+        let Some(remaining) = once.get_mut(key) else {
+            return false;
+        };
+        if *remaining > 1 {
+            *remaining -= 1;
+        } else {
+            once.remove(key);
+        }
+        true
     }
 
     // WO-9@v1: expose prompt counts for deterministic remote-gate verification.
@@ -340,11 +366,15 @@ impl<W: Write> AsyncRemoteProvider<W> {
 // WO-9@v1: connect remote prompt splitting to the portable consent interface.
 impl<W: Write> ConsentProvider for AsyncRemoteProvider<W> {
     // WO-9@v1: allow exact cached grants and deny first touches without waiting.
+    // WO-179@v1: consume single-use grants after checking reusable session grants.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         let grant = self.grant_key(req);
         // Cached scoped-allow → pass immediately, no prompt.
         if self.cache.is_allowed(&grant) {
             return (Verdict::AllowSession, Source::Cache);
+        }
+        if self.cache.consume_once(&grant) {
+            return (Verdict::AllowOnce, Source::Cache);
         }
         // Not cached → deny NOW (meet the kernel deadline) and prompt for next
         // time. The operator's allow-session reply (echoing this scoped grant)
@@ -440,6 +470,7 @@ pub fn parse_verdict_reply(line: &str) -> Option<(Verdict, GrantKey)> {
 /// Read operator verdict replies from `reader` (the verdict lane) and apply
 /// `allow-session` decisions to `cache`. Runs until the lane closes; intended to
 /// run on a background thread on the remote gate.
+/// `allow-once` decisions remain separate and are consumed by one matching open.
 pub fn intake_verdicts<R: BufRead>(reader: R, cache: RemoteCache) {
     for line in reader.lines() {
         let line = match line {
@@ -447,8 +478,11 @@ pub fn intake_verdicts<R: BufRead>(reader: R, cache: RemoteCache) {
             Err(_) => break,
         };
         if let Some((verdict, grant)) = parse_verdict_reply(&line) {
-            if matches!(verdict, Verdict::AllowSession | Verdict::AllowOnce) {
-                cache.allow(grant);
+            // WO-179@v1: preserve the operator's reusable versus single-use scope.
+            match verdict {
+                Verdict::AllowSession => cache.allow(grant),
+                Verdict::AllowOnce => cache.allow_once(grant),
+                _ => {}
             }
         }
     }
@@ -715,5 +749,72 @@ mod tests {
             .expect("a full prompt queue must not block the caller");
         assert_eq!(stats.dropped(), 1, "the overflowed prompt must be counted");
         release_tx.send(()).unwrap();
+    }
+
+    // WO-179@v1: one remote allow-once reply must authorize only the next open.
+    #[test]
+    fn allow_once_allows_one_decision_then_prompts_again() {
+        let cache = RemoteCache::new();
+        let request = req(30);
+        let grant = GrantKey::scoped(request.key, uid_of_pid(request.pid), SESSION, EPOCH);
+        intake_verdicts(
+            std::io::Cursor::new(format!("allow-once {}\n", grant.wire())),
+            cache.clone(),
+        );
+
+        let mut out = Vec::new();
+        let (first, first_source, second, second_source) = {
+            let mut p = provider(cache.clone(), &mut out);
+            let (first, first_source) = p.request(&request);
+            let (second, second_source) = p.request(&request);
+            (first, first_source, second, second_source)
+        };
+
+        assert!(
+            matches!(first, Verdict::AllowOnce | Verdict::AllowSession),
+            "the first matching open must consume the grant"
+        );
+        assert_eq!(first_source, Source::Cache);
+        assert_eq!(
+            second,
+            Verdict::Deny,
+            "the second matching open must not reuse allow-once"
+        );
+        assert_eq!(
+            first,
+            Verdict::AllowOnce,
+            "the consumed decision must retain its single-use verdict"
+        );
+        assert_eq!(second_source, Source::Timeout);
+        assert_eq!(cache.prompts_emitted(), 1);
+        assert!(String::from_utf8(out).unwrap().starts_with("CONSENT\t"));
+    }
+
+    // WO-179@v1: remote allow-session replies must remain reusable for the run.
+    #[test]
+    fn allow_session_keeps_allowing_without_prompt() {
+        let cache = RemoteCache::new();
+        let request = req(31);
+        let grant = GrantKey::scoped(request.key, uid_of_pid(request.pid), SESSION, EPOCH);
+        intake_verdicts(
+            std::io::Cursor::new(format!("allow-session {}\n", grant.wire())),
+            cache.clone(),
+        );
+
+        let mut out = Vec::new();
+        let decisions = {
+            let mut p = provider(cache.clone(), &mut out);
+            [p.request(&request), p.request(&request)]
+        };
+
+        assert_eq!(
+            decisions,
+            [
+                (Verdict::AllowSession, Source::Cache),
+                (Verdict::AllowSession, Source::Cache),
+            ]
+        );
+        assert_eq!(cache.prompts_emitted(), 0);
+        assert!(out.is_empty());
     }
 }
