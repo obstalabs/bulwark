@@ -971,22 +971,22 @@ fn build_gate_script(
     // WO-153@v1: the exclusive mkdir now runs before material placement; this
     // script accepts only the same login user's directory before creating lanes.
     // WO-192@v1: hold both FIFO ends across removal to release blocked control opens.
-    // WO-192@v1: command makes fatal special-builtin redirection errors catchable.
+    // WO-192@v2: confine fatal dash opens; macOS sh hangs on command exec in EXIT traps.
     format!(
         r#"set -e
 cleanup() {{
   rc=$?
   trap - EXIT INT TERM HUP
-  # WO-192@v2: command contains fatal special-builtin redirection errors.
-  if [ -p {pl} ] && [ ! -h {pl} ]; then
-    command exec 8<>{pl} 2>/dev/null || true
-  fi
-  if [ -p {vl} ] && [ ! -h {vl} ]; then
-    command exec 9<>{vl} 2>/dev/null || true
-  fi
+  # WO-192@v2: confine fatal dash opens; macOS sh hangs on command exec in EXIT traps.
+  ( if [ -p {pl} ] && [ ! -h {pl} ]; then
+      exec 8<>{pl}
+    fi
+    if [ -p {vl} ] && [ ! -h {vl} ]; then
+      exec 9<>{vl}
+    fi
+    sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
+  ) 2>/dev/null || true
   sudo -n rm -rf {cleanup} 2>/dev/null || rm -rf {cleanup} 2>/dev/null || true
-  command exec 8>&- 2>/dev/null || true
-  command exec 9>&- 2>/dev/null || true
   exit "$rc"
 }}
 trap cleanup EXIT INT TERM HUP
@@ -3898,16 +3898,16 @@ mod tests {
 cleanup() {\n  \
 rc=$?\n  \
 trap - EXIT INT TERM HUP\n  \
-# WO-192@v2: command contains fatal special-builtin redirection errors.\n  \
-if [ -p /tmp/bulwark-remote-42/prompts ] && [ ! -h /tmp/bulwark-remote-42/prompts ]; then\n    \
-command exec 8<>/tmp/bulwark-remote-42/prompts 2>/dev/null || true\n  \
-fi\n  \
-if [ -p /tmp/bulwark-remote-42/verdicts ] && [ ! -h /tmp/bulwark-remote-42/verdicts ]; then\n    \
-command exec 9<>/tmp/bulwark-remote-42/verdicts 2>/dev/null || true\n  \
-fi\n  \
+# WO-192@v2: confine fatal dash opens; macOS sh hangs on command exec in EXIT traps.\n  \
+( if [ -p /tmp/bulwark-remote-42/prompts ] && [ ! -h /tmp/bulwark-remote-42/prompts ]; then\n      \
+exec 8<>/tmp/bulwark-remote-42/prompts\n    \
+fi\n    \
+if [ -p /tmp/bulwark-remote-42/verdicts ] && [ ! -h /tmp/bulwark-remote-42/verdicts ]; then\n      \
+exec 9<>/tmp/bulwark-remote-42/verdicts\n    \
+fi\n    \
 sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-42 2>/dev/null || true\n  \
-command exec 8>&- 2>/dev/null || true\n  \
-command exec 9>&- 2>/dev/null || true\n  \
+) 2>/dev/null || true\n  \
+sudo -n rm -rf /tmp/bulwark-remote-42 2>/dev/null || rm -rf /tmp/bulwark-remote-42 2>/dev/null || true\n  \
 exit \"$rc\"\n\
 }\n\
 trap cleanup EXIT INT TERM HUP\n\
