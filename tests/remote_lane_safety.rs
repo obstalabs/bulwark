@@ -959,7 +959,40 @@ case " $* " in
     done
     [ -n "$prompt" ] && [ -n "$verdict" ] || exit 72
     [ -p "$prompt" ] && [ -p "$verdict" ] || exit 73
-    printf '%s\n' checked > "$FIXTURE_ROOT/gate-checked"
+    # WO-192@v1: prove both control sessions reached their blocking FIFO opens.
+    control_block_attempts=200
+    control_block_interval=0.05
+    prompt_cmd=$(printf 'cat\n%s' "$prompt")
+    verdict_cmd=$(printf 'dd\nbs=1\nof=%s\nconv=nocreat\nstatus=none' "$verdict")
+    controls_blocked=
+    attempt=0
+    while [ "$attempt" -lt "$control_block_attempts" ]; do
+      prompt_blocked=
+      verdict_blocked=
+      for proc_dir in /proc/[0-9]*; do
+        [ -r "$proc_dir/cmdline" ] && [ -r "$proc_dir/wchan" ] || continue
+        cmdline=$(/usr/bin/tr '\000' '\n' < "$proc_dir/cmdline" 2>/dev/null) || continue
+        wchan=$(cat "$proc_dir/wchan" 2>/dev/null) || continue
+        [ "$wchan" = wait_for_partner ] || continue
+        if [ "$cmdline" = "$prompt_cmd" ]; then
+          prompt_blocked=1
+        fi
+        if [ "$cmdline" = "$verdict_cmd" ]; then
+          verdict_blocked=1
+        fi
+      done
+      if [ -n "$prompt_blocked" ] && [ -n "$verdict_blocked" ]; then
+        controls_blocked=1
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep "$control_block_interval"
+    done
+    if [ -z "$controls_blocked" ]; then
+      printf '%s\n' controls-not-blocked > "$FIXTURE_ROOT/gate-checked"
+      exit 75
+    fi
+    printf '%s\n' blocked > "$FIXTURE_ROOT/gate-checked"
     # WO-192@v1: refuse without opening a lane, reproducing early remote failure.
     exit 71
     ;;
@@ -1120,7 +1153,13 @@ fn failed_remote_run_releases_blocked_lane_processes() {
     );
     let status = cli.wait(EARLY_FAILURE_BOUND);
     assert!(!status.success(), "the refusing fake gate was accepted");
-    assert_eq!(fixture.contents("gate-checked").trim(), "checked");
+    let gate_checked = fixture.contents("gate-checked");
+    assert_eq!(
+        gate_checked.trim(),
+        "blocked",
+        "fake gate did not observe both blocked lane opens: {:?}",
+        gate_checked.trim()
+    );
 
     let lanes = fixture.contents("lanes");
     let lane_paths = lanes.lines().map(PathBuf::from).collect::<Vec<_>>();
