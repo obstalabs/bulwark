@@ -23,6 +23,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Fixed
+<!-- WO-179@v1: preserve the single-use scope of remote allow-once verdicts. -->
+- Remote `allow-once` verdicts authorize exactly one matching open instead of the
+  rest of the session; `allow-session` remains reusable and is shared by processes
+  running as the requester uid in that session.
+<!-- WO-182@v1: remote consent must reject substituted or absent control lanes. -->
+- Remote consent opens existing FIFO lanes without following links or creating missing
+  verdict paths, validates their ownership, and fails the launcher when a lane stays absent;
+  control exits during normal gate teardown preserve the gate's status, and verdict delivery
+  uses GNU `dd`'s `conv=nocreat` mode so unsupported hosts fail before consent starts.
+<!-- WO-192@v1: failed remote cleanup must release processes blocked opening a lane. -->
+- Failed remote runs no longer leave a consent-lane process and SSH session behind on
+  the remote host, and a lane that cannot be reopened no longer stops the cleanup.
+<!-- WO-181@v1: remote prompt backpressure must never delay a permission decision. -->
+- Remote consent prompts use a bounded writer queue, so a stalled prompt lane cannot delay protected-open denials.
 <!-- WO-151@v1: damaged integrity state must not erase sticky taint or its evidence. -->
 - Corrupt or unreadable integrity state now starts tainted and is preserved before an
   atomic replacement; only an absent state file starts clean; CI exercises EACCES before
@@ -46,10 +60,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
-- README leads with why an independent layer matters, drops the Pro / Fleet tier
-  and its roadmap items, and links the paid containment assessment.
+<!-- WO-193@v1: the site no longer offers an assessment, so the README does not either. -->
+- README leads with why an independent layer matters and drops the Pro / Fleet tier,
+  its roadmap items and any paid offer.
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
+<!-- WO-182@v1: the verdict delivery test must not lose a line written just before the writer exits. -->
+- The remote verdict delivery test drains the FIFO after the writer exits, so a line written just before exit is never missed.
 <!-- WO-158@v1: hard-kill tests must release their cgroup and filesystem fixtures. -->
 - Supervisor hard-kill tests prove their cgroup is empty, remove it and unmount their test filesystem on every exit path, retrying transiently busy unmounts to a bounded deadline.
 <!-- WO-157@v1: verified lock identity makes consent socket directory removal race-safe. -->

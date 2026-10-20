@@ -32,15 +32,16 @@
 //!
 //! ## A grant is SCOPED, not a bare inode (prototype-grade)
 //!
+// WO-179@v1: state that every process of the requester uid shares the session grant.
 //! `allow-session` does not authorize "this inode for anyone." It is scoped to
-//! the requester identity, the session, and the policy epoch — so a different
-//! process in the same remote environment touching the same file does not
-//! inherit the grant. The full production grant also carries `remote_host`,
+//! the requester identity, the session, and the policy epoch — so any process
+//! running as the requester uid in the same remote session inherits the grant;
+//! another uid does not. The full production grant also carries `remote_host`,
 //! `expires_at`, and an operator verdict signature; this prototype carries the
 //! identity/session/epoch scope and leaves signing + expiry as a documented
 //! follow-up (this is not yet the production trust channel).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,10 +51,12 @@ use crate::protect::InodeKey;
 
 // WO-9@v1: scope remote grants to object, identity, session, and policy state.
 // WO-173@v2: Linux-only: fanotify remote grants bind opened inode identity.
+// WO-179@v1: state the process coverage of the uid-scoped remote grant.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// A scoped allow grant. The key is deliberately NOT a bare inode: it binds the
-/// inode to the requester identity, the session, and the policy epoch, so a
-/// grant cannot over-authorize a different process or a stale policy.
+/// inode to the requester uid, the session, and the policy epoch. Any process
+/// running as that uid can use it in that session; another uid or policy epoch
+/// cannot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GrantKey {
     pub dev: u64,
@@ -124,6 +127,8 @@ impl GrantKey {
 #[derive(Clone, Default)]
 pub struct RemoteCache {
     allow_session: Arc<Mutex<HashSet<GrantKey>>>,
+    // WO-179@v1: count each single-use verdict until one matching open consumes it.
+    allow_once: Arc<Mutex<HashMap<GrantKey, usize>>>,
     /// Count of prompts emitted, for diagnostics/tests.
     prompts_emitted: Arc<AtomicU64>,
 }
@@ -144,6 +149,13 @@ impl RemoteCache {
         self.allow_session.lock().unwrap().insert(key);
     }
 
+    // WO-179@v1: retain one consumable authorization per allow-once reply.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn allow_once(&self, key: GrantKey) {
+        let mut once = self.allow_once.lock().unwrap();
+        *once.entry(key).or_insert(0) += 1;
+    }
+
     // WO-9@v1: decide remote opens only from an exact scoped grant match.
     // WO-173@v2: Linux-only: match fanotify remote opens to scoped grants.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -151,11 +163,101 @@ impl RemoteCache {
         self.allow_session.lock().unwrap().contains(key)
     }
 
+    // WO-179@v1: consume exactly one matching single-use authorization.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn consume_once(&self, key: &GrantKey) -> bool {
+        let mut once = self.allow_once.lock().unwrap();
+        let Some(remaining) = once.get_mut(key) else {
+            return false;
+        };
+        if *remaining > 1 {
+            *remaining -= 1;
+        } else {
+            once.remove(key);
+        }
+        true
+    }
+
     // WO-9@v1: expose prompt counts for deterministic remote-gate verification.
     /// Number of prompts emitted this session (tests).
     #[cfg(test)]
     pub fn prompts_emitted(&self) -> u64 {
         self.prompts_emitted.load(Ordering::SeqCst)
+    }
+}
+
+// WO-181@v1: 256 slots absorb short bursts while bounding a stalled lane's memory.
+#[cfg(any(test, target_os = "linux"))]
+const PROMPT_QUEUE_BOUND: usize = 256;
+
+// WO-181@v1: retain prompt-loss evidence after the queue writer moves to its thread.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone)]
+pub struct PromptQueueStats {
+    dropped: Arc<AtomicU64>,
+}
+
+// WO-181@v1: expose prompt drops for the remote run's terminal summary.
+#[cfg(any(test, target_os = "linux"))]
+impl PromptQueueStats {
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+
+// WO-181@v1: make prompt submission bounded and nonblocking on the decision path.
+#[cfg(any(test, target_os = "linux"))]
+pub struct PromptQueueWriter {
+    sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    dropped: Arc<AtomicU64>,
+}
+
+// WO-181@v1: isolate blocking prompt-lane writes on a dedicated worker thread.
+#[cfg(any(test, target_os = "linux"))]
+impl PromptQueueWriter {
+    pub fn spawn<W: Write + Send + 'static>(
+        mut sink: W,
+    ) -> std::io::Result<(Self, PromptQueueStats)> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(PROMPT_QUEUE_BOUND);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let writer_dropped = Arc::clone(&dropped);
+        std::thread::Builder::new()
+            .name("bulwark-remote-prompts".into())
+            .spawn(move || {
+                while let Ok(line) = receiver.recv() {
+                    if sink.write_all(&line).and_then(|()| sink.flush()).is_err() {
+                        writer_dropped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })?;
+        let stats = PromptQueueStats {
+            dropped: Arc::clone(&dropped),
+        };
+        Ok((Self { sender, dropped }, stats))
+    }
+}
+
+// WO-181@v1: treat a full or closed queue as a counted prompt drop, never a wait.
+#[cfg(any(test, target_os = "linux"))]
+impl Write for PromptQueueWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        match self.sender.try_send(buf.to_vec()) {
+            Ok(()) => {}
+            Err(
+                std::sync::mpsc::TrySendError::Full(_)
+                | std::sync::mpsc::TrySendError::Disconnected(_),
+            ) => {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -265,11 +367,15 @@ impl<W: Write> AsyncRemoteProvider<W> {
 // WO-9@v1: connect remote prompt splitting to the portable consent interface.
 impl<W: Write> ConsentProvider for AsyncRemoteProvider<W> {
     // WO-9@v1: allow exact cached grants and deny first touches without waiting.
+    // WO-179@v1: consume single-use grants after checking reusable session grants.
     fn request(&mut self, req: &ConsentRequest) -> (Verdict, Source) {
         let grant = self.grant_key(req);
         // Cached scoped-allow → pass immediately, no prompt.
         if self.cache.is_allowed(&grant) {
             return (Verdict::AllowSession, Source::Cache);
+        }
+        if self.cache.consume_once(&grant) {
+            return (Verdict::AllowOnce, Source::Cache);
         }
         // Not cached → deny NOW (meet the kernel deadline) and prompt for next
         // time. The operator's allow-session reply (echoing this scoped grant)
@@ -365,6 +471,7 @@ pub fn parse_verdict_reply(line: &str) -> Option<(Verdict, GrantKey)> {
 /// Read operator verdict replies from `reader` (the verdict lane) and apply
 /// `allow-session` decisions to `cache`. Runs until the lane closes; intended to
 /// run on a background thread on the remote gate.
+/// `allow-once` decisions remain separate and are consumed by one matching open.
 pub fn intake_verdicts<R: BufRead>(reader: R, cache: RemoteCache) {
     for line in reader.lines() {
         let line = match line {
@@ -372,8 +479,11 @@ pub fn intake_verdicts<R: BufRead>(reader: R, cache: RemoteCache) {
             Err(_) => break,
         };
         if let Some((verdict, grant)) = parse_verdict_reply(&line) {
-            if matches!(verdict, Verdict::AllowSession | Verdict::AllowOnce) {
-                cache.allow(grant);
+            // WO-179@v1: preserve the operator's reusable versus single-use scope.
+            match verdict {
+                Verdict::AllowSession => cache.allow(grant),
+                Verdict::AllowOnce => cache.allow_once(grant),
+                _ => {}
             }
         }
     }
@@ -588,5 +698,124 @@ mod tests {
         let deny = verdict_line(Verdict::Deny, grant);
         let (v2, _) = parse_verdict_reply(&deny).unwrap();
         assert_eq!(v2, Verdict::Deny);
+    }
+
+    // WO-181@v1: a blocked prompt sink must not stall or hide queue overflow.
+    struct BlockingPromptWriter {
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    // WO-181@v1: hold the prompt writer after it takes one item from the queue.
+    impl Write for BlockingPromptWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.started.try_send(());
+            let _ = self.release.recv();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // WO-181@v1: prove a full prompt queue drops and counts without blocking.
+    #[test]
+    fn prompt_queue_drops_and_counts_when_full_without_blocking() {
+        const CALLER_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (mut prompt_out, stats) = PromptQueueWriter::spawn(BlockingPromptWriter {
+            started: started_tx,
+            release: release_rx,
+        })
+        .expect("spawn prompt writer");
+
+        prompt_out.write_all(b"blocked\n").unwrap();
+        started_rx
+            .recv_timeout(CALLER_BOUND)
+            .expect("writer must take the first prompt");
+
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            for _ in 0..=PROMPT_QUEUE_BOUND {
+                prompt_out.write_all(b"queued\n").unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(CALLER_BOUND)
+            .expect("a full prompt queue must not block the caller");
+        assert_eq!(stats.dropped(), 1, "the overflowed prompt must be counted");
+        release_tx.send(()).unwrap();
+    }
+
+    // WO-179@v1: one remote allow-once reply must authorize only the next open.
+    #[test]
+    fn allow_once_allows_one_decision_then_prompts_again() {
+        let cache = RemoteCache::new();
+        let request = req(30);
+        let grant = GrantKey::scoped(request.key, uid_of_pid(request.pid), SESSION, EPOCH);
+        intake_verdicts(
+            std::io::Cursor::new(format!("allow-once {}\n", grant.wire())),
+            cache.clone(),
+        );
+
+        let mut out = Vec::new();
+        let (first, first_source, second, second_source) = {
+            let mut p = provider(cache.clone(), &mut out);
+            let (first, first_source) = p.request(&request);
+            let (second, second_source) = p.request(&request);
+            (first, first_source, second, second_source)
+        };
+
+        assert!(
+            matches!(first, Verdict::AllowOnce | Verdict::AllowSession),
+            "the first matching open must consume the grant"
+        );
+        assert_eq!(first_source, Source::Cache);
+        assert_eq!(
+            second,
+            Verdict::Deny,
+            "the second matching open must not reuse allow-once"
+        );
+        assert_eq!(
+            first,
+            Verdict::AllowOnce,
+            "the consumed decision must retain its single-use verdict"
+        );
+        assert_eq!(second_source, Source::Timeout);
+        assert_eq!(cache.prompts_emitted(), 1);
+        assert!(String::from_utf8(out).unwrap().starts_with("CONSENT\t"));
+    }
+
+    // WO-179@v1: remote allow-session replies must remain reusable for the run.
+    #[test]
+    fn allow_session_keeps_allowing_without_prompt() {
+        let cache = RemoteCache::new();
+        let request = req(31);
+        let grant = GrantKey::scoped(request.key, uid_of_pid(request.pid), SESSION, EPOCH);
+        intake_verdicts(
+            std::io::Cursor::new(format!("allow-session {}\n", grant.wire())),
+            cache.clone(),
+        );
+
+        let mut out = Vec::new();
+        let decisions = {
+            let mut p = provider(cache.clone(), &mut out);
+            [p.request(&request), p.request(&request)]
+        };
+
+        assert_eq!(
+            decisions,
+            [
+                (Verdict::AllowSession, Source::Cache),
+                (Verdict::AllowSession, Source::Cache),
+            ]
+        );
+        assert_eq!(cache.prompts_emitted(), 0);
+        assert!(out.is_empty());
     }
 }

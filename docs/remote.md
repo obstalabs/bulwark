@@ -66,10 +66,15 @@ or write permission on either the prompt lane or the verdict lane.
 
 ## Grants are scoped, not bare inodes
 
+<!-- WO-179@v1: state that every process of the requester uid shares the session grant. -->
 An `allow-session` does not authorize "this inode for anyone." Each grant is
-scoped to the requester identity (uid), the session, and the policy epoch — so a
-different process in the same remote environment touching the same file does not
-inherit the grant, and a policy change invalidates old grants.
+scoped to the requester identity (uid), the session, and the policy epoch — so any
+process running as that uid in the same remote session inherits the grant, while a
+different uid does not, and a policy change invalidates old grants.
+
+<!-- WO-179@v1: distinguish single-use and reusable remote verdicts. -->
+A remote `allow-once` lets exactly the next matching open pass; the following open
+is denied and prompts again, while `allow-session` remains reusable for the run.
 
 ## Carrying hivebus key material at dispatch (optional)
 
@@ -254,6 +259,10 @@ finished production trust channel:
   [Control lanes, not terminal chatter](#control-lanes-not-terminal-chatter)
   for the required worker drop. CLI tests cover refusal and dispatch, and the lane
   fixture verifies both FIFO permissions against the selected worker identity.
+<!-- WO-182@v1: document the verdict writer dependency and fail-closed behavior. -->
+- **Consent runs need GNU coreutils `dd` on the remote host.** The verdict lane is
+  opened without creating it (`conv=nocreat`), so a BusyBox-only host such as Alpine
+  without coreutils refuses to start consent lanes rather than running unprotected.
 - **Transport and auth are SSH.** The control lanes are not yet wrapped in an
   mTLS-signed, time-bounded grant channel — that (signed verdicts, `expires_at`,
   mutual host authentication) is the production hardening, and a follow-up.
