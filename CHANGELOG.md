@@ -62,7 +62,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
 <!-- WO-193@v1: the site no longer offers an assessment, so the README does not either. -->
 - README leads with why an independent layer matters and drops the Pro / Fleet tier,
-  its roadmap items and any paid offer.
+  its roadmap items and any paid offer; the roadmap lists a Linux BPF LSM enforcement
+  core as research.
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
 <!-- WO-182@v1: the verdict delivery test must not lose a line written just before the writer exits. -->

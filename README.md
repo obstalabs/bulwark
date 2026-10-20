@@ -263,6 +263,8 @@ as plainly as the ones it does — see **Known limitations** below and
 
 <!-- WO-190@v1: no paid tier or fleet control plane is planned; only research items remain. -->
 - Windows support (minifilter gate) — under research.
+- Linux BPF LSM enforcement core (deny decisions held in the kernel, so they survive
+  the gate process dying) — under research.
 
 ## License & positioning
 
