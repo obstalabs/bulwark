@@ -170,6 +170,64 @@ fn check_json_decided_token_is_machine_readable() {
     );
 }
 
+// WO-198@v1: `check` resolves symlinks like a real open: a link outside the
+// protected directory pointing into it is protected, and says which entry decided.
+#[test]
+fn check_follows_a_symlink_to_its_protected_target() {
+    let dir = std::fs::canonicalize(scratch("symlink")).unwrap();
+    let vault = dir.join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    fs::write(vault.join("key"), "x").unwrap();
+    let link = dir.join("innocent.txt");
+    std::os::unix::fs::symlink(vault.join("key"), &link).unwrap();
+    let policy = dir.join("Bulwark.toml");
+    fs::write(
+        &policy,
+        format!("[protected]\nprompt = [\"{}\"]\n", vault.display()),
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .args(["check", "--format", "json", "--policy"])
+        .arg(&policy)
+        .arg(&link)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(r#""decision":"protected""#) && stdout.contains(r#""step":5"#),
+        "a symlink into a protected directory must be protected by it; got: {stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// WO-198@v1: an out-of-grammar protect entry is refused by name, not skipped.
+#[test]
+fn check_refuses_an_out_of_grammar_entry_by_name() {
+    let dir = scratch("grammar");
+    let policy = dir.join("Bulwark.toml");
+    fs::write(&policy, "[protected]\nprompt = [\"/tmp/a*b*c*d\"]\n").unwrap();
+    let out = Command::new(bin())
+        .args(["check", "/tmp/x", "--policy"])
+        .arg(&policy)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an out-of-grammar entry must fail check"
+    );
+    assert!(
+        stderr.contains(r#""/tmp/a*b*c*d""#) && stderr.contains("nothing was run"),
+        "the refusal must name the entry; got: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // WO-5@v1: exercise policy mutation, checking, and receipt audit from the CLI.
 #[test]
 fn audit_renders_and_counts_receipts() {

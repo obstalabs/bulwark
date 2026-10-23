@@ -30,6 +30,8 @@ mod hivebus_keys;
 mod integrity;
 // WO-5@v1: expose policy loading and decisions to the CLI.
 mod policy;
+// WO-198@v1: the shared decision-time rule contract.
+mod rules;
 // WO-3@v1: expose Linux process ancestry for gate attribution.
 mod proctree;
 // WO-3@v1: expose inode-based protected object resolution.
@@ -3274,7 +3276,9 @@ fn cmd_check(
              grants nothing; pass an absolute --allow path instead"
         );
     }
-    let decision = policy.decide(path, &homes);
+    // WO-198@v1: decide through the shared rule contract the gates will use.
+    let checked = policy.decide_rules(path, &homes)?;
+    let decision = checked.decision;
     // `decided` is a stable machine token; `label`/`effect` are human strings.
     let (decided, label, effect) = match decision {
         PolicyDecision::AllowWorkspace => ("allow_workspace", "allow (workspace)", "read allowed"),
@@ -3291,15 +3295,24 @@ fn cmd_check(
     };
     match format {
         OutputFormat::Json => {
+            let rule = checked
+                .rule
+                .as_deref()
+                .map(|r| format!(r#","rule":"{}","step":{}"#, json_escape(r), checked.step))
+                .unwrap_or_default();
             println!(
-                r#"{{"path":"{}","decision":"{}","effect":"{}"}}"#,
+                r#"{{"path":"{}","decision":"{}","effect":"{}"{}}}"#,
                 json_escape(path),
                 decided,
-                effect
+                effect,
+                rule
             );
         }
         OutputFormat::Human => {
             println!("{path}\n  policy:     {label}\n  effect:     {effect}");
+            if let Some(rule) = &checked.rule {
+                println!("  rule:       {rule} (step {})", checked.step);
+            }
         }
     }
     Ok(())
@@ -4489,7 +4502,8 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         let plan = resolve_launch_plan("claude", &policy).unwrap();
         assert_eq!(plan.command, vec!["claude".to_string()]);
         assert!(plan.protect.iter().any(|p| p == Path::new("~/.ssh")));
-        assert!(plan.allow.iter().any(|p| p == "Cargo.toml"));
+        // WO-198@v1: starter carve-outs name a location (`**/`), not a bare file name.
+        assert!(plan.allow.iter().any(|p| p == "**/Cargo.toml"));
         assert!(plan.audit);
         assert!(!plan.deny_all);
         if cfg!(any(target_os = "linux", target_os = "macos")) {

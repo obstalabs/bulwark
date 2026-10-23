@@ -59,6 +59,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enumerator documents its non-Linux fallback.
 
 ### Changed
+<!-- WO-198@v1: check decides through the rule contract the gates are moving onto. -->
+- `bulwark check` decides protection by location as well as by object: a replaced
+  file, a file created later at a protected path, and case variants of protected
+  names are reported protected, together with the entry and precedence step that
+  decided. Out-of-limit, bare relative and non-ASCII protect entries are refused by
+  name. The starter profile's file carve-outs are written `**/package.json`,
+  `**/go.mod` and `**/Cargo.toml`.
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
 <!-- WO-193@v1: the site no longer offers an assessment, so the README does not either. -->
 - README leads with why an independent layer matters and drops the Pro / Fleet tier,
