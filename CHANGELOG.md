@@ -62,6 +62,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enumerator documents its non-Linux fallback.
 
 ### Changed
+<!-- WO-195@v2: CI must execute the privileged remote lane safety proofs. -->
+- CI runs the remote lane safety root integration suite.
 <!-- WO-198@v1: check decides through the rule contract the gates are moving onto. -->
 - `bulwark check` decides protection by location as well as by object: a replaced
   file, a file created later at a protected path, and case variants of protected

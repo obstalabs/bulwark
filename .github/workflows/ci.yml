@@ -177,6 +177,10 @@ jobs:
       - name: Remote consent integration tests (decision/prompt split, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test remote_consent -- --ignored --test-threads=1
 
+      # WO-195@v2: execute the privileged remote lane safety proofs in CI.
+      - name: Remote lane safety integration tests (root)
+        run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test remote_lane_safety -- --ignored --test-threads=1
+
       - name: Integrity taint integration tests (policy digest, root)
         run: ${{ steps.priv.outputs.run }} "$(command -v cargo)" test --test integrity_taint -- --ignored --test-threads=1
 
