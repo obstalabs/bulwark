@@ -23,12 +23,22 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 /// The unified cgroup-v2 mount. On a v2 or hybrid host the unified hierarchy is
 /// mounted here; a pure-v1 host has only per-controller mounts and no
 /// `cgroup.procs` at this root, which is how we detect "no v2".
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// WO-187@v1: prefer the agent tree under memory pressure without making a
+/// leaking gate unreclaimable, which `-1000` would do.
+const GATE_OOM_SCORE_ADJ: i32 = -900;
+
+const PROC_SELF_OOM_SCORE_ADJ: &str = "/proc/self/oom_score_adj";
+const PROC_SELF_OOM_SCORE_ADJ_C: &[u8] = b"/proc/self/oom_score_adj\0";
+const AGENT_OOM_SCORE_ADJ: &[u8] = b"0\n";
+const MEMORY_OOM_GROUP: &str = "memory.oom.group";
 
 /// A dedicated cgroup-v2 scope owning the supervised tree for one run. Created
 /// at launch, removed on drop. Membership in this scope is the tree-membership
@@ -123,6 +133,15 @@ impl CgroupScope {
     // WO-59@v1: expose the scope join path used before child exec.
     pub fn procs_path(&self) -> &CString {
         &self.procs_cstr
+    }
+
+    /// Lower the current supervisor's OOM score and make an OOM victim inside
+    /// the supervised scope take that entire process tree with it. A missing
+    /// memory controller is non-fatal because the score adjustment still makes
+    /// the untrusted tree the kernel's preferred victim.
+    // WO-187@v1: keep agent-created memory pressure from selecting its gate.
+    pub fn configure_oom_protection(&self) -> io::Result<Option<String>> {
+        configure_oom_protection_at(&self.dir, Path::new(PROC_SELF_OOM_SCORE_ADJ))
     }
 
     /// The scope's cgroup path relative to the cgroup root (e.g.
@@ -263,6 +282,52 @@ impl Drop for CgroupScope {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+}
+
+/// Apply the two OOM controls through caller-supplied paths so their contract
+/// can be tested without root or a live cgroup hierarchy.
+// WO-187@v1: keep the score adjustment active when cgroup memory is unavailable.
+fn configure_oom_protection_at(scope_dir: &Path, score_path: &Path) -> io::Result<Option<String>> {
+    let mut score = fs::OpenOptions::new().write(true).open(score_path)?;
+    score.write_all(format!("{GATE_OOM_SCORE_ADJ}\n").as_bytes())?;
+    let group_path = scope_dir.join(MEMORY_OOM_GROUP);
+    let group_result = fs::OpenOptions::new()
+        .write(true)
+        .open(&group_path)
+        .and_then(|mut group| group.write_all(b"1\n"));
+    match group_result {
+        Ok(()) => Ok(None),
+        Err(e) => Ok(Some(format!(
+            "could not enable {} for the supervised tree: {e}",
+            group_path.display()
+        ))),
+    }
+}
+
+/// Undo the gate's inherited OOM preference in the forked agent before exec.
+/// Async-signal-safe: only raw `open`, `write` and `close` calls run here.
+///
+/// # Safety
+/// Must be called in the child between `fork()` and `execvp()`.
+// WO-187@v1: never let the untrusted child inherit the gate's low OOM score.
+pub unsafe fn reset_agent_oom_score() -> std::result::Result<(), i32> {
+    let fd = libc::open(
+        PROC_SELF_OOM_SCORE_ADJ_C.as_ptr() as *const libc::c_char,
+        libc::O_WRONLY,
+    );
+    if fd < 0 {
+        return Err(errno());
+    }
+    let written = libc::write(
+        fd,
+        AGENT_OOM_SCORE_ADJ.as_ptr() as *const libc::c_void,
+        AGENT_OOM_SCORE_ADJ.len(),
+    );
+    libc::close(fd);
+    if written < 0 || written as usize != AGENT_OOM_SCORE_ADJ.len() {
+        return Err(errno());
+    }
+    Ok(())
 }
 
 /// Join the calling process to the scope at `procs_cstr`, before exec, while
@@ -428,5 +493,35 @@ mod tests {
         // Key absent / empty → fail closed to "still populated" (never empty).
         assert!(events_populated("frozen 0\n"));
         assert!(events_populated(""));
+    }
+
+    #[test]
+    // WO-187@v1: keep OOM pressure inside the agent tree and away from its gate.
+    fn oom_setup_groups_agent_tree_and_lowers_supervisor_score() {
+        let scratch = crate::test_scratch_dir("oom-protection");
+        let scope = scratch.join("scope");
+        let score = scratch.join("oom_score_adj");
+        fs::create_dir(&scope).unwrap();
+        fs::write(scope.join("memory.oom.group"), "0\n").unwrap();
+        fs::write(&score, "0\n").unwrap();
+
+        let warning = configure_oom_protection_at(&scope, &score).unwrap();
+        assert!(warning.is_none(), "unexpected warning: {warning:?}");
+        assert_eq!(fs::read_to_string(&score).unwrap(), "-900\n");
+        assert_eq!(
+            fs::read_to_string(scope.join("memory.oom.group")).unwrap(),
+            "1\n"
+        );
+
+        fs::remove_file(scope.join("memory.oom.group")).unwrap();
+        fs::write(&score, "0\n").unwrap();
+        let warning = configure_oom_protection_at(&scope, &score)
+            .unwrap()
+            .expect("missing memory controller must warn");
+        assert!(warning.contains("memory.oom.group"), "{warning}");
+        assert_eq!(fs::read_to_string(&score).unwrap(), "-900\n");
+        assert!(!scope.join("memory.oom.group").exists());
+
+        fs::remove_dir_all(scratch).unwrap();
     }
 }

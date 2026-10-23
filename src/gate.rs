@@ -377,6 +377,19 @@ pub fn run(
         ),
     }
 
+    // WO-187@v1: group agent OOM victims and make the gate and watcher less
+    // attractive than the untrusted tree before either process is forked.
+    if let Some(scope) = &scope {
+        if let Some(warning) = scope
+            .configure_oom_protection()
+            .context("cannot lower the gate OOM score")?
+        {
+            log.note(&format!(
+                "warning: {warning}; continuing with OOM score protection"
+            ));
+        }
+    }
+
     // Hand the consent decider the tree's cgroup scope, then move it onto its
     // own worker thread so a pending prompt never blocks the permission loop
     // (and thereby delays unrelated opens host-wide — WO-154).
@@ -1524,6 +1537,11 @@ fn spawn(
                     // to run rather than enforce with a hole the operator can't see.
                     libc::_exit(125);
                 }
+            }
+            // WO-187@v1: the watcher keeps the gate's low OOM score, but the
+            // untrusted child must return to the default before it can allocate.
+            if crate::cgroup::reset_agent_oom_score().is_err() {
+                libc::_exit(125);
             }
             if let Some(creds) = worker {
                 if drop_to(creds).is_err() {
