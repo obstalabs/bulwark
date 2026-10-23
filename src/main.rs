@@ -105,6 +105,9 @@ const POLICY_FILE: &str = "Bulwark.toml";
 /// to the same file anyway.
 const POLICY_FILE_CANDIDATES: &[&str] = &["Bulwark.toml", "bulwark.toml"];
 
+// WO-191@v1: leave enough time for a person to answer over the off-band channel.
+const DEFAULT_CONSENT_TIMEOUT_SECS: u64 = 90;
+
 /// WO-24: environment variable that points at the signed macOS ES edge binary.
 // WO-163@v2: doctor honours the same override the gate does, before auto-discovery.
 #[cfg(target_os = "macos")]
@@ -252,9 +255,14 @@ enum Cmd {
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 
+        // WO-191@v1: use the shared human-scale timeout for direct runs.
         /// Seconds to wait for an operator decision before denying (kernel
-        /// deadline safe; default 30).
-        #[arg(long = "consent-timeout", value_name = "SECS", default_value = "30")]
+        /// deadline safe; default 90).
+        #[arg(
+            long = "consent-timeout",
+            value_name = "SECS",
+            default_value_t = DEFAULT_CONSENT_TIMEOUT_SECS
+        )]
         consent_timeout: u64,
 
         /// (`--consent remote`) Host label shown in prompts, so a local operator
@@ -362,8 +370,13 @@ enum Cmd {
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 
-        /// Seconds to wait for an operator decision before denying.
-        #[arg(long = "consent-timeout", value_name = "SECS", default_value = "30")]
+        // WO-191@v1: keep launch on the same timeout as a direct run.
+        /// Seconds to wait for an operator decision before denying (default 90).
+        #[arg(
+            long = "consent-timeout",
+            value_name = "SECS",
+            default_value_t = DEFAULT_CONSENT_TIMEOUT_SECS
+        )]
         consent_timeout: u64,
 
         /// Path to the integrity state file. Hidden — primarily for tests.
@@ -4175,6 +4188,28 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             panic!("expected ssh command");
         };
         assert_eq!(state, Some(PathBuf::from("/tmp/isolated state.toml")));
+    }
+
+    // WO-191@v1: keep run and launch on the same operator consent window.
+    #[test]
+    fn run_and_launch_share_the_consent_timeout_default() {
+        let run = Cli::try_parse_from(["bulwark", "run", "--", "true"]).unwrap();
+        let Cmd::Run {
+            consent_timeout, ..
+        } = run.cmd
+        else {
+            panic!("expected run command");
+        };
+        assert_eq!(consent_timeout, DEFAULT_CONSENT_TIMEOUT_SECS);
+
+        let launch = Cli::try_parse_from(["bulwark", "launch", "agent"]).unwrap();
+        let Cmd::Launch {
+            consent_timeout, ..
+        } = launch.cmd
+        else {
+            panic!("expected launch command");
+        };
+        assert_eq!(consent_timeout, DEFAULT_CONSENT_TIMEOUT_SECS);
     }
 
     // WO-149@v1: forward the isolated path to every remote run mode with shell quoting.
