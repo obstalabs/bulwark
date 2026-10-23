@@ -73,6 +73,17 @@ impl Tree {
         let k = self.fresh();
         self.nodes.insert(path.to_string(), (k, false));
     }
+    // WO-198@v1: a hard link: a second name for the same key.
+    fn link(&mut self, from: &str, to: &str) {
+        if let Some((parent, _)) = to.rsplit_once('/') {
+            if !parent.is_empty() {
+                self.add(parent, true);
+            }
+        }
+        if let Some(v) = self.nodes.get(from).copied() {
+            self.nodes.insert(to.to_string(), v);
+        }
+    }
     // WO-198@v1: the chain an evaluator would build for an open of `path`.
     fn chain(&self, path: &str) -> Chain {
         let comps = rules::split_path(path);
@@ -174,6 +185,7 @@ enum Op {
     Replace { path: String },
     CreateFile { path: String },
     CreateDir { path: String },
+    Link { from: String, to: String },
 }
 
 #[derive(Deserialize)]
@@ -267,6 +279,7 @@ fn vectors_decide_as_written() {
                 Op::Replace { path } => tree.replace(path),
                 Op::CreateFile { path } => tree.add(path, false),
                 Op::CreateDir { path } => tree.add(path, true),
+                Op::Link { from, to } => tree.link(from, to),
             }
         }
         for q in &case.queries {
@@ -332,6 +345,56 @@ fn grammar_errors_name_the_entry() {
         );
         assert!(msg.contains("nothing was run"), "{msg}");
     }
+}
+
+// WO-198@v1: R1 review R1-1: a non-ASCII name is refused even when it resolves to an
+// existing anchor directory and so never reaches the chain.
+#[test]
+fn non_ascii_in_an_existing_anchor_is_refused() {
+    let mut tree = Tree::default();
+    tree.add("/t/café", true);
+    let spec = Spec {
+        id: 0,
+        kind: Kind::Protect,
+        source: "/t/café/x*".into(),
+        pattern: "/t/café/x*".into(),
+    };
+    let err = rules::compile(&[spec], &tree).expect_err("non-ASCII anchor must be refused");
+    assert!(err.to_string().contains("non-ASCII"), "{err}");
+}
+
+// WO-198@v1: a non-ASCII home directory from `~/` expansion is not in the written
+// entry and stays allowed.
+#[test]
+fn non_ascii_home_from_expansion_is_allowed() {
+    let mut tree = Tree::default();
+    tree.add("/t/home/müller/.ssh", true);
+    let spec = Spec {
+        id: 0,
+        kind: Kind::Protect,
+        source: "~/.ssh".into(),
+        pattern: "/t/home/müller/.ssh".into(),
+    };
+    rules::compile(&[spec], &tree).expect("a non-ASCII home from expansion compiles");
+}
+
+// WO-198@v1: R1 review R1-4: per-home copies of one entry fold into one rule with an
+// anchor set, so the compiled rule count does not grow with the number of homes.
+#[test]
+fn per_home_expansion_folds_into_one_rule() {
+    let mut tree = Tree::default();
+    let homes: Vec<String> = (0..=rules::R_MAX)
+        .map(|i| format!("/t/home/u{i}"))
+        .collect();
+    for h in &homes {
+        tree.add(h, true);
+    }
+    let compiled = rules::compile(&specs(&["~/.ssh".to_string()], &[], &homes), &tree).unwrap();
+    assert_eq!(compiled.locations.len(), 1, "one rule for every home");
+    let anchors = compiled.locations[0].anchors.as_ref().map(Vec::len);
+    assert_eq!(anchors, Some(homes.len()));
+    let d = rules::decide(&tree.chain("/t/home/u77/.ssh/id"), &compiled);
+    assert_eq!((d.verdict, d.step), (Verdict::Protected, 5));
 }
 
 // WO-198@v1: the R_MAX cap counts written entries after `{}` expansion.

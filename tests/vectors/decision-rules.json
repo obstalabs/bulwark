@@ -5,231 +5,649 @@
     {
       "name": "existing-file-object",
       "source": "design A2.1 row 1 (existing file): object rule, ladder step 1",
-      "files": ["/t/a/f"],
-      "protect": ["/t/a/f"],
+      "files": [
+        "/t/a/f"
+      ],
+      "protect": [
+        "/t/a/f"
+      ],
       "queries": [
-        {"path": "/t/a/f", "expect": "protected", "step": 1, "rule": "/t/a/f"},
-        {"path": "/t/a/g", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/a/f",
+          "expect": "protected",
+          "step": 1,
+          "rule": "/t/a/f"
+        },
+        {
+          "path": "/t/a/g",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "replaced-file-stays-protected",
       "source": "bulwark/WO-197 (VM-verified fail-open): write-then-rename replaces the inode at a protected file path",
-      "files": ["/t/home/u/.aws/credentials"],
-      "protect": ["/t/home/u/.aws/credentials"],
-      "ops": [{"op": "replace", "path": "/t/home/u/.aws/credentials"}],
+      "files": [
+        "/t/home/u/.aws/credentials"
+      ],
+      "protect": [
+        "/t/home/u/.aws/credentials"
+      ],
+      "ops": [
+        {
+          "op": "replace",
+          "path": "/t/home/u/.aws/credentials"
+        }
+      ],
       "queries": [
-        {"path": "/t/home/u/.aws/credentials", "expect": "protected", "step": 3, "rule": "/t/home/u/.aws/credentials"}
+        {
+          "path": "/t/home/u/.aws/credentials",
+          "expect": "protected",
+          "step": 3,
+          "rule": "/t/home/u/.aws/credentials"
+        }
       ]
     },
     {
       "name": "renamed-file-object-follows",
       "source": "design A2.1 row 1 + A3: an object rule follows the inode through a rename",
-      "files": ["/t/a/f"],
-      "protect": ["/t/a/f"],
-      "ops": [{"op": "rename", "from": "/t/a/f", "to": "/t/b/moved"}],
+      "files": [
+        "/t/a/f"
+      ],
+      "protect": [
+        "/t/a/f"
+      ],
+      "ops": [
+        {
+          "op": "rename",
+          "from": "/t/a/f",
+          "to": "/t/b/moved"
+        }
+      ],
       "queries": [
-        {"path": "/t/b/moved", "expect": "protected", "step": 1, "rule": "/t/a/f"}
+        {
+          "path": "/t/b/moved",
+          "expect": "protected",
+          "step": 1,
+          "rule": "/t/a/f"
+        }
       ]
     },
     {
       "name": "existing-dir-subtree",
       "source": "design A2.1 row 2 (existing dir): object + location subtree, ladder step 5; bulwark/WO-69 post-launch file",
-      "files": ["/t/s/k"],
-      "protect": ["/t/s"],
-      "ops": [{"op": "create_file", "path": "/t/s/new"}],
+      "files": [
+        "/t/s/k"
+      ],
+      "protect": [
+        "/t/s"
+      ],
+      "ops": [
+        {
+          "op": "create_file",
+          "path": "/t/s/new"
+        }
+      ],
       "queries": [
-        {"path": "/t/s/k", "expect": "protected", "step": 5, "rule": "/t/s"},
-        {"path": "/t/s/new", "expect": "protected", "step": 5, "rule": "/t/s"},
-        {"path": "/t/s", "expect": "protected", "step": 3, "rule": "/t/s"},
-        {"path": "/t/sx", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/s/k",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/s"
+        },
+        {
+          "path": "/t/s/new",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/s"
+        },
+        {
+          "path": "/t/s",
+          "expect": "protected",
+          "step": 3,
+          "rule": "/t/s"
+        },
+        {
+          "path": "/t/sx",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "renamed-dir-object-follows-and-location-holds",
       "source": "design A2.1 row 2 + A2.3: the moved directory keeps object protection; a directory recreated at the path is covered by location",
-      "files": ["/t/s/k"],
-      "protect": ["/t/s"],
+      "files": [
+        "/t/s/k"
+      ],
+      "protect": [
+        "/t/s"
+      ],
       "ops": [
-        {"op": "rename", "from": "/t/s", "to": "/t/elsewhere"},
-        {"op": "create_file", "path": "/t/s/again"}
+        {
+          "op": "rename",
+          "from": "/t/s",
+          "to": "/t/elsewhere"
+        },
+        {
+          "op": "create_file",
+          "path": "/t/s/again"
+        }
       ],
       "queries": [
-        {"path": "/t/elsewhere/k", "expect": "protected", "step": 5, "rule": "/t/s"},
-        {"path": "/t/s/again", "expect": "protected", "step": 5, "rule": "/t/s"}
+        {
+          "path": "/t/elsewhere/k",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/s"
+        },
+        {
+          "path": "/t/s/again",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/s"
+        }
       ]
     },
     {
       "name": "absent-path-appears-later",
       "source": "design A2.1 row 3 (absent path, nearest existing ancestor anchor, subtree); bulwark/WO-150",
-      "dirs": ["/t/scratch"],
-      "protect": ["/t/scratch/incoming/key"],
+      "dirs": [
+        "/t/scratch"
+      ],
+      "protect": [
+        "/t/scratch/incoming/key"
+      ],
       "ops": [
-        {"op": "create_dir", "path": "/t/scratch/incoming"},
-        {"op": "create_file", "path": "/t/scratch/incoming/key"}
+        {
+          "op": "create_dir",
+          "path": "/t/scratch/incoming"
+        },
+        {
+          "op": "create_file",
+          "path": "/t/scratch/incoming/key"
+        }
       ],
       "queries": [
-        {"path": "/t/scratch/incoming/key", "expect": "protected", "step": 3, "rule": "/t/scratch/incoming/key"},
-        {"path": "/t/scratch/incoming/other", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/scratch/incoming/key",
+          "expect": "protected",
+          "step": 3,
+          "rule": "/t/scratch/incoming/key"
+        },
+        {
+          "path": "/t/scratch/incoming/other",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "absent-path-becomes-directory",
       "source": "design A2.1 row 3: an absent entry later created as a directory protects its contents",
-      "dirs": ["/t/scratch"],
-      "protect": ["/t/scratch/vault"],
-      "ops": [{"op": "create_file", "path": "/t/scratch/vault/inner/k"}],
+      "dirs": [
+        "/t/scratch"
+      ],
+      "protect": [
+        "/t/scratch/vault"
+      ],
+      "ops": [
+        {
+          "op": "create_file",
+          "path": "/t/scratch/vault/inner/k"
+        }
+      ],
       "queries": [
-        {"path": "/t/scratch/vault/inner/k", "expect": "protected", "step": 5, "rule": "/t/scratch/vault"}
+        {
+          "path": "/t/scratch/vault/inner/k",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/scratch/vault"
+        }
       ]
     },
     {
       "name": "unreadable-entry-protected-by-location",
       "source": "design A2.1 + compile Lookup::Unknown: an entry that cannot be stat'ed (EACCES) is protected by location from its nearest readable ancestor",
-      "dirs": ["/t/root"],
-      "unknown": ["/t/root/.ssh"],
-      "protect": ["/t/root/.ssh"],
+      "dirs": [
+        "/t/root"
+      ],
+      "unknown": [
+        "/t/root/.ssh"
+      ],
+      "protect": [
+        "/t/root/.ssh"
+      ],
       "queries": [
-        {"path": "/t/root/.ssh/id_key", "expect": "protected", "step": 5, "rule": "/t/root/.ssh"}
+        {
+          "path": "/t/root/.ssh/id_key",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/root/.ssh"
+        }
       ]
     },
     {
       "name": "home-dotfiles-not-dotdir-contents",
       "source": "design A2.1 row `~/.*` + A2.1 rule: a name pattern matching a directory does not extend to its contents",
-      "homes": ["/t/home/u"],
-      "dirs": ["/t/home/u/.cargo/registry"],
-      "files": ["/t/home/u/.netrc", "/t/home/u/notes"],
-      "protect": ["~/.*"],
+      "homes": [
+        "/t/home/u"
+      ],
+      "dirs": [
+        "/t/home/u/.cargo/registry"
+      ],
+      "files": [
+        "/t/home/u/.netrc",
+        "/t/home/u/notes"
+      ],
+      "protect": [
+        "~/.*"
+      ],
       "queries": [
-        {"path": "/t/home/u/.netrc", "expect": "protected", "step": 3, "rule": "~/.*"},
-        {"path": "/t/home/u/.cargo/registry/x", "expect": "not_protected", "step": 6},
-        {"path": "/t/home/u/notes", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/home/u/.netrc",
+          "expect": "protected",
+          "step": 3,
+          "rule": "~/.*"
+        },
+        {
+          "path": "/t/home/u/.cargo/registry/x",
+          "expect": "not_protected",
+          "step": 6
+        },
+        {
+          "path": "/t/home/u/notes",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "dotenv-any-depth-case-folded",
       "source": "design A2.1 row `**/.env` + A2.4 case rule (protect folds ASCII, Name segments included)",
-      "protect": ["**/.env"],
+      "protect": [
+        "**/.env"
+      ],
       "queries": [
-        {"path": "/t/a/b/.env", "expect": "protected", "step": 3, "rule": "**/.env"},
-        {"path": "/.env", "expect": "protected", "step": 3, "rule": "**/.env"},
-        {"path": "/t/a/.ENV", "expect": "protected", "step": 3, "rule": "**/.env"},
-        {"path": "/t/a/.env.example", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/a/b/.env",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/.env"
+        },
+        {
+          "path": "/.env",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/.env"
+        },
+        {
+          "path": "/t/a/.ENV",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/.env"
+        },
+        {
+          "path": "/t/a/.env.example",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "secret-substring-any-depth",
       "source": "design A2.1 row `**/*secret*` (bulwark/WO-143 default profile)",
-      "protect": ["**/*secret*"],
+      "protect": [
+        "**/*secret*"
+      ],
       "queries": [
-        {"path": "/t/src/secret_manager.rs", "expect": "protected", "step": 3, "rule": "**/*secret*"},
-        {"path": "/t/src/MY_SECRET", "expect": "protected", "step": 3, "rule": "**/*secret*"},
-        {"path": "/t/src/main.rs", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/src/secret_manager.rs",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/*secret*"
+        },
+        {
+          "path": "/t/src/MY_SECRET",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/*secret*"
+        },
+        {
+          "path": "/t/src/main.rs",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "anchored-secrets-subtree",
       "source": "design A2.1 row `~/dev/**/secrets/**` (starter profile)",
-      "homes": ["/t/home/u"],
-      "dirs": ["/t/home/u/dev/app/secrets"],
-      "protect": ["~/dev/**/secrets/**"],
+      "homes": [
+        "/t/home/u"
+      ],
+      "dirs": [
+        "/t/home/u/dev/app/secrets"
+      ],
+      "protect": [
+        "~/dev/**/secrets/**"
+      ],
       "queries": [
-        {"path": "/t/home/u/dev/app/secrets/token.json", "expect": "protected", "step": 5, "rule": "~/dev/**/secrets/**"},
-        {"path": "/t/home/u/dev/secrets", "expect": "protected", "step": 3, "rule": "~/dev/**/secrets/**"},
-        {"path": "/t/home/u/dev/app/README.md", "expect": "not_protected", "step": 6},
-        {"path": "/t/home/u/other/secrets/x", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/home/u/dev/app/secrets/token.json",
+          "expect": "protected",
+          "step": 5,
+          "rule": "~/dev/**/secrets/**"
+        },
+        {
+          "path": "/t/home/u/dev/secrets",
+          "expect": "protected",
+          "step": 3,
+          "rule": "~/dev/**/secrets/**"
+        },
+        {
+          "path": "/t/home/u/dev/app/README.md",
+          "expect": "not_protected",
+          "step": 6
+        },
+        {
+          "path": "/t/home/u/other/secrets/x",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "anchor-recreated-at-launch-path",
       "source": "design A2.3 (round-1 clarification gap): an anchor directory moved away and recreated; inode and launch path both anchor protection",
-      "homes": ["/t/home/u"],
-      "files": ["/t/home/u/dev/app/secrets/k"],
-      "protect": ["~/dev/**/secrets/**"],
+      "homes": [
+        "/t/home/u"
+      ],
+      "files": [
+        "/t/home/u/dev/app/secrets/k"
+      ],
+      "protect": [
+        "~/dev/**/secrets/**"
+      ],
       "ops": [
-        {"op": "rename", "from": "/t/home/u/dev", "to": "/t/home/u/dev.old"},
-        {"op": "create_file", "path": "/t/home/u/dev/new/secrets/k2"}
+        {
+          "op": "rename",
+          "from": "/t/home/u/dev",
+          "to": "/t/home/u/dev.old"
+        },
+        {
+          "op": "create_file",
+          "path": "/t/home/u/dev/new/secrets/k2"
+        }
       ],
       "queries": [
-        {"path": "/t/home/u/dev/new/secrets/k2", "expect": "protected", "step": 5, "rule": "~/dev/**/secrets/**"},
-        {"path": "/t/home/u/dev.old/app/secrets/k", "expect": "protected", "step": 5, "rule": "~/dev/**/secrets/**"}
+        {
+          "path": "/t/home/u/dev/new/secrets/k2",
+          "expect": "protected",
+          "step": 5,
+          "rule": "~/dev/**/secrets/**"
+        },
+        {
+          "path": "/t/home/u/dev.old/app/secrets/k",
+          "expect": "protected",
+          "step": 5,
+          "rule": "~/dev/**/secrets/**"
+        }
       ]
     },
     {
       "name": "carve-out-ladder-starter-shape",
       "source": "design A4 examples (bulwark/WO-136 ruling: allow entries are carve-outs)",
-      "dirs": ["/t/home/u/dev/app/secrets"],
-      "files": ["/t/home/u/.gitconfig"],
-      "protect": ["/t/home/u/dev/**/secrets/**", "**/.env", "/t/home/u/.*"],
-      "allow": ["/t/home/u/dev/**/README*", "/t/home/u/.gitconfig"],
+      "dirs": [
+        "/t/home/u/dev/app/secrets"
+      ],
+      "files": [
+        "/t/home/u/.gitconfig"
+      ],
+      "protect": [
+        "/t/home/u/dev/**/secrets/**",
+        "**/.env",
+        "/t/home/u/.*"
+      ],
+      "allow": [
+        "/t/home/u/dev/**/README*",
+        "/t/home/u/.gitconfig"
+      ],
       "queries": [
-        {"path": "/t/home/u/dev/app/secrets/README.md", "expect": "allowed", "step": 4, "rule": "/t/home/u/dev/**/README*"},
-        {"path": "/t/home/u/dev/app/secrets/token.json", "expect": "protected", "step": 5, "rule": "/t/home/u/dev/**/secrets/**"},
-        {"path": "/t/home/u/dev/app/secrets/.env", "expect": "protected", "step": 3, "rule": "**/.env"},
-        {"path": "/t/home/u/.gitconfig", "expect": "allowed", "step": 2, "rule": "/t/home/u/.gitconfig"},
-        {"path": "/t/home/u/.bashrc", "expect": "protected", "step": 3, "rule": "/t/home/u/.*"}
+        {
+          "path": "/t/home/u/dev/app/secrets/README.md",
+          "expect": "allowed",
+          "step": 4,
+          "rule": "/t/home/u/dev/**/README*"
+        },
+        {
+          "path": "/t/home/u/dev/app/secrets/token.json",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/home/u/dev/**/secrets/**"
+        },
+        {
+          "path": "/t/home/u/dev/app/secrets/.env",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/.env"
+        },
+        {
+          "path": "/t/home/u/.gitconfig",
+          "expect": "allowed",
+          "step": 2,
+          "rule": "/t/home/u/.gitconfig"
+        },
+        {
+          "path": "/t/home/u/.bashrc",
+          "expect": "protected",
+          "step": 3,
+          "rule": "/t/home/u/.*"
+        }
       ]
     },
     {
       "name": "carve-out-does-not-follow-the-inode",
       "source": "killgate F2 (round 3 answer 2): an allowed file moved into a protected directory is not carried by the carve-out",
-      "files": ["/t/pub/README.md"],
-      "dirs": ["/t/priv"],
-      "protect": ["/t/priv"],
-      "allow": ["/t/pub/README.md"],
-      "ops": [{"op": "rename", "from": "/t/pub/README.md", "to": "/t/priv/records.bin"}],
+      "files": [
+        "/t/pub/README.md"
+      ],
+      "dirs": [
+        "/t/priv"
+      ],
+      "protect": [
+        "/t/priv"
+      ],
+      "allow": [
+        "/t/pub/README.md"
+      ],
+      "ops": [
+        {
+          "op": "rename",
+          "from": "/t/pub/README.md",
+          "to": "/t/priv/records.bin"
+        }
+      ],
       "queries": [
-        {"path": "/t/priv/records.bin", "expect": "protected", "step": 5, "rule": "/t/priv"}
+        {
+          "path": "/t/priv/records.bin",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/priv"
+        }
       ]
     },
     {
       "name": "carve-out-never-beats-protected-file",
       "source": "design A4 step 1: an exact protected file is never carved out",
-      "files": ["/t/a/f"],
-      "protect": ["/t/a/f"],
-      "allow": ["/t/a/f"],
+      "files": [
+        "/t/a/f"
+      ],
+      "protect": [
+        "/t/a/f"
+      ],
+      "allow": [
+        "/t/a/f"
+      ],
       "queries": [
-        {"path": "/t/a/f", "expect": "protected", "step": 1, "rule": "/t/a/f"}
+        {
+          "path": "/t/a/f",
+          "expect": "protected",
+          "step": 1,
+          "rule": "/t/a/f"
+        }
       ]
     },
     {
       "name": "allow-is-case-exact",
       "source": "design A2.4: allow segments compare byte-exactly so a carve-out cannot widen by case",
-      "dirs": ["/t/vault"],
-      "protect": ["/t/vault"],
-      "allow": ["/t/vault/README.md"],
+      "dirs": [
+        "/t/vault"
+      ],
+      "protect": [
+        "/t/vault"
+      ],
+      "allow": [
+        "/t/vault/README.md"
+      ],
       "queries": [
-        {"path": "/t/vault/README.md", "expect": "allowed", "step": 2, "rule": "/t/vault/README.md"},
-        {"path": "/t/vault/readme.md", "expect": "protected", "step": 5, "rule": "/t/vault"}
+        {
+          "path": "/t/vault/README.md",
+          "expect": "allowed",
+          "step": 2,
+          "rule": "/t/vault/README.md"
+        },
+        {
+          "path": "/t/vault/readme.md",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/vault"
+        }
       ]
     },
     {
       "name": "brace-alternatives",
       "source": "design A2.4: `{a,b}` desugars to alternatives with one rule id",
-      "protect": ["**/id_{rsa,ed25519}"],
+      "protect": [
+        "**/id_{rsa,ed25519}"
+      ],
       "queries": [
-        {"path": "/t/home/u/.ssh/id_rsa", "expect": "protected", "step": 3, "rule": "**/id_{rsa,ed25519}"},
-        {"path": "/t/home/u/.ssh/id_ed25519", "expect": "protected", "step": 3, "rule": "**/id_{rsa,ed25519}"},
-        {"path": "/t/home/u/.ssh/id_dsa", "expect": "not_protected", "step": 6}
+        {
+          "path": "/t/home/u/.ssh/id_rsa",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/id_{rsa,ed25519}"
+        },
+        {
+          "path": "/t/home/u/.ssh/id_ed25519",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/id_{rsa,ed25519}"
+        },
+        {
+          "path": "/t/home/u/.ssh/id_dsa",
+          "expect": "not_protected",
+          "step": 6
+        }
       ]
     },
     {
       "name": "lowest-rule-id-attributes",
       "source": "design A4 attribution: several rules at the deciding step -> the lowest rule id",
-      "protect": ["**/*secret*", "**/my_secret.txt"],
+      "protect": [
+        "**/*secret*",
+        "**/my_secret.txt"
+      ],
       "queries": [
-        {"path": "/t/my_secret.txt", "expect": "protected", "step": 3, "rule": "**/*secret*"}
+        {
+          "path": "/t/my_secret.txt",
+          "expect": "protected",
+          "step": 3,
+          "rule": "**/*secret*"
+        }
+      ]
+    },
+    {
+      "name": "hardlink-out-of-protected-dir-at-launch",
+      "source": "shipped behaviour since WO-69 (README: hard links reach the same verdict); R1 review finding R1-2 disposition 2026-10-23: a directory object keeps the launch inodes of the files under it",
+      "files": [
+        "/t/vault/key"
+      ],
+      "protect": [
+        "/t/vault"
+      ],
+      "ops": [
+        {
+          "op": "link",
+          "from": "/t/vault/key",
+          "to": "/t/public/link"
+        }
+      ],
+      "queries": [
+        {
+          "path": "/t/public/link",
+          "expect": "protected",
+          "step": 5,
+          "rule": "/t/vault"
+        }
       ]
     }
   ],
   "errors": [
-    {"source": "design A2.4: at most two `*` per component", "kind": "protect", "entry": "/t/a*b*c*d", "contains": "more than 2 `*`"},
-    {"source": "design A2.4: at most two `**` components", "kind": "protect", "entry": "/t/**/a/**/b/**/c", "contains": "more than 2 `**`"},
-    {"source": "design A2.4: chain length <= 16 below the anchor", "kind": "protect", "entry": "/t/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17", "contains": "more than 16 components"},
-    {"source": "design A2.4 + Phase 4 gap 1: a bare relative entry has no meaning", "kind": "allow", "entry": "package.json", "contains": "bare relative"},
-    {"source": "design A2.4: non-ASCII protect components are refused", "kind": "protect", "entry": "/t/café/**", "contains": "non-ASCII"},
-    {"source": "design A2.4: `..` is refused", "kind": "protect", "entry": "/t/../etc/shadow", "contains": "`..`"},
-    {"source": "design A2.4: `**` must be a whole component", "kind": "protect", "entry": "/t/a**b", "contains": "whole path component"},
-    {"source": "design A2.4: nested braces are refused", "kind": "protect", "entry": "/t/{a,{b,c}}", "contains": "nested"}
+    {
+      "source": "design A2.4: at most two `*` per component",
+      "kind": "protect",
+      "entry": "/t/a*b*c*d",
+      "contains": "more than 2 `*`"
+    },
+    {
+      "source": "design A2.4: at most two `**` components",
+      "kind": "protect",
+      "entry": "/t/**/a/**/b/**/c",
+      "contains": "more than 2 `**`"
+    },
+    {
+      "source": "design A2.4: chain length <= 16 below the anchor",
+      "kind": "protect",
+      "entry": "/t/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17",
+      "contains": "more than 16 components"
+    },
+    {
+      "source": "design A2.4 + Phase 4 gap 1: a bare relative entry has no meaning",
+      "kind": "allow",
+      "entry": "package.json",
+      "contains": "bare relative"
+    },
+    {
+      "source": "design A2.4: non-ASCII protect components are refused",
+      "kind": "protect",
+      "entry": "/t/café/**",
+      "contains": "non-ASCII"
+    },
+    {
+      "source": "design A2.4: `..` is refused",
+      "kind": "protect",
+      "entry": "/t/../etc/shadow",
+      "contains": "`..`"
+    },
+    {
+      "source": "design A2.4: `**` must be a whole component",
+      "kind": "protect",
+      "entry": "/t/a**b",
+      "contains": "whole path component"
+    },
+    {
+      "source": "design A2.4: nested braces are refused",
+      "kind": "protect",
+      "entry": "/t/{a,{b,c}}",
+      "contains": "nested"
+    },
+    {
+      "source": "design A2.4: at most two wildcard components per entry (R1 review R1-3)",
+      "kind": "protect",
+      "entry": "/t/a*/b*/c*",
+      "contains": "more than 2 wildcard components"
+    }
   ]
 }

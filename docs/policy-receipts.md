@@ -97,11 +97,14 @@ appears, including everything below it if it appears as a directory.
   `.ENV`); a pattern that matches a directory name (`~/.*`) covers that name,
   not the directory's contents, unless the entry ends in `/**`.
 - Entries must be absolute, start with `~/` or start with `**/`. A component may
-  hold at most two `*`, an entry at most two `**` components and at most 16
+  hold at most two `*`; an entry at most two wildcard components, two `**`
+  components and 16
   components below its anchor; `{a,b}` alternatives are allowed. An entry
   outside these limits, a bare relative entry, `..`, or a non-ASCII name in a
   protect entry is refused by name and nothing is checked.
-- `check` resolves symlinks first, like a real open, and reports the entry that
+- A file that was inside a protected directory when the policy was read stays
+  protected through a hard link made elsewhere.
+- `check` resolves symlinks and relative paths first, like a real open, and reports the entry that
   decided and its precedence step, for example
   `rule: **/.env (step 3)` (`"rule"` and `"step"` in `--format json`).
 

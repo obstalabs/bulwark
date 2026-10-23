@@ -205,6 +205,37 @@ fn check_follows_a_symlink_to_its_protected_target() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// WO-198@v1: R1 review R1-5: a relative query resolves from the working directory,
+// as an open of the same spelling would.
+#[test]
+fn check_resolves_a_relative_path_from_the_working_directory() {
+    let dir = std::fs::canonicalize(scratch("relative")).unwrap();
+    fs::create_dir_all(dir.join("vault")).unwrap();
+    fs::write(dir.join("vault/secret"), "x").unwrap();
+    let policy = dir.join("Bulwark.toml");
+    fs::write(
+        &policy,
+        format!(
+            "[protected]\nprompt = [\"{}\"]\n",
+            dir.join("vault/secret").display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["check", "--format", "json", "--policy"])
+        .arg(&policy)
+        .arg("vault/secret")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""decision":"protected""#),
+        "a relative query must resolve from cwd; got: {stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // WO-198@v1: an out-of-grammar protect entry is refused by name, not skipped.
 #[test]
 fn check_refuses_an_out_of_grammar_entry_by_name() {

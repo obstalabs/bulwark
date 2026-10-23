@@ -348,7 +348,7 @@ impl Policy {
                     id,
                     kind: rules::Kind::Protect,
                     source: entry.clone(),
-                    pattern,
+                    pattern: canonical_prefix(&pattern),
                 });
             }
         }
@@ -362,6 +362,17 @@ impl Policy {
     /// the workspace allow list and the outside-workspace default, as before.
     pub fn decide_rules(&self, path: &str, homes: &[String]) -> Result<RuleCheck> {
         let compiled = rules::compile(&self.protect_specs(homes)?, &FsResolver)?;
+        // WO-198@v1: a relative query resolves from the working directory, as an open would.
+        let absolute = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            std::env::current_dir()
+                .context("cannot resolve a relative path without a working directory")?
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let path = absolute.as_str();
         let d = rules::decide(&fs_chain(path), &compiled);
         let rule = d
             .rule
@@ -434,6 +445,35 @@ pub struct RuleCheck {
     pub decision: PolicyDecision,
     pub step: u8,
     pub rule: Option<String>,
+}
+
+// WO-198@v1: resolve symlinks in the longest existing wildcard-free prefix of an
+// absolute entry, so its location is spelled the way the kernel reports opens
+// (macOS `/tmp`, `/etc` and `/var` are symlinks). `**` entries are unchanged.
+fn canonical_prefix(pattern: &str) -> String {
+    if !pattern.starts_with('/') {
+        return pattern.to_string();
+    }
+    let parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+    let concrete = parts
+        .iter()
+        .position(|p| p.contains('*') || p.contains('?') || p.contains('{'))
+        .unwrap_or(parts.len());
+    for j in (1..=concrete).rev() {
+        let head = format!("/{}", parts[..j].join("/"));
+        if let Ok(canon) = fs::canonicalize(&head) {
+            let mut out = canon.to_string_lossy().into_owned();
+            for p in &parts[j..] {
+                out.push('/');
+                out.push_str(p);
+            }
+            if pattern.ends_with('/') && !out.ends_with('/') {
+                out.push('/');
+            }
+            return out;
+        }
+    }
+    pattern.to_string()
 }
 
 // WO-198@v1: the inode key `stat` reports, in the rule contract's form.

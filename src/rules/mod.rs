@@ -35,6 +35,8 @@ pub const MAX_CHAIN: usize = 16;
 pub const MAX_STARS: usize = 2;
 /// WO-198@v1: `**` segments per rule (a trailing `/**` is the subtree flag, not counted).
 pub const MAX_ANY_DEPTH: usize = 2;
+/// WO-198@v1: Pattern (wildcard) components per rule, so the lowering stays a constant shape.
+pub const MAX_PATTERNS: usize = 2;
 /// WO-198@v1: longest literal run inside a pattern segment.
 pub const MAX_LITERAL: usize = 64;
 /// WO-198@v1: longest name a filesystem gives one component (NAME_MAX).

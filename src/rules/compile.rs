@@ -5,7 +5,7 @@ use std::fmt;
 
 use super::{
     Anchor, Compiled, Key, Kind, LocationRule, ObjectRule, Seg, MAX_ALTERNATIVES, MAX_ANY_DEPTH,
-    MAX_CHAIN, MAX_LITERAL, MAX_STARS, NAME_MAX, R_MAX,
+    MAX_CHAIN, MAX_LITERAL, MAX_PATTERNS, MAX_STARS, NAME_MAX, R_MAX,
 };
 
 /// WO-198@v1: one policy entry to compile, already expanded per home by the caller.
@@ -203,6 +203,17 @@ fn check_chain(spec: &Spec, chain: &[Seg]) -> Result<(), CompileError> {
             format!("more than {MAX_ANY_DEPTH} `**` components"),
         ));
     }
+    if chain
+        .iter()
+        .filter(|s| matches!(s, Seg::Pattern(_)))
+        .count()
+        > MAX_PATTERNS
+    {
+        return Err(refuse(
+            spec,
+            format!("more than {MAX_PATTERNS} wildcard components"),
+        ));
+    }
     if spec.kind == Kind::Protect {
         let non_ascii = chain.iter().any(|s| match s {
             Seg::Name(b) | Seg::Pattern(b) => b.iter().any(|c| *c >= 0x80),
@@ -361,6 +372,17 @@ pub fn compile(specs: &[Spec], r: &dyn Resolver) -> Result<Compiled, CompileErro
             out.sources.resize(idx + 1, String::new());
         }
         out.sources[idx] = spec.source.clone();
+        // WO-198@v1: the entry as written is checked, not only the part left in the
+        // chain: a non-ASCII name absorbed into an anchor would still be matched by
+        // ASCII folding only. Home directories from `~/` expansion are not in the
+        // written entry, so a non-ASCII home name stays allowed.
+        if spec.kind == Kind::Protect && spec.source.bytes().any(|b| b >= 0x80) {
+            return Err(refuse(
+                spec,
+                "a protect entry may not contain non-ASCII names (case and normalization \
+                 equivalence beyond ASCII is not guaranteed)",
+            ));
+        }
         let patterns = expand_braces(spec)?;
         let n = alternatives.entry(spec.id).or_insert(0);
         *n = (*n).max(patterns.len());
@@ -374,5 +396,35 @@ pub fn compile(specs: &[Spec], r: &dyn Resolver) -> Result<Compiled, CompileErro
             compile_one(spec, &pattern, r, &mut out)?;
         }
     }
+    out.locations = merge_anchors(std::mem::take(&mut out.locations));
     Ok(out)
+}
+
+// WO-198@v1: per-home copies of one entry differ only in their anchor; fold them into
+// one rule with an anchor set so the compiled rule count does not grow with the number
+// of homes (at most one rule per written alternative and anchor depth).
+fn merge_anchors(rules: Vec<LocationRule>) -> Vec<LocationRule> {
+    let mut out: Vec<LocationRule> = Vec::new();
+    for rule in rules {
+        let same = out.iter_mut().find(|o| {
+            o.id == rule.id
+                && o.kind == rule.kind
+                && o.chain == rule.chain
+                && o.subtree == rule.subtree
+                && o.anchors.is_some() == rule.anchors.is_some()
+        });
+        match (same, rule.anchors.clone()) {
+            (Some(o), Some(extra)) => {
+                let set = o.anchors.get_or_insert_with(Vec::new);
+                for a in extra {
+                    if !set.contains(&a) {
+                        set.push(a);
+                    }
+                }
+            }
+            (Some(_), None) => {}
+            (None, _) => out.push(rule),
+        }
+    }
+    out
 }
