@@ -23,6 +23,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until CI signs macOS releases.
 
 ### Fixed
+<!-- WO-188@v1: rejected fanotify responses must not leave permission events held. -->
+- Fanotify response writes retry once as deny, and a persistent rejection tears
+  down the supervised tree instead of leaving an opener blocked.
 <!-- WO-179@v1: preserve the single-use scope of remote allow-once verdicts. -->
 - Remote `allow-once` verdicts authorize exactly one matching open instead of the
   rest of the session; `allow-session` remains reusable and is shared by processes

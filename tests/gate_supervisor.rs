@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// WO-188@v1: a rejected response must tear down promptly instead of holding
+// the kernel permission event indefinitely.
+#[cfg(feature = "fault-injection")]
+const RESPONSE_FAILURE_EXIT_BOUND: Duration = Duration::from_secs(10);
+
 // WO-154@v1: run the real gate binary for permission-loop tests.
 // WO-155@v1: run the real supervisor for teardown and reaping tests.
 fn bin() -> PathBuf {
@@ -154,6 +159,56 @@ fn pending_consent_does_not_delay_outside_opens() {
 
     let _ = gate.kill();
     let _ = gate.wait();
+}
+
+/// WO-188@v1: two rejected fanotify response writes make the gate fatal; the
+/// real CLI must reap the supervised tree and exit within a fixed bound.
+#[test]
+#[cfg(feature = "fault-injection")]
+#[ignore = "requires Linux + root"]
+fn persistent_response_write_failure_tears_down_without_blocking() {
+    let state = isolated_state("persistent_response_write_failure");
+    let fs = common::TestFs::new("wo188");
+    let protected = fs.path("secret");
+    let stderr_path = fs.path("gate.stderr");
+    fs::write(&protected, "secret\n").unwrap();
+
+    let stderr = fs::File::create(&stderr_path).expect("create gate stderr");
+    let gate = Command::new(bin())
+        .args(["run", "--allow-root", "--protect"])
+        .arg(&protected)
+        .arg("--state")
+        .arg(&state)
+        .arg("--")
+        .args(["sh", "-c", &format!("cat {}", protected.display())])
+        .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("spawn gate");
+    let mut gate = common::HardKillScopeGuard::new(gate);
+
+    let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
+    let status = loop {
+        if let Some(status) = gate.try_wait().expect("try wait gate") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the gate held a rejected permission response past {RESPONSE_FAILURE_EXIT_BOUND:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(
+        !status.success(),
+        "a persistent response failure must be fatal"
+    );
+    let stderr = fs::read_to_string(&stderr_path).expect("read gate stderr");
+    assert!(
+        stderr.contains("fanotify response write failed after 2 attempts"),
+        "the fatal response failure must be observable; stderr:\n{stderr}"
+    );
 }
 
 /// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded

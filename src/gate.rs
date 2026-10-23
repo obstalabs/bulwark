@@ -16,7 +16,7 @@ use std::ffi::CString;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -28,6 +28,15 @@ use crate::protect::{InodeKey, ProtectedSet};
 use crate::receipt::{Decision, LogSink, Receipt, ReceiptLog};
 
 const ANCESTRY_MAX_DEPTH: usize = 16;
+
+/// WO-188@v1: one requested response plus one fail-closed DENY retry. A third
+/// write would leave the permission event held for longer without adding safety.
+const RESPONSE_WRITE_ATTEMPTS: usize = 2;
+
+/// WO-188@v1: test-only count of response writes rejected with EINVAL. The
+/// switch is absent from default and release builds with the fault-injection feature off.
+#[cfg(feature = "fault-injection")]
+static TEST_RESPONSE_WRITE_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 /// How the gate decides. Deny-list is the interactive default ("protect these,
 /// ask about them"); allow-list is the non-interactive CI mode ("allow only
@@ -78,6 +87,21 @@ const SWITCH_NO_PDEATHSIG: &str = "BULWARK_TEST_NO_PDEATHSIG";
 fn test_layer_disabled(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
+
+/// WO-188@v1: arm a bounded number of synthetic EINVAL response writes for the
+/// privileged regression test; no environment read exists in a default build.
+#[cfg(feature = "fault-injection")]
+fn arm_response_write_failures() {
+    let failures = std::env::var("BULWARK_TEST_RESPONSE_WRITE_FAILURES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    TEST_RESPONSE_WRITE_FAILURES.store(failures, Ordering::SeqCst);
+}
+
+#[cfg(not(feature = "fault-injection"))]
+// WO-188@v1: keep the production build free of response fault injection.
+fn arm_response_write_failures() {}
 
 /// Result of a supervised run: the child's exit code plus the deny-forever
 /// paths the operator chose this session (for the caller to persist).
@@ -254,6 +278,8 @@ pub fn run(
     if command.is_empty() {
         bail!("no command given");
     }
+    // WO-188@v1: reset the test-only write fault budget for this one gate run.
+    arm_response_write_failures();
     // Open the log before any output, so EVERY diagnostic — the startup banner
     // included — flows through the bounded queue and can never block the event
     // loop (or a post-mark open anywhere on the host) on a stalled reader.
@@ -354,6 +380,9 @@ pub fn run(
     // Hand the consent decider the tree's cgroup scope, then move it onto its
     // own worker thread so a pending prompt never blocks the permission loop
     // (and thereby delays unrelated opens host-wide — WO-154).
+    // WO-188@v1: a persistent worker-side response failure wakes the event loop
+    // into its existing fatal teardown instead of leaving the opener held.
+    let response_write_failed = Arc::new(AtomicBool::new(false));
     let consent_tx: Option<mpsc::SyncSender<DeferredConsent>>;
     let consent_worker: Option<std::thread::JoinHandle<Vec<String>>>;
     match consent {
@@ -365,10 +394,20 @@ pub fn run(
             // error) go through the same queue, never a synchronous stderr write.
             decider.attach_log(sink.clone());
             let fan_fd = fan.fd;
+            let response_write_failed = Arc::clone(&response_write_failed);
             consent_worker = Some(
                 std::thread::Builder::new()
                     .name("bulwark-consent".into())
-                    .spawn(move || consent_thread(rx, fan_fd, decider, sink, consent_timeout))?,
+                    .spawn(move || {
+                        consent_thread(
+                            rx,
+                            fan_fd,
+                            decider,
+                            sink,
+                            consent_timeout,
+                            &response_write_failed,
+                        )
+                    })?,
             );
             consent_tx = Some(tx);
         }
@@ -414,6 +453,7 @@ pub fn run(
         mode,
         scope.as_ref(),
         consent_tx.as_ref(),
+        &response_write_failed,
     ) {
         Ok(code) => code,
         Err(e) => {
@@ -549,39 +589,113 @@ fn inode_of_fd(fd: RawFd) -> Option<(InodeKey, String)> {
     Some((key, path))
 }
 
-/// Write a `fanotify_response` to the gate's fanotify fd. This is a write to
-/// the fanotify group fd — the kernel queues the response, it never blocks on an
-/// external reader — so it may stay on both the loop and the consent worker.
-// WO-154@v1: answer held opens without introducing an external blocking sink.
-fn write_response(fan_fd: RawFd, event_fd: RawFd, allow: bool) -> std::io::Result<()> {
-    let resp = libc::fanotify_response {
-        fd: event_fd,
-        response: if allow {
-            libc::FAN_ALLOW
-        } else {
-            libc::FAN_DENY
-        },
-    };
+/// WO-188@v1: the only two response values the encoder can emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FanDecision {
+    Allow,
+    Deny,
+}
+
+impl FanDecision {
+    // WO-188@v1: map the typed response to the Linux ABI constant at one boundary.
+    fn encode(self, event_fd: RawFd) -> libc::fanotify_response {
+        libc::fanotify_response {
+            fd: event_fd,
+            response: match self {
+                FanDecision::Allow => libc::FAN_ALLOW,
+                FanDecision::Deny => libc::FAN_DENY,
+            },
+        }
+    }
+
+    // WO-188@v1: report the response the kernel actually accepted after retry.
+    fn allows(self) -> bool {
+        self == FanDecision::Allow
+    }
+}
+
+/// WO-188@v1: write exactly one complete response and reject every short write.
+fn write_response_once(fan_fd: RawFd, response: libc::fanotify_response) -> std::io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    if TEST_RESPONSE_WRITE_FAILURES
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            (left > 0).then(|| left - 1)
+        })
+        .is_ok()
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+
     let n = unsafe {
         libc::write(
             fan_fd,
-            &resp as *const _ as *const libc::c_void,
+            &response as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::fanotify_response>(),
         )
     };
     if n == std::mem::size_of::<libc::fanotify_response>() as isize {
         Ok(())
-    } else {
+    } else if n < 0 {
         Err(std::io::Error::last_os_error())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!(
+                "short fanotify response write: {n}/{} bytes",
+                std::mem::size_of::<libc::fanotify_response>()
+            ),
+        ))
+    }
+}
+
+/// WO-188@v1: write the requested response once, then retry exactly once as
+/// DENY. A second rejection is gate-fatal so teardown closes the fanotify group.
+fn write_response(
+    fan_fd: RawFd,
+    event_fd: RawFd,
+    requested: FanDecision,
+) -> std::io::Result<FanDecision> {
+    let first = match write_response_once(fan_fd, requested.encode(event_fd)) {
+        Ok(()) => return Ok(requested),
+        Err(e) => e,
+    };
+    match write_response_once(fan_fd, FanDecision::Deny.encode(event_fd)) {
+        Ok(()) => Ok(FanDecision::Deny),
+        Err(retry) => Err(std::io::Error::new(
+            retry.kind(),
+            format!(
+                "fanotify response write failed after {RESPONSE_WRITE_ATTEMPTS} attempts \
+                 (first: {first}; DENY retry: {retry})"
+            ),
+        )),
     }
 }
 
 /// Reply to a permission event from the loop. The failure warning is queued
 /// off-loop, so even a broken response path cannot block the loop on output.
-// WO-154@v1: queue response failures rather than writing synchronously.
-fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool, log: &mut ReceiptLog) {
-    if let Err(e) = write_response(fan_fd, event_fd, allow) {
-        log.warn(&format!("failed to write fanotify response: {e}"));
+// WO-188@v1: return the response the kernel accepted and propagate a persistent failure.
+fn respond(
+    fan_fd: RawFd,
+    event_fd: RawFd,
+    allow: bool,
+    log: &mut ReceiptLog,
+) -> std::io::Result<bool> {
+    let requested = if allow {
+        FanDecision::Allow
+    } else {
+        FanDecision::Deny
+    };
+    match write_response(fan_fd, event_fd, requested) {
+        Ok(actual) => {
+            if actual != requested {
+                log.warn("fanotify ALLOW write failed; event denied on retry");
+            }
+            Ok(actual.allows())
+        }
+        Err(e) => {
+            log.warn(&format!("failed to write fanotify response: {e}"));
+            Err(e)
+        }
     }
 }
 
@@ -590,12 +704,14 @@ fn respond(fan_fd: RawFd, event_fd: RawFd, allow: bool, log: &mut ReceiptLog) {
 /// here, off the permission loop), answers it, closes its event fd, and records
 /// the receipt. On channel close it returns the decider's deny-forever paths
 /// for the caller to persist.
+// WO-188@v1: signal a persistent worker-side response failure to the event loop.
 fn consent_thread(
     rx: mpsc::Receiver<DeferredConsent>,
     fan_fd: RawFd,
     mut decider: Box<dyn ConsentDecider + Send>,
     log: LogSink,
     timeout: Duration,
+    response_write_failed: &AtomicBool,
 ) -> Vec<String> {
     while let Ok(d) = rx.recv() {
         // Deny promptly (a) on graceful shutdown — the loop is about to close the
@@ -609,36 +725,71 @@ fn consent_thread(
         } else {
             decider.decide_deadline(&d.req, remaining)
         };
-        answer_deferred(fan_fd, &log, d, verdict, source);
+        answer_deferred(fan_fd, &log, d, verdict, source, response_write_failed);
         // Once the supervisor is draining (or a signal arrived), empty the rest
         // of the queue non-blockingly so OUTSTANDING_DEFERRED reaches zero and the
         // loop may reap — never left waiting for a cooperative child to exit.
         if draining() || shutdown_requested() {
             while let Ok(more) = rx.try_recv() {
-                answer_deferred(fan_fd, &log, more, Verdict::Deny, Source::Timeout);
+                answer_deferred(
+                    fan_fd,
+                    &log,
+                    more,
+                    Verdict::Deny,
+                    Source::Timeout,
+                    response_write_failed,
+                );
             }
         }
     }
     // Drain anything still queued at channel close (deny it) before returning.
     while let Ok(more) = rx.try_recv() {
-        answer_deferred(fan_fd, &log, more, Verdict::Deny, Source::Timeout);
+        answer_deferred(
+            fan_fd,
+            &log,
+            more,
+            Verdict::Deny,
+            Source::Timeout,
+            response_write_failed,
+        );
     }
     decider.deny_forever_paths()
 }
 
 /// WO-154: answer (and close, and log) one deferred protected open, and release
 /// its outstanding-deferred slot so the loop knows it has been answered.
+// WO-188@v1: retry a rejected deferred verdict as DENY before declaring gate failure.
 fn answer_deferred(
     fan_fd: RawFd,
     log: &LogSink,
     d: DeferredConsent,
     verdict: Verdict,
     source: Source,
+    response_write_failed: &AtomicBool,
 ) {
-    let allow = verdict.allows();
-    if let Err(e) = write_response(fan_fd, d.event_fd, allow) {
-        log.warn(&format!("failed to write fanotify response: {e}"));
-    }
+    // WO-188@v1: an ALLOW rejection becomes DENY; two rejected writes make the
+    // whole gate fatal, which the event loop observes before its next decision.
+    let requested = if verdict.allows() {
+        FanDecision::Allow
+    } else {
+        FanDecision::Deny
+    };
+    let (actual, response_reason) = match write_response(fan_fd, d.event_fd, requested) {
+        Ok(actual) => {
+            if actual != requested {
+                log.warn("fanotify ALLOW write failed; deferred event denied on retry");
+            }
+            (actual, None)
+        }
+        Err(e) => {
+            log.warn(&format!("failed to write fanotify response: {e}"));
+            response_write_failed.store(true, Ordering::SeqCst);
+            (
+                FanDecision::Deny,
+                Some("fanotify response failed; gate teardown"),
+            )
+        }
+    };
     unsafe {
         libc::close(d.event_fd);
     }
@@ -646,14 +797,14 @@ fn answer_deferred(
         pid: d.pid,
         dev: d.key.dev,
         ino: d.key.ino,
-        decision: if allow {
+        decision: if actual.allows() {
             Decision::Allow
         } else {
             Decision::Deny
         },
         path: &d.req.path,
         ancestry: &d.req.ancestry,
-        reason: verdict_reason(verdict),
+        reason: response_reason.unwrap_or_else(|| verdict_reason(verdict)),
         source: source_str(source),
     });
     OUTSTANDING_DEFERRED.fetch_sub(1, Ordering::SeqCst);
@@ -667,6 +818,7 @@ fn answer_deferred(
 /// opens inline) while reaping the scope, and returns only once the tree is
 /// confirmed dead (cgroup.events `populated 0`, or the direct child reaped with
 /// no scope). No timer releases enforcement.
+// WO-188@v1: treat every persistent response rejection as fatal to the gate.
 fn event_loop(
     fan: &FanFd,
     child: libc::pid_t,
@@ -674,6 +826,7 @@ fn event_loop(
     mut mode: GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
     consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
+    response_write_failed: &AtomicBool,
 ) -> Result<i32> {
     const BUF_LEN: usize = 8192;
     let mut buf = [0u8; BUF_LEN];
@@ -692,6 +845,13 @@ fn event_loop(
     let mut sigterm_sent = false;
 
     loop {
+        // WO-188@v1: a consent-worker response failure is gate-fatal; the caller
+        // reaps the tree before dropping the fanotify group and releasing the event.
+        if response_write_failed.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "persistent fanotify response failure in consent worker"
+            ));
+        }
         // WO-155@v1: fault-injection: the SIGUSR2 handler set this; panic HERE
         // (the main loop), so the unwind is safe but observable — the dropped
         // watcher guard must leave the watcher reaping, and a still-held
@@ -705,7 +865,7 @@ fn event_loop(
         // drain (below) — fail closed, never let the kernel release a held read
         // as allowed.
         if SHUTDOWN.load(Ordering::SeqCst) && shutdown_code.is_none() {
-            let denied = drain_and_deny(fan, &mut buf, log);
+            let denied = drain_and_deny(fan, &mut buf, log)?;
             log.note(&format!(
                 "shutdown: denied {denied} outstanding event(s), draining the tree"
             ));
@@ -745,7 +905,7 @@ fn event_loop(
                 &mut mode,
                 scope,
                 consent_tx,
-            );
+            )?;
         }
 
         // Reap the foreground child once (a second waitpid would return ECHILD).
@@ -854,7 +1014,8 @@ fn reap_tree(scope: &Option<crate::cgroup::CgroupScope>, child: libc::pid_t) {
 /// number of events denied. Best-effort and non-blocking: we drain what the
 /// kernel has queued right now.
 // WO-155@v1: deny every queued permission event before the gate closes.
-fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
+// WO-188@v1: a rejected shutdown response is fatal instead of silently held.
+fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> Result<usize> {
     let mut denied = 0usize;
     loop {
         // Non-blocking poll: stop as soon as nothing more is queued.
@@ -899,7 +1060,7 @@ fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
                         source: "shutdown",
                     });
                 }
-                respond(fan.fd, meta.fd, false, log);
+                respond(fan.fd, meta.fd, false, log)?;
                 denied += 1;
             }
             if meta.fd >= 0 {
@@ -910,11 +1071,12 @@ fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> usize {
             offset += ev_len;
         }
     }
-    denied
+    Ok(denied)
 }
 
 /// Decode and answer all events in a read buffer.
 // WO-154@v1: hand protected opens to consent without blocking unrelated events.
+// WO-188@v1: propagate a persistent response failure to gate teardown.
 fn handle_events(
     fan: &FanFd,
     bytes: &[u8],
@@ -923,7 +1085,7 @@ fn handle_events(
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
     consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
-) {
+) -> Result<()> {
     let meta_size = std::mem::size_of::<libc::fanotify_event_metadata>();
     let mut offset = 0usize;
     while offset + meta_size <= bytes.len() {
@@ -942,7 +1104,17 @@ fn handle_events(
             // `decide` returns true when it handed the event fd to the consent
             // worker (deferred): then the worker, not this loop, owns and closes
             // it. Otherwise the loop answers inline and closes the fd here.
-            let deferred = decide(fan, &meta, child, log, mode, scope, consent_tx);
+            let deferred = match decide(fan, &meta, child, log, mode, scope, consent_tx) {
+                Ok(deferred) => deferred,
+                Err(e) => {
+                    // WO-188@v1: the group teardown releases the held event; close
+                    // our event-fd copy while propagating the fatal response error.
+                    unsafe {
+                        libc::close(meta.fd);
+                    }
+                    return Err(e);
+                }
+            };
             if !deferred {
                 unsafe {
                     libc::close(meta.fd);
@@ -955,6 +1127,7 @@ fn handle_events(
         }
         offset += ev_len;
     }
+    Ok(())
 }
 
 /// Disposition of an open already known to belong to the supervised tree, once
@@ -990,6 +1163,7 @@ fn in_tree_open(inode_resolved: bool) -> InTreeOpen {
 /// protected, or come from outside the supervised tree, are allowed without
 /// asking. The receipt records the verdict and how it was reached.
 // WO-70@v1: establish tree membership before resolving the event inode.
+// WO-188@v1: bubble persistent response failures into the fatal event-loop path.
 fn decide(
     fan: &FanFd,
     meta: &libc::fanotify_event_metadata,
@@ -998,7 +1172,7 @@ fn decide(
     mode: &mut GateMode,
     scope: Option<&crate::cgroup::CgroupScope>,
     consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
-) -> bool {
+) -> Result<bool> {
     let pid = meta.pid;
 
     // Tree membership decides whether this open is ours to judge — and it depends
@@ -1018,8 +1192,8 @@ fn decide(
     // so an out-of-tree open whose fstat would fail is still allowed: it is not
     // ours to deny, and the inode is never consulted.
     if !in_tree {
-        respond(fan.fd, meta.fd, true, log);
-        return false;
+        respond(fan.fd, meta.fd, true, log)?;
+        return Ok(false);
     }
 
     let chain = proctree::ancestry(pid, ANCESTRY_MAX_DEPTH);
@@ -1048,8 +1222,8 @@ fn decide(
                 reason: "in-tree open denied: cannot stat event fd (inode unknown)",
                 source: "fstat-fail",
             });
-            respond(fan.fd, meta.fd, false, log);
-            return false;
+            respond(fan.fd, meta.fd, false, log)?;
+            return Ok(false);
         }
     };
 
@@ -1065,26 +1239,28 @@ fn decide(
             // inode-number REUSE of a deleted granted file. No prompt.
             let opened_gen = crate::allowlist::fs_generation_fd(meta.fd);
             let allowed = allow.allows_open(&path, &key, opened_gen);
+            let answered_allow = respond(fan.fd, meta.fd, allowed, log)?;
             log.record(&Receipt {
                 pid,
                 dev: key.dev,
                 ino: key.ino,
-                decision: if allowed {
+                decision: if answered_allow {
                     Decision::Allow
                 } else {
                     Decision::Deny
                 },
                 path: &path,
                 ancestry: &ancestry,
-                reason: if allowed {
+                reason: if allowed && !answered_allow {
+                    "fanotify allow response failed; denied on retry"
+                } else if allowed {
                     "allowlist match"
                 } else {
                     "not in allowlist (default deny)"
                 },
                 source: "allowlist",
             });
-            respond(fan.fd, meta.fd, allowed, log);
-            false
+            Ok(false)
         }
     }
 }
@@ -1094,6 +1270,7 @@ fn decide(
 /// event was deferred (the worker owns and will close the event fd).
 #[allow(clippy::too_many_arguments)]
 // WO-154@v1: defer protected deny-list opens to the consent worker.
+// WO-188@v1: propagate a persistent response failure instead of holding the opener.
 fn decide_denylist(
     fan: &FanFd,
     meta: &libc::fanotify_event_metadata,
@@ -1104,23 +1281,31 @@ fn decide_denylist(
     protected: &ProtectedSet,
     log: &mut ReceiptLog,
     consent_tx: Option<&mpsc::SyncSender<DeferredConsent>>,
-) -> bool {
+) -> Result<bool> {
     // `protects` matches the inode against the launch snapshot AND, for files
     // not in it, against the inodes of protected ancestor directories — so a
     // nested or post-launch file under a protected directory is still denied.
     if !protected.protects(&key, path) {
+        let answered_allow = respond(fan.fd, meta.fd, true, log)?;
         log.record(&Receipt {
             pid,
             dev: key.dev,
             ino: key.ino,
-            decision: Decision::Allow,
+            decision: if answered_allow {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            },
             path,
             ancestry,
-            reason: "not protected",
+            reason: if answered_allow {
+                "not protected"
+            } else {
+                "fanotify allow response failed; denied on retry"
+            },
             source: "",
         });
-        respond(fan.fd, meta.fd, true, log);
-        return false;
+        return Ok(false);
     }
 
     // A protected inode opened by the supervised tree. While draining the tree
@@ -1138,8 +1323,8 @@ fn decide_denylist(
             reason: "denied on supervisor teardown",
             source: "shutdown",
         });
-        respond(fan.fd, meta.fd, false, log);
-        return false;
+        respond(fan.fd, meta.fd, false, log)?;
+        return Ok(false);
     }
 
     // A protected inode opened by the supervised tree. Defer it: send the event
@@ -1166,7 +1351,7 @@ fn decide_denylist(
                 // Deferred: the worker owns and will close the fd. Count it so
                 // the loop can reap exactly when the last one is answered.
                 OUTSTANDING_DEFERRED.fetch_add(1, Ordering::SeqCst);
-                true
+                Ok(true)
             }
             Err(e) => {
                 // Queue full (or the worker is gone): fail closed inline rather
@@ -1185,8 +1370,8 @@ fn decide_denylist(
                     reason,
                     source: Source::Static.as_str(),
                 });
-                respond(fan.fd, meta.fd, false, log);
-                false
+                respond(fan.fd, meta.fd, false, log)?;
+                Ok(false)
             }
         },
         None => {
@@ -1201,8 +1386,8 @@ fn decide_denylist(
                 reason: "consent worker unavailable",
                 source: Source::Static.as_str(),
             });
-            respond(fan.fd, meta.fd, false, log);
-            false
+            respond(fan.fd, meta.fd, false, log)?;
+            Ok(false)
         }
     }
 }
@@ -1805,6 +1990,22 @@ fn try_wait(child: libc::pid_t) -> Result<Option<i32>> {
 // WO-70@v1: pin fail-closed handling for unresolved in-tree event inodes.
 mod tests {
     use super::*;
+
+    // WO-188@v1: the encoder can emit only a complete ALLOW or DENY response
+    // carrying the event fd the kernel supplied.
+    #[test]
+    fn fanotify_response_encoder_only_emits_valid_decisions() {
+        let allow = FanDecision::Allow.encode(41);
+        assert_eq!(allow.fd, 41);
+        assert_eq!(allow.response, libc::FAN_ALLOW);
+        let deny = FanDecision::Deny.encode(73);
+        assert_eq!(deny.fd, 73);
+        assert_eq!(deny.response, libc::FAN_DENY);
+        assert_eq!(
+            std::mem::size_of_val(&allow),
+            std::mem::size_of::<libc::fanotify_response>()
+        );
+    }
 
     /// B6 negative control: an in-tree open whose inode cannot be resolved must
     /// fail CLOSED. The pre-fix code allowed on stat failure (fail-OPEN); this
