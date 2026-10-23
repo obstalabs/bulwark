@@ -236,6 +236,30 @@ fn check_resolves_a_relative_path_from_the_working_directory() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// WO-198@v1: R1 re-review R1R-1: `..` in an entry is refused by name even when the
+// prefix before it exists (resolving that prefix must not erase the `..`).
+#[test]
+fn check_refuses_dotdot_behind_an_existing_prefix() {
+    let dir = std::fs::canonicalize(scratch("dotdot")).unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    let entry = format!("{}/sub/../secret*", dir.display());
+    let policy = dir.join("Bulwark.toml");
+    fs::write(&policy, format!("[protected]\nprompt = [\"{entry}\"]\n")).unwrap();
+    let out = Command::new(bin())
+        .args(["check", "--policy"])
+        .arg(&policy)
+        .arg(dir.join("secret-value"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "an entry with `..` must fail check");
+    assert!(
+        stderr.contains("`..`") && stderr.contains("nothing was run"),
+        "the refusal must name `..`; got: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // WO-198@v1: an out-of-grammar protect entry is refused by name, not skipped.
 #[test]
 fn check_refuses_an_out_of_grammar_entry_by_name() {

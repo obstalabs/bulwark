@@ -455,6 +455,11 @@ fn canonical_prefix(pattern: &str) -> String {
         return pattern.to_string();
     }
     let parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+    // WO-198@v1: resolving a prefix would erase a `..` the grammar must refuse by name;
+    // leave such an entry as written so the compiler sees it.
+    if parts.contains(&"..") {
+        return pattern.to_string();
+    }
     let concrete = parts
         .iter()
         .position(|p| p.contains('*') || p.contains('?') || p.contains('{'))

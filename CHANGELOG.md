@@ -76,7 +76,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names are reported protected, together with the entry and precedence step that
   decided; a relative path is resolved from the working directory, and symlinks in
   both the queried path and the protect entry are resolved first. Out-of-limit, bare
-  relative and non-ASCII protect entries are refused by name. The starter profile's
+  relative, `..` and non-ASCII protect entries are refused by name. The starter profile's
   file carve-outs are written `**/package.json`,
   `**/go.mod` and `**/Cargo.toml`.
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
