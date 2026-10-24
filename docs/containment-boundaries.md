@@ -101,7 +101,9 @@ Three facts make this hold, and they are worth stating plainly:
    allowed (documented fanotify behaviour). Bulwark gives the root gate and its crash watcher a
    lower OOM score than the agent, resets the agent to the kernel default before `exec`, and asks
    cgroup v2 to kill the supervised tree as one group. If the memory controller is not delegated,
-   Bulwark warns and keeps the OOM-score protection. The remaining hard-death residual is an
+   Bulwark warns and keeps the OOM-score protection. If the gate cannot write
+   `/proc/self/oom_score_adj` (which needs `CAP_SYS_RESOURCE`), Bulwark refuses before the agent
+   starts. The remaining hard-death residual is an
    external root process, kernel failure or power loss rather than memory pressure created by the
    supervised process.
 

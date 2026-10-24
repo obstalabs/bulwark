@@ -353,6 +353,111 @@ fn persistent_consent_response_failure_never_reuses_the_held_fd() {
     fs::remove_dir_all(dir).expect("remove response test fixtures");
 }
 
+// WO-187@v1: the agent must lose the gate's OOM preference before dropping uid,
+// including the kernel minimum that would otherwise let it restore that preference.
+#[test]
+#[cfg(feature = "fault-injection")]
+#[ignore = "requires Linux + root"]
+fn agent_cannot_restore_the_gate_oom_score_after_the_uid_drop() {
+    const OBSERVATION_BOUND: Duration = Duration::from_secs(10);
+    const OBSERVATION_POLL: Duration = Duration::from_millis(20);
+    const WORKER_UID: u32 = 65534;
+    let fs = common::TestFs::new("wo187score");
+    let secret = fs.path("secret");
+    let output = fs.path("agent.stdout");
+    let errors = fs.path("gate.stderr");
+    let release = fs.path("release");
+    fs::write(&secret, "protected\n").unwrap();
+    let script = format!(
+        "printf 'AGENT_PID=%s\\n' \"$$\"; \
+         printf 'AGENT_UID=%s\\n' \"$(id -u)\"; \
+         printf 'INITIAL_SCORE=%s\\n' \"$(cat /proc/$$/oom_score_adj)\"; \
+         if (printf '%s\\n' -900 > /proc/$$/oom_score_adj) 2>/dev/null; \
+         then echo SCORE_LOWERED; else echo SCORE_REFUSED; fi; \
+         echo READY; while [ ! -e '{}' ]; do sleep 0.02; done; exit 7",
+        release.display()
+    );
+    let gate = Command::new(bin())
+        .args(["run", "--worker-uid", &WORKER_UID.to_string(), "--protect"])
+        .arg(&secret)
+        .arg("--state")
+        .arg(fs.path("state.toml"))
+        .args(["--", "sh", "-c", &script])
+        .stdout(fs::File::create(&output).unwrap())
+        .stderr(fs::File::create(&errors).unwrap())
+        .spawn()
+        .expect("spawn gate");
+    let mut gate = common::HardKillScopeGuard::new(gate);
+    let ready_deadline = Instant::now() + OBSERVATION_BOUND;
+    let stdout = loop {
+        let stdout = fs::read_to_string(&output).expect("read agent evidence");
+        if stdout.lines().any(|line| line == "READY") {
+            break stdout;
+        }
+        assert!(
+            gate.try_wait().unwrap().is_none() && Instant::now() < ready_deadline,
+            "agent did not reach the score probe: {stdout}; {}",
+            fs::read_to_string(&errors).unwrap()
+        );
+        std::thread::sleep(OBSERVATION_POLL);
+    };
+    let agent_pid = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("AGENT_PID="))
+        .expect("agent published its pid")
+        .parse::<i32>()
+        .expect("valid agent pid");
+    assert!(
+        stdout.lines().any(|line| line == "AGENT_UID=65534"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "INITIAL_SCORE=0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "SCORE_REFUSED")
+            && !stdout.lines().any(|line| line == "SCORE_LOWERED"),
+        "the dropped agent must not be able to lower its score: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(format!("/proc/{agent_pid}/oom_score_adj"))
+            .unwrap()
+            .trim(),
+        "0",
+        "the live agent must retain the default score after its attempt"
+    );
+    let gate_pid = gate.id() as i32;
+    assert_eq!(
+        fs::read_to_string(format!("/proc/{gate_pid}/oom_score_adj"))
+            .unwrap()
+            .trim(),
+        "-900",
+        "the gate must remain less attractive than the agent"
+    );
+    let watchers = watcher_pids_of(gate_pid);
+    assert_eq!(watchers.len(), 1, "the run must have its crash watcher");
+    for pid in watchers {
+        assert_eq!(
+            fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+                .unwrap()
+                .trim(),
+            "-900",
+            "the watcher must inherit the gate's OOM preference"
+        );
+    }
+    fs::write(release, "done\n").unwrap();
+    let exit_deadline = Instant::now() + OBSERVATION_BOUND;
+    loop {
+        if let Some(status) = gate.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(7), "agent must finish its real command");
+            break;
+        }
+        assert!(Instant::now() < exit_deadline, "gate did not finish");
+        std::thread::sleep(OBSERVATION_POLL);
+    }
+}
+
 /// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded
 /// queues/writers drain independently: with stderr stalled on a never-read pipe,
 /// the file still receives every one of the 6000 receipts (its own queue never

@@ -392,7 +392,11 @@ pub fn run(
     if let Some(scope) = &scope {
         if let Some(warning) = scope
             .configure_oom_protection()
-            .context("cannot lower the gate OOM score")?
+            // WO-187@v1: refuse before spawn when the gate cannot keep its OOM advantage.
+            .context(
+                "cannot lower the gate OOM score (needs CAP_SYS_RESOURCE to write \
+                 /proc/self/oom_score_adj); nothing was run",
+            )?
         {
             log.note(&format!(
                 "warning: {warning}; continuing with OOM score protection"
