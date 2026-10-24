@@ -4193,6 +4193,8 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
     // WO-191@v1: keep run and launch on the same operator consent window.
     #[test]
     fn run_and_launch_share_the_consent_timeout_default() {
+        // WO-191@v1: pin the human-scale default independently of the parser's constant.
+        assert_eq!(DEFAULT_CONSENT_TIMEOUT_SECS, 90);
         let run = Cli::try_parse_from(["bulwark", "run", "--", "true"]).unwrap();
         let Cmd::Run {
             consent_timeout, ..
@@ -4200,7 +4202,8 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         else {
             panic!("expected run command");
         };
-        assert_eq!(consent_timeout, DEFAULT_CONSENT_TIMEOUT_SECS);
+        // WO-191@v1: a changed shared constant must not silently change direct runs.
+        assert_eq!(consent_timeout, 90);
 
         let launch = Cli::try_parse_from(["bulwark", "launch", "agent"]).unwrap();
         let Cmd::Launch {
@@ -4209,7 +4212,8 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         else {
             panic!("expected launch command");
         };
-        assert_eq!(consent_timeout, DEFAULT_CONSENT_TIMEOUT_SECS);
+        // WO-191@v1: profile launches must retain the same explicit 90-second window.
+        assert_eq!(consent_timeout, 90);
     }
 
     // WO-149@v1: forward the isolated path to every remote run mode with shell quoting.

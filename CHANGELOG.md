@@ -67,7 +67,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enumerator documents its non-Linux fallback.
 
 ### Changed
-<!-- WO-191@v1: off-band consent must leave enough time for a human response. -->
+<!-- WO-191@v1: tests pin the shared 90-second off-band consent default. -->
 - The default operator consent timeout is 90 seconds for both `run` and `launch`.
 <!-- WO-195@v2: CI must execute the privileged remote lane safety proofs. -->
 - CI runs the remote lane safety root integration suite.

@@ -18,7 +18,8 @@ trait.
 - `bulwark consent --socket <s> [--verdict ...]` — operator answers off-band.
 - Verdicts: `allow-once`, `allow-session` (inode-cached), `deny`,
   `deny-forever` (persisted to the policy as a protected glob).
-- Timeout ⇒ deny (kernel-deadline safe; default 30s).
+<!-- WO-191@v1: document the shared operator consent window. -->
+- Timeout ⇒ deny (kernel-deadline safe; default 90s).
 - Receipts record the decision **source** (operator / cache / timeout / static).
 
 ## Off-band enforced structurally (not by a secret)
