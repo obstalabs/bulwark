@@ -23,6 +23,7 @@
 
 use std::ffi::CString;
 use std::fs;
+// WO-188@v1: keep scope I/O errors explicit when preparing safe gate teardown.
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 

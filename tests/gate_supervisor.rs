@@ -171,44 +171,186 @@ fn persistent_response_write_failure_tears_down_without_blocking() {
     let fs = common::TestFs::new("wo188");
     let protected = fs.path("secret");
     let stderr_path = fs.path("gate.stderr");
+    // WO-188@v1: a child EACCES alone does not prove fatal response handling.
+    let stdout_path = fs.path("agent.stdout");
     fs::write(&protected, "secret\n").unwrap();
 
-    let stderr = fs::File::create(&stderr_path).expect("create gate stderr");
-    let gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
-        .arg(&protected)
-        .arg("--state")
-        .arg(&state)
-        .arg("--")
-        .args(["sh", "-c", &format!("cat {}", protected.display())])
-        .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .expect("spawn gate");
-    let mut gate = common::HardKillScopeGuard::new(gate);
-
-    let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
-    let status = loop {
-        if let Some(status) = gate.try_wait().expect("try wait gate") {
-            break status;
+    // WO-188@v1: cover both the inline responder and the deferred consent worker.
+    for deny_all in [true, false] {
+        let stderr = fs::File::create(&stderr_path).expect("create gate stderr");
+        let stdout = fs::File::create(&stdout_path).expect("create agent stdout");
+        let mut command = Command::new(bin());
+        command.args(["run", "--allow-root"]);
+        if deny_all {
+            command.arg("--deny-all");
+        } else {
+            command.arg("--protect").arg(&protected);
         }
-        assert!(
-            Instant::now() < deadline,
-            "the gate held a rejected permission response past {RESPONSE_FAILURE_EXIT_BOUND:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
+        // WO-188@v1: inject only DENY failures so the agent can reach its protected read.
+        let gate = command
+            .arg("--state")
+            .arg(&state)
+            .arg("--")
+            .args(["sh", "-c", &format!("cat {}", protected.display())])
+            .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
+            .env("BULWARK_TEST_RESPONSE_DENY_ONLY", "1")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn gate");
+        let mut gate = common::HardKillScopeGuard::new(gate);
 
-    assert!(
-        !status.success(),
-        "a persistent response failure must be fatal"
+        let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
+        let status = loop {
+            if let Some(status) = gate.try_wait().expect("try wait gate") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the gate held a rejected permission response past {RESPONSE_FAILURE_EXIT_BOUND:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        assert!(
+            !status.success(),
+            "a persistent response failure must be fatal"
+        );
+        let stderr = fs::read_to_string(&stderr_path).expect("read gate stderr");
+        assert!(
+            stderr.contains("persistent fanotify response failure"),
+            "the fatal response failure must be observable; stderr:\n{stderr}"
+        );
+        let stdout = fs::read_to_string(&stdout_path).expect("read agent stdout");
+        assert!(
+            // WO-188@v1: termination alone cannot hide bytes delivered before teardown.
+            !stdout.contains("secret"),
+            "protected content leaked: {stdout}"
+        );
+        // WO-188@v1: repeat the same outcome checks for both delivery paths.
+    }
+}
+
+// WO-188@v1: keep unrelated opens active across enough consent timeouts to exercise reuse.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+const RESPONSE_REUSE_TRIALS: usize = 30;
+
+// WO-188@v1: outside-open loops must be reaped even when a leak assertion fails.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+struct ResponseNoise(Vec<std::process::Child>);
+
+// WO-188@v1: each loop owns its process group, including an in-flight head child.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+impl Drop for ResponseNoise {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+    }
+}
+
+// WO-188@v1: a failed deferred DENY must never be answered by an outside ALLOW
+// that reuses its fd number while the kernel still holds the protected open.
+#[test]
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+#[ignore = "requires Linux + root"]
+fn persistent_consent_response_failure_never_reuses_the_held_fd() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::process::CommandExt;
+
+    // WO-188@v1: /tmp may be tmpfs; the canary must share /etc/hostname's filesystem.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = PathBuf::from(format!(
+        "/var/tmp/bulwark-wo188-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let protected = dir.join("secret");
+    const CANARY: &str = "WO188_PROTECTED_CONTENT";
+    fs::write(&protected, CANARY).unwrap();
+    assert_eq!(
+        fs::metadata(&protected).unwrap().dev(),
+        fs::metadata("/etc/hostname").unwrap().dev(),
+        "the outside opens must exercise the marked filesystem"
     );
-    let stderr = fs::read_to_string(&stderr_path).expect("read gate stderr");
+
+    // WO-188@v1: unrelated ALLOW traffic exposes reuse of a failed event's fd number.
+    let mut noise = ResponseNoise(Vec::new());
+    for _ in 0..4 {
+        noise.0.push(
+            Command::new("sh")
+                .args(["-c", "while :; do head -c 1 /etc/hostname >/dev/null; done"])
+                .process_group(0)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn outside opens"),
+        );
+    }
+
+    let mut leaks = Vec::new();
+    for trial in 0..RESPONSE_REUSE_TRIALS {
+        let stdout_path = dir.join(format!("agent-{trial}.stdout"));
+        let stderr_path = dir.join(format!("gate-{trial}.stderr"));
+        let gate = Command::new(bin())
+            .args([
+                "run",
+                "--allow-root",
+                "--consent",
+                "socket",
+                "--consent-timeout",
+                "2",
+            ])
+            .arg("--consent-socket")
+            .arg(dir.join(format!("c{trial}.sock")))
+            .arg("--protect")
+            .arg(&protected)
+            .arg("--state")
+            .arg(dir.join(format!("state-{trial}.toml")))
+            .args(["--", "sh", "-c"])
+            .arg(format!("cat {}; echo cat_rc=$?", protected.display()))
+            .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
+            .env("BULWARK_TEST_RESPONSE_DENY_ONLY", "1")
+            .stdout(fs::File::create(&stdout_path).unwrap())
+            .stderr(fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .expect("spawn gate");
+        let mut gate = common::HardKillScopeGuard::new(gate);
+        let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
+        let status = loop {
+            if let Some(status) = gate.try_wait().expect("wait gate") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "trial {trial}: gate did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stderr = fs::read_to_string(&stderr_path).unwrap();
+        assert!(
+            !status.success()
+                && stderr.contains("persistent fanotify response failure in consent worker"),
+            "trial {trial}: the deferred failure path did not run: {status}; {stderr}"
+        );
+        let stdout = fs::read_to_string(&stdout_path).unwrap();
+        if stdout.contains(CANARY) {
+            leaks.push((trial, stdout));
+        }
+    }
+    drop(noise);
     assert!(
-        stderr.contains("fanotify response write failed after 2 attempts"),
-        "the fatal response failure must be observable; stderr:\n{stderr}"
+        // WO-188@v1: inspect every trial's real stdout, including reads before fatal exit.
+        leaks.is_empty(),
+        "protected content reached agent stdout in {}/{RESPONSE_REUSE_TRIALS} trials: {leaks:?}",
+        leaks.len()
     );
+    // WO-188@v1: discard fixtures only after the gate and outside-open loops are gone.
+    fs::remove_dir_all(dir).expect("remove response test fixtures");
 }
 
 /// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded
