@@ -23,6 +23,12 @@
 - **CLI**: `bulwark run --profile <name> | --policy <file>`; `bulwark allow
   <glob>` / `bulwark deny <glob>` mutate the policy; `bulwark audit <receipts>`
   renders the log; `bulwark check <path>` reports the policy decision.
+<!-- WO-240@v1: document the one additive receipt field shadow mode writes. -->
+- **`bulwark watch`** (Linux) writes the same receipts with `"source":"watch"` and every
+  decision `allow`. An open the selected policy would deny under `run` adds
+  `"would_deny":true`; the field is absent on every other receipt. `bulwark report
+  <receipts>` summarises any receipts file (opens, distinct files, would-deny paths,
+  credential-store paths, most opened files, suggested `--protect` set).
 
 ## Live demo
 

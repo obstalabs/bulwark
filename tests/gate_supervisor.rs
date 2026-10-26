@@ -2785,3 +2785,75 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
         "integrity state must be clean; got: {so}"
     );
 }
+
+// WO-240@v1: shadow mode must never deny, and must still name the protected open.
+#[test]
+#[ignore = "requires Linux + root"]
+fn watch_allows_a_protected_read_and_flags_it_would_deny() {
+    let fs = common::TestFs::new("wo240w");
+    let protected = fs.path("guarded");
+    let other = fs.path("plain.txt");
+    let receipts = fs.path("r.jsonl");
+    fs::write(&protected, "WO240_GUARDED\n").unwrap();
+    fs::write(&other, "WO240_PLAIN\n").unwrap();
+
+    let out = Command::new(bin())
+        .args(["watch", "--allow-root", "--protect"])
+        .arg(&protected)
+        .arg("--receipts")
+        .arg(&receipts)
+        .args(["--format", "json", "--", "sh", "-c"])
+        .arg(format!("cat {} {}", protected.display(), other.display()))
+        .output()
+        .expect("spawn watch");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "watch must pass the agent's exit through; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("WO240_GUARDED") && stdout.contains("WO240_PLAIN"),
+        "watch must not deny any read; stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("RECORDING ONLY"),
+        "the banner must say nothing is enforced: {stderr}"
+    );
+    // WO-240@v1: ordinary allows go to the receipts file only, never the agent's terminal.
+    assert!(
+        !stderr.contains(&format!("path={} ", other.display())),
+        "an ordinary allow must not be echoed to stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("path={} ", protected.display())),
+        "a would-deny open must be echoed to stderr: {stderr}"
+    );
+
+    let raw = fs::read_to_string(&receipts).expect("read receipts");
+    let guarded = format!("\"path\":\"{}\"", protected.display());
+    let plain = format!("\"path\":\"{}\"", other.display());
+    assert!(
+        raw.lines().any(|l| l.contains(&guarded)
+            && l.contains("\"decision\":\"allow\"")
+            && l.contains("\"would_deny\":true")),
+        "the protected open must be allowed and flagged would_deny: {raw}"
+    );
+    assert!(
+        raw.lines().any(|l| l.contains(&plain)
+            && l.contains("\"decision\":\"allow\"")
+            && !l.contains("would_deny")),
+        "an unprotected open must be recorded without the flag: {raw}"
+    );
+    assert!(
+        !raw.contains("\"decision\":\"deny\""),
+        "watch denied an open: {raw}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "\"would_deny_paths\":[\"{}\"]",
+            protected.display()
+        )),
+        "the report must suggest exactly the protected path: {stdout}"
+    );
+}

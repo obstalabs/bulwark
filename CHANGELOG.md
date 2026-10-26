@@ -21,6 +21,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arm64 tarball and installer payload match the hardware-seal receipts.
 
 ### Added
+<!-- WO-240@v1: an on-ramp that cannot break the agent and shows what it reads. -->
+- `bulwark watch -- <cmd>` (Linux): shadow mode that enforces nothing. Every open by the
+  supervised tree is allowed and recorded, opens the selected policy would deny carry
+  `"would_deny":true`, and a report at exit lists opens, credential-store paths, the most
+  opened files and a suggested `--protect` set. Receipts default to the root-owned
+  `/var/lib/bulwark/watch/`; only would-deny opens are echoed to stderr. `bulwark report
+  <receipts>` prints the same report from any receipts file. macOS refuses `watch` for now.
 <!-- WO-95@v2: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
 - `macos-es-proof/package-release.sh`: the macOS release packaging steps for maintainers
   (bundle the signed gate app into the darwin tarballs, re-run both hardware seals on the

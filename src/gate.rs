@@ -53,6 +53,10 @@ pub enum GateMode<'a> {
     /// Allow-list: an open by the tree is allowed iff its path matches the
     /// allowlist; everything else is denied with no prompt.
     AllowList { allow: &'a AllowList },
+    // WO-240@v1: record-only mode for the field study; it must never deny an open.
+    /// Watch (shadow mode): every open by the tree is allowed and recorded; an
+    /// open the deny-list would have refused carries `would_deny`.
+    Watch { protected: &'a ProtectedSet },
 }
 
 /// WO-154: a protected open handed to the consent worker. The event fd stays
@@ -310,6 +314,14 @@ pub fn run(
                 allow.allowed_globs().len()
             ));
         }
+        // WO-240@v1: say plainly that nothing is enforced; an empty set is valid here.
+        GateMode::Watch { protected } => {
+            log.note(&format!(
+                "watch: RECORDING ONLY — NOTHING ENFORCED; every open is allowed, \
+                 {} protected inode(s) are flagged would_deny",
+                protected.len()
+            ));
+        }
     }
 
     // Fail closed on graceful termination: a trapped SIGTERM/SIGINT/SIGHUP lets
@@ -328,7 +340,8 @@ pub fn run(
     // guard what we cannot mark). Allow-list marks many mounts, some of which
     // (pseudo filesystems) may reject a mark — there we warn and continue, since
     // an unmarkable pseudo-fs cannot hold a readable on-disk secret.
-    let tolerant = matches!(mode, GateMode::AllowList { .. });
+    // WO-240@v1: watch marks every mount like allow-list mode, so it is tolerant too.
+    let tolerant = matches!(mode, GateMode::AllowList { .. } | GateMode::Watch { .. });
     let mut marked = 0usize;
     for m in mark_paths {
         match fan.mark_filesystem(m) {
@@ -855,6 +868,7 @@ fn answer_deferred(
         // WO-188@v1: identify failed delivery separately from an operator verdict.
         reason: response_reason.unwrap_or_else(|| verdict_reason(verdict)),
         source: source_str(source),
+        would_deny: false,
     });
     OUTSTANDING_DEFERRED.fetch_sub(1, Ordering::SeqCst);
 }
@@ -1111,6 +1125,7 @@ fn drain_and_deny(fan: &FanFd, buf: &mut [u8], log: &mut ReceiptLog) -> Result<u
                         ancestry: &proctree::render(&chain),
                         reason: "denied on supervisor shutdown",
                         source: "shutdown",
+                        would_deny: false, // WO-240@v1: only watch receipts carry the flag.
                     });
                 }
                 // WO-188@v1: on failure, retain this fd through group teardown after
@@ -1276,6 +1291,30 @@ fn decide(
     let resolved = inode_of_fd(meta.fd);
     let (key, path) = match in_tree_open(resolved.is_some()) {
         InTreeOpen::Judge => resolved.expect("Judge disposition implies the inode resolved"),
+        // WO-240@v1: watch never denies; it records that `run` would have denied here.
+        InTreeOpen::DenyUnknownInode if matches!(mode, GateMode::Watch { .. }) => {
+            let answered_allow = respond(fan.fd, meta.fd, true, log)?;
+            log.record(&Receipt {
+                pid,
+                dev: 0,
+                ino: 0,
+                decision: if answered_allow {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                },
+                path: "?",
+                ancestry: &ancestry,
+                reason: if answered_allow {
+                    "watch: cannot stat event fd (inode unknown); run would deny"
+                } else {
+                    "fanotify allow response failed; denied on retry"
+                },
+                source: "watch",
+                would_deny: true,
+            });
+            return Ok(false);
+        }
         InTreeOpen::DenyUnknownInode => {
             log.record(&Receipt {
                 pid,
@@ -1286,6 +1325,7 @@ fn decide(
                 ancestry: &ancestry,
                 reason: "in-tree open denied: cannot stat event fd (inode unknown)",
                 source: "fstat-fail",
+                would_deny: false, // WO-240@v1: only watch receipts carry the flag.
             });
             // WO-188@v1: inability to deliver DENY cannot become a successful decision.
             respond(fan.fd, meta.fd, false, log)?;
@@ -1328,8 +1368,40 @@ fn decide(
                     "not in allowlist (default deny)"
                 },
                 source: "allowlist",
+                would_deny: false, // WO-240@v1: only watch receipts carry the flag.
             });
             // WO-188@v1: only delivered inline responses permit closing the event fd.
+            Ok(false)
+        }
+        // WO-240@v1: shadow mode answers ALLOW inline; no consent worker is involved.
+        GateMode::Watch { protected } => {
+            let would_deny = protected.protects(&key, &path);
+            let answered_allow = respond(fan.fd, meta.fd, true, log)?;
+            let receipt = Receipt {
+                pid,
+                dev: key.dev,
+                ino: key.ino,
+                decision: if answered_allow {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                },
+                path: &path,
+                ancestry: &ancestry,
+                reason: match (answered_allow, would_deny) {
+                    (false, _) => "fanotify allow response failed; denied on retry",
+                    (true, true) => "watch: protected inode; run would deny",
+                    (true, false) => "watch: not protected",
+                },
+                source: "watch",
+                would_deny,
+            };
+            // WO-240@v1: echo only would-deny opens; every open stays in the file.
+            if would_deny {
+                log.record(&receipt);
+            } else {
+                log.record_file_only(&receipt);
+            }
             Ok(false)
         }
     }
@@ -1378,6 +1450,7 @@ fn decide_denylist(
                 "fanotify allow response failed; denied on retry"
             },
             source: "",
+            would_deny: false, // WO-240@v1: only watch receipts carry the flag.
         });
         // WO-188@v1: close the inline event only after a delivered response.
         return Ok(false);
@@ -1397,6 +1470,7 @@ fn decide_denylist(
             ancestry,
             reason: "denied on supervisor teardown",
             source: "shutdown",
+            would_deny: false, // WO-240@v1: only watch receipts carry the flag.
         });
         // WO-188@v1: teardown still requires a delivered DENY or a fatal error.
         respond(fan.fd, meta.fd, false, log)?;
@@ -1446,6 +1520,7 @@ fn decide_denylist(
                     ancestry,
                     reason,
                     source: Source::Static.as_str(),
+                    would_deny: false, // WO-240@v1: only watch receipts carry the flag.
                 });
                 // WO-188@v1: queue refusal must not conceal a failed inline DENY.
                 respond(fan.fd, meta.fd, false, log)?;
@@ -1463,6 +1538,7 @@ fn decide_denylist(
                 ancestry,
                 reason: "consent worker unavailable",
                 source: Source::Static.as_str(),
+                would_deny: false, // WO-240@v1: only watch receipts carry the flag.
             });
             // WO-188@v1: a missing provider still requires delivery or fatal teardown.
             respond(fan.fd, meta.fd, false, log)?;

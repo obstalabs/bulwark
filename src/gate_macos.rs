@@ -555,6 +555,7 @@ fn record_edge_death(
         ancestry: "",
         reason: &format!("ES edge exited abnormally ({status}); {detail}"),
         source: "integrity",
+        would_deny: false, // WO-240@v1: only watch receipts carry the flag.
     });
 }
 
