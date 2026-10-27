@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-27
+
 ### Security
 <!-- WO-187@v1: agent memory pressure must not select the fanotify gate. -->
 - Linux fanotify runs make the supervised tree one OOM group and lower the gate and
