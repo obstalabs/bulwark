@@ -2804,12 +2804,21 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
     let receipts = evidence.join("r.jsonl");
     fs::write(&protected, "WO240_GUARDED\n").unwrap();
     fs::write(&other, "WO240_PLAIN\n").unwrap();
+    // WO-240@v1: a policy `~/` entry prints the home-expansion line, which must not
+    // claim protection; a `--protect ~/…` flag is literal and would refuse the run.
+    let policy = evidence.join("Bulwark.toml");
+    fs::write(
+        &policy,
+        format!(
+            "[protected]\nprompt = [\"~/.bulwark-wo240-absent\", \"{}\"]\n",
+            protected.display()
+        ),
+    )
+    .unwrap();
 
     let out = Command::new(bin())
-        .args(["watch", "--allow-root", "--protect"])
-        .arg(&protected)
-        // WO-240@v1: a `~/` entry prints the home-expansion line, which must not claim protection.
-        .args(["--protect", "~/.bulwark-wo240-absent"])
+        .args(["watch", "--allow-root", "--policy"])
+        .arg(&policy)
         .arg("--receipts")
         .arg(&receipts)
         .args(["--format", "json", "--", "sh", "-c"])
