@@ -365,7 +365,8 @@ enum Cmd {
         policy: Option<PathBuf>,
 
         /// Write receipts here instead of the default root-owned directory
-        /// (`/var/lib/bulwark/watch/`).
+        /// (`/var/lib/bulwark/watch/`). The file's directory must also be
+        /// root-owned and not writable by group or others.
         #[arg(long = "receipts", value_name = "FILE")]
         receipts: Option<PathBuf>,
 
@@ -2864,7 +2865,14 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             .prompt
             .iter()
             .any(|e| e == "~" || e.starts_with("~/"));
-        if has_tilde {
+        // WO-240@v1: watch enforces nothing, so its line must not claim protection.
+        if has_tilde && args.watch {
+            eprintln!(
+                "[bulwark] watching: `~/` entries are flagged would_deny under every home \
+                 directory on this host ({} home(s))",
+                homes.len()
+            );
+        } else if has_tilde {
             eprintln!(
                 "[bulwark] protecting: `~/` entries are protected under every home directory \
                  on this host ({} home(s))",
@@ -3102,18 +3110,14 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
 #[cfg(target_os = "linux")]
 const WATCH_RECEIPTS_DIR: &str = "/var/lib/bulwark/watch";
 
-// WO-240@v1: refuse a receipts directory the watched agent could write.
-/// Default receipts path for `watch`: a fresh file in [`WATCH_RECEIPTS_DIR`],
-/// which must be a root-owned directory writable by nobody else.
+// WO-240@v1: refuse a receipts directory the watched agent could write: write
+// access to the directory is enough to unlink the root-owned receipts file, and
+// the report would then have no evidence to read.
+/// Require `dir` to be a real (non-symlink) root-owned directory that group and
+/// others cannot write.
 #[cfg(target_os = "linux")]
-fn default_watch_receipts() -> Result<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let dir = Path::new(WATCH_RECEIPTS_DIR);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(dir)
-        .with_context(|| format!("cannot create {}; nothing was run", dir.display()))?;
+fn check_watch_receipts_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
     let meta = std::fs::symlink_metadata(dir)
         .with_context(|| format!("cannot stat {}; nothing was run", dir.display()))?;
     if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
@@ -3122,6 +3126,22 @@ fn default_watch_receipts() -> Result<PathBuf> {
             dir.display()
         );
     }
+    Ok(())
+}
+
+// WO-240@v1: the default receipts directory passes the same check as a supplied one.
+/// Default receipts path for `watch`: a fresh file in [`WATCH_RECEIPTS_DIR`],
+/// which must be a root-owned directory writable by nobody else.
+#[cfg(target_os = "linux")]
+fn default_watch_receipts() -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Path::new(WATCH_RECEIPTS_DIR);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir)
+        .with_context(|| format!("cannot create {}; nothing was run", dir.display()))?;
+    check_watch_receipts_dir(dir)?;
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -3141,8 +3161,17 @@ fn cmd_watch(
     worker: Option<gate::WorkerCreds>,
     json: bool,
 ) -> Result<i32> {
+    // WO-240@v1: a supplied --receipts path gets the default directory's check on
+    // its parent, so the watched uid cannot delete the evidence before the report.
     let path = match receipts {
-        Some(p) => p.to_path_buf(),
+        Some(p) => {
+            let parent = match p.parent() {
+                Some(d) if !d.as_os_str().is_empty() => d,
+                _ => Path::new("."),
+            };
+            check_watch_receipts_dir(parent)?;
+            p.to_path_buf()
+        }
         None => default_watch_receipts()?,
     };
     eprintln!(

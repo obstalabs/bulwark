@@ -2793,13 +2793,23 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
     let fs = common::TestFs::new("wo240w");
     let protected = fs.path("guarded");
     let other = fs.path("plain.txt");
-    let receipts = fs.path("r.jsonl");
+    // WO-240@v1: the tmpfs root is 1777, which watch refuses as a receipts parent.
+    let evidence = fs.path("evidence");
+    fs::create_dir(&evidence).unwrap();
+    fs::set_permissions(
+        &evidence,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let receipts = evidence.join("r.jsonl");
     fs::write(&protected, "WO240_GUARDED\n").unwrap();
     fs::write(&other, "WO240_PLAIN\n").unwrap();
 
     let out = Command::new(bin())
         .args(["watch", "--allow-root", "--protect"])
         .arg(&protected)
+        // WO-240@v1: a `~/` entry prints the home-expansion line, which must not claim protection.
+        .args(["--protect", "~/.bulwark-wo240-absent"])
         .arg("--receipts")
         .arg(&receipts)
         .args(["--format", "json", "--", "sh", "-c"])
@@ -2819,6 +2829,11 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
     assert!(
         stderr.contains("RECORDING ONLY"),
         "the banner must say nothing is enforced: {stderr}"
+    );
+    assert!(
+        stderr.contains("[bulwark] watching: `~/` entries are flagged would_deny")
+            && !stderr.contains("protecting:"),
+        "watch must not claim protection: {stderr}"
     );
     // WO-240@v1: ordinary allows go to the receipts file only, never the agent's terminal.
     assert!(
@@ -2855,5 +2870,65 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
             protected.display()
         )),
         "the report must suggest exactly the protected path: {stdout}"
+    );
+}
+
+// WO-240@v1: a receipts directory the watched uid can write lets the agent unlink the
+// evidence before the report, so watch must refuse it before the agent starts.
+#[test]
+#[ignore = "requires Linux + root"]
+fn watch_refuses_a_receipts_dir_the_agent_could_empty() {
+    const WORKER_UID: u32 = 65534;
+    let fs = common::TestFs::new("wo240rm");
+    let protected = fs.path("guarded");
+    let marker = fs.path("agent-ran");
+    let agent_dir = fs.path("agent-owned");
+    fs::write(&protected, "WO240_GUARDED\n").unwrap();
+    fs::create_dir(&agent_dir).unwrap();
+    fs::set_permissions(
+        &agent_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let c = std::ffi::CString::new(agent_dir.to_str().unwrap()).unwrap();
+    let rc = unsafe { libc::chown(c.as_ptr(), WORKER_UID, WORKER_UID) };
+    assert_eq!(
+        rc, 0,
+        "chown the receipts dir to the worker failed (needs root)"
+    );
+    let receipts = agent_dir.join("r.jsonl");
+
+    let out = Command::new(bin())
+        .args([
+            "watch",
+            "--worker-uid",
+            &WORKER_UID.to_string(),
+            "--protect",
+        ])
+        .arg(&protected)
+        .arg("--receipts")
+        .arg(&receipts)
+        .args(["--", "sh", "-c"])
+        .arg(format!(
+            "touch {}; rm -f {}",
+            marker.display(),
+            receipts.display()
+        ))
+        .output()
+        .expect("spawn watch");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "watch must refuse an agent-writable receipts dir; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("must be a root-owned directory not writable by group or others")
+            && stderr.contains("nothing was run"),
+        "the refusal must name the rule: {stderr}"
+    );
+    assert!(!marker.exists(), "the agent ran despite the refusal");
+    assert!(
+        !receipts.exists(),
+        "receipts were written despite the refusal"
     );
 }

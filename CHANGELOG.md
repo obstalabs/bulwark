@@ -26,7 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supervised tree is allowed and recorded, opens the selected policy would deny carry
   `"would_deny":true`, and a report at exit lists opens, credential-store paths, the most
   opened files and a suggested `--protect` set. Receipts default to the root-owned
-  `/var/lib/bulwark/watch/`; only would-deny opens are echoed to stderr. `bulwark report
+  `/var/lib/bulwark/watch/`, and a `--receipts` file must sit in a directory that is also
+  root-owned and not group- or other-writable; only would-deny opens are echoed to
+  stderr. `bulwark report
   <receipts>` prints the same report from any receipts file. macOS refuses `watch` for now.
 <!-- WO-95@v2: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
 - `macos-es-proof/package-release.sh`: the macOS release packaging steps for maintainers
