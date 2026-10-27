@@ -4,7 +4,7 @@
   "cases": [
     {
       "name": "existing-file-object",
-      "source": "design A2.1 row 1 (existing file): object rule, ladder step 1",
+      "source": "existing file: object rule, ladder step 1",
       "files": [
         "/t/a/f"
       ],
@@ -51,7 +51,7 @@
     },
     {
       "name": "renamed-file-object-follows",
-      "source": "design A2.1 row 1 + A3: an object rule follows the inode through a rename",
+      "source": "existing file: an object rule follows the inode through a rename",
       "files": [
         "/t/a/f"
       ],
@@ -76,7 +76,7 @@
     },
     {
       "name": "existing-dir-subtree",
-      "source": "design A2.1 row 2 (existing dir): object + location subtree, ladder step 5; bulwark/WO-69 post-launch file",
+      "source": "existing directory: object + location subtree, ladder step 5; bulwark/WO-69 post-launch file",
       "files": [
         "/t/s/k"
       ],
@@ -117,7 +117,7 @@
     },
     {
       "name": "renamed-dir-object-follows-and-location-holds",
-      "source": "design A2.1 row 2 + A2.3: the moved directory keeps object protection; a directory recreated at the path is covered by location",
+      "source": "existing directory: the moved directory keeps object protection; a directory recreated at the path is covered by location",
       "files": [
         "/t/s/k"
       ],
@@ -152,7 +152,7 @@
     },
     {
       "name": "absent-path-appears-later",
-      "source": "design A2.1 row 3 (absent path, nearest existing ancestor anchor, subtree); bulwark/WO-150",
+      "source": "absent path: nearest existing ancestor anchor, subtree; bulwark/WO-150",
       "dirs": [
         "/t/scratch"
       ],
@@ -185,7 +185,7 @@
     },
     {
       "name": "absent-path-becomes-directory",
-      "source": "design A2.1 row 3: an absent entry later created as a directory protects its contents",
+      "source": "absent path: an absent entry later created as a directory protects its contents",
       "dirs": [
         "/t/scratch"
       ],
@@ -209,7 +209,7 @@
     },
     {
       "name": "unreadable-entry-protected-by-location",
-      "source": "design A2.1 + compile Lookup::Unknown: an entry that cannot be stat'ed (EACCES) is protected by location from its nearest readable ancestor",
+      "source": "compile Lookup::Unknown: an entry that cannot be stat'ed (EACCES) is protected by location from its nearest readable ancestor",
       "dirs": [
         "/t/root"
       ],
@@ -230,7 +230,7 @@
     },
     {
       "name": "home-dotfiles-not-dotdir-contents",
-      "source": "design A2.1 row `~/.*` + A2.1 rule: a name pattern matching a directory does not extend to its contents",
+      "source": "entry `~/.*`: a name pattern matching a directory does not extend to its contents",
       "homes": [
         "/t/home/u"
       ],
@@ -265,7 +265,7 @@
     },
     {
       "name": "dotenv-any-depth-case-folded",
-      "source": "design A2.1 row `**/.env` + A2.4 case rule (protect folds ASCII, Name segments included)",
+      "source": "entry `**/.env`: protect folds ASCII case, Name segments included",
       "protect": [
         "**/.env"
       ],
@@ -297,7 +297,7 @@
     },
     {
       "name": "secret-substring-any-depth",
-      "source": "design A2.1 row `**/*secret*` (bulwark/WO-143 default profile)",
+      "source": "entry `**/*secret*` (bulwark/WO-143 default profile)",
       "protect": [
         "**/*secret*"
       ],
@@ -323,7 +323,7 @@
     },
     {
       "name": "anchored-secrets-subtree",
-      "source": "design A2.1 row `~/dev/**/secrets/**` (starter profile)",
+      "source": "entry `~/dev/**/secrets/**` (starter profile)",
       "homes": [
         "/t/home/u"
       ],
@@ -360,7 +360,7 @@
     },
     {
       "name": "anchor-recreated-at-launch-path",
-      "source": "design A2.3 (round-1 clarification gap): an anchor directory moved away and recreated; inode and launch path both anchor protection",
+      "source": "an anchor directory moved away and recreated; inode and launch path both anchor protection",
       "homes": [
         "/t/home/u"
       ],
@@ -398,7 +398,7 @@
     },
     {
       "name": "carve-out-ladder-starter-shape",
-      "source": "design A4 examples (bulwark/WO-136 ruling: allow entries are carve-outs)",
+      "source": "allow entries are carve-outs (bulwark/WO-136)",
       "dirs": [
         "/t/home/u/dev/app/secrets"
       ],
@@ -449,7 +449,7 @@
     },
     {
       "name": "carve-out-does-not-follow-the-inode",
-      "source": "killgate F2 (round 3 answer 2): an allowed file moved into a protected directory is not carried by the carve-out",
+      "source": "an allowed file moved into a protected directory is not carried by the carve-out",
       "files": [
         "/t/pub/README.md"
       ],
@@ -480,7 +480,7 @@
     },
     {
       "name": "carve-out-never-beats-protected-file",
-      "source": "design A4 step 1: an exact protected file is never carved out",
+      "source": "carve-out step 1: an exact protected file is never carved out",
       "files": [
         "/t/a/f"
       ],
@@ -501,7 +501,7 @@
     },
     {
       "name": "allow-is-case-exact",
-      "source": "design A2.4: allow segments compare byte-exactly so a carve-out cannot widen by case",
+      "source": "syntax: allow segments compare byte-exactly so a carve-out cannot widen by case",
       "dirs": [
         "/t/vault"
       ],
@@ -528,7 +528,7 @@
     },
     {
       "name": "brace-alternatives",
-      "source": "design A2.4: `{a,b}` desugars to alternatives with one rule id",
+      "source": "syntax: `{a,b}` desugars to alternatives with one rule id",
       "protect": [
         "**/id_{rsa,ed25519}"
       ],
@@ -554,7 +554,7 @@
     },
     {
       "name": "lowest-rule-id-attributes",
-      "source": "design A4 attribution: several rules at the deciding step -> the lowest rule id",
+      "source": "attribution: several rules at the deciding step -> the lowest rule id",
       "protect": [
         "**/*secret*",
         "**/my_secret.txt"
@@ -570,7 +570,7 @@
     },
     {
       "name": "hardlink-out-of-protected-dir-at-launch",
-      "source": "shipped behaviour since WO-69 (README: hard links reach the same verdict); R1 review finding R1-2 disposition 2026-10-23: a directory object keeps the launch inodes of the files under it",
+      "source": "shipped behaviour since WO-69 (README: hard links reach the same verdict): a directory object keeps the launch inodes of the files under it",
       "files": [
         "/t/vault/key"
       ],
@@ -596,55 +596,55 @@
   ],
   "errors": [
     {
-      "source": "design A2.4: at most two `*` per component",
+      "source": "syntax: at most two `*` per component",
       "kind": "protect",
       "entry": "/t/a*b*c*d",
       "contains": "more than 2 `*`"
     },
     {
-      "source": "design A2.4: at most two `**` components",
+      "source": "syntax: at most two `**` components",
       "kind": "protect",
       "entry": "/t/**/a/**/b/**/c",
       "contains": "more than 2 `**`"
     },
     {
-      "source": "design A2.4: chain length <= 16 below the anchor",
+      "source": "syntax: chain length <= 16 below the anchor",
       "kind": "protect",
       "entry": "/t/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17",
       "contains": "more than 16 components"
     },
     {
-      "source": "design A2.4 + Phase 4 gap 1: a bare relative entry has no meaning",
+      "source": "syntax: a bare relative entry has no meaning",
       "kind": "allow",
       "entry": "package.json",
       "contains": "bare relative"
     },
     {
-      "source": "design A2.4: non-ASCII protect components are refused",
+      "source": "syntax: non-ASCII protect components are refused",
       "kind": "protect",
       "entry": "/t/café/**",
       "contains": "non-ASCII"
     },
     {
-      "source": "design A2.4: `..` is refused",
+      "source": "syntax: `..` is refused",
       "kind": "protect",
       "entry": "/t/../etc/shadow",
       "contains": "`..`"
     },
     {
-      "source": "design A2.4: `**` must be a whole component",
+      "source": "syntax: `**` must be a whole component",
       "kind": "protect",
       "entry": "/t/a**b",
       "contains": "whole path component"
     },
     {
-      "source": "design A2.4: nested braces are refused",
+      "source": "syntax: nested braces are refused",
       "kind": "protect",
       "entry": "/t/{a,{b,c}}",
       "contains": "nested"
     },
     {
-      "source": "design A2.4: at most two wildcard components per entry (R1 review R1-3)",
+      "source": "syntax: at most two wildcard components per entry",
       "kind": "protect",
       "entry": "/t/a*/b*/c*",
       "contains": "more than 2 wildcard components"

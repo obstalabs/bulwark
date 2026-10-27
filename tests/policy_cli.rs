@@ -205,7 +205,7 @@ fn check_follows_a_symlink_to_its_protected_target() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// WO-198@v1: R1 review R1-5: a relative query resolves from the working directory,
+// WO-198@v1: a relative query resolves from the working directory,
 // as an open of the same spelling would.
 #[test]
 fn check_resolves_a_relative_path_from_the_working_directory() {
@@ -236,7 +236,7 @@ fn check_resolves_a_relative_path_from_the_working_directory() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// WO-198@v1: R1 re-review R1R-1: `..` in an entry is refused by name even when the
+// WO-198@v1: `..` in an entry is refused by name even when the
 // prefix before it exists (resolving that prefix must not erase the `..`).
 #[test]
 fn check_refuses_dotdot_behind_an_existing_prefix() {

@@ -347,7 +347,7 @@ fn grammar_errors_name_the_entry() {
     }
 }
 
-// WO-198@v1: R1 review R1-1: a non-ASCII name is refused even when it resolves to an
+// WO-198@v1: a non-ASCII name is refused even when it resolves to an
 // existing anchor directory and so never reaches the chain.
 #[test]
 fn non_ascii_in_an_existing_anchor_is_refused() {
@@ -378,7 +378,7 @@ fn non_ascii_home_from_expansion_is_allowed() {
     rules::compile(&[spec], &tree).expect("a non-ASCII home from expansion compiles");
 }
 
-// WO-198@v1: R1 review R1-4: per-home copies of one entry fold into one rule with an
+// WO-198@v1: per-home copies of one entry fold into one rule with an
 // anchor set, so the compiled rule count does not grow with the number of homes.
 #[test]
 fn per_home_expansion_folds_into_one_rule() {
