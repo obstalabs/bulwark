@@ -14,7 +14,9 @@
 //! chain and resolve launch paths, so the same code can back `check`, the Linux
 //! gate and, linked as a static library, the macOS gate.
 
+// WO-198@v1: entry grammar and compilation into anchored rules.
 mod compile;
+// WO-198@v1: the decision ladder every evaluator shares.
 mod eval;
 
 #[allow(unused_imports)]
@@ -148,6 +150,7 @@ pub struct Decision {
     pub rule: Option<u16>,
 }
 
+// WO-198@v1: chains are the evaluator's view of an opened path.
 impl Chain {
     // WO-198@v1: build a key-less chain from an absolute path (tests and absent tails).
     /// A chain for `path` with no inode keys. `path` must be absolute.

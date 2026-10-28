@@ -639,6 +639,7 @@ enum FanDecision {
     Deny,
 }
 
+// WO-188@v1: one typed boundary between the gate's verdict and the fanotify ABI.
 impl FanDecision {
     // WO-188@v1: map the typed response to the Linux ABI constant at one boundary.
     fn encode(self, event_fd: RawFd) -> libc::fanotify_response {

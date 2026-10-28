@@ -242,6 +242,7 @@ struct ResponseNoise(Vec<std::process::Child>);
 // WO-188@v1: each loop owns its process group, including an in-flight head child.
 #[cfg(all(feature = "fault-injection", target_os = "linux"))]
 impl Drop for ResponseNoise {
+    // WO-188@v1: kill every noise loop's process group so no writer outlives the test.
     fn drop(&mut self) {
         for child in &mut self.0 {
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };

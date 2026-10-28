@@ -504,6 +504,7 @@ fn comps_path(comps: &[Vec<u8>]) -> std::path::PathBuf {
 /// symlinks like `stat`; an unreadable path is Unknown, not absent).
 pub struct FsResolver;
 
+// WO-198@v1: `check` resolves rule anchors against the live filesystem.
 impl rules::Resolver for FsResolver {
     // WO-198@v1: classify a launch path for object and anchor rules.
     fn lookup(&self, comps: &[Vec<u8>]) -> rules::Lookup {

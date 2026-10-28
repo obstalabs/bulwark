@@ -36,9 +36,11 @@ pub enum Lookup {
 pub trait Resolver {
     /// Resolve the path made of `comps` below `/` (empty = the root), following
     /// symlinks like `stat`.
+    // WO-198@v1: every evaluator classifies launch paths through one resolver call.
     fn lookup(&self, comps: &[Vec<u8>]) -> Lookup;
     /// Launch snapshot under a protected directory: (directory keys, file keys).
     /// `None` when the caller does not snapshot (e.g. `check`).
+    // WO-198@v1: gates snapshot protected directories; `check` has nothing to snapshot.
     fn snapshot(&self, _comps: &[Vec<u8>]) -> Option<(BTreeSet<Key>, BTreeSet<Key>)> {
         None
     }
@@ -52,6 +54,7 @@ pub struct CompileError {
     pub reason: String,
 }
 
+// WO-198@v1: a refused entry is reported by name with its reason.
 impl fmt::Display for CompileError {
     // WO-198@v1: name the entry and say nothing ran, like the other launch refusals.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,6 +70,7 @@ impl fmt::Display for CompileError {
     }
 }
 
+// WO-198@v1: compile refusals propagate as ordinary errors to the CLI.
 impl std::error::Error for CompileError {}
 
 // WO-198@v1: shorthand for a refusal of one entry.

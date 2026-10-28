@@ -6,10 +6,12 @@
 //! 2. A property test: generated policies and trees, `rules::decide` against the
 //!    independent reference in `tests/support/naive_rules.rs`.
 
+// WO-198@v1: the vectors run against the shipped rule contract source.
 #[path = "../src/rules/mod.rs"]
 #[allow(dead_code)]
 mod rules;
 
+// WO-198@v1: an independent reference evaluator for the property test.
 #[path = "support/naive_rules.rs"]
 mod naive;
 
@@ -26,6 +28,7 @@ struct Tree {
     next: u64,
 }
 
+// WO-198@v1: a fixture tree that can be renamed, replaced and extended in memory.
 impl Tree {
     // WO-198@v1: a fresh key for every created object.
     fn fresh(&mut self) -> Key {
@@ -118,6 +121,7 @@ fn join(comps: &[Vec<u8>]) -> String {
     format!("/{}", parts.join("/"))
 }
 
+// WO-198@v1: the fixture tree answers resolver calls like the live filesystem.
 impl Resolver for Tree {
     // WO-198@v1: launch-time lookup against the fixture.
     fn lookup(&self, comps: &[Vec<u8>]) -> Lookup {
@@ -151,12 +155,14 @@ impl Resolver for Tree {
     }
 }
 
+// WO-198@v1: the shared JSON vector file every evaluator reads.
 #[derive(Deserialize)]
 struct Vectors {
     cases: Vec<Case>,
     errors: Vec<ErrorCase>,
 }
 
+// WO-198@v1: one decision vector: policy, tree, mutations and expected verdicts.
 #[derive(Deserialize)]
 struct Case {
     name: String,
@@ -178,6 +184,7 @@ struct Case {
     queries: Vec<Query>,
 }
 
+// WO-198@v1: filesystem mutations applied after launch.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
@@ -188,6 +195,7 @@ enum Op {
     Link { from: String, to: String },
 }
 
+// WO-198@v1: one path query and its expected verdict.
 #[derive(Deserialize)]
 struct Query {
     path: String,
@@ -197,6 +205,7 @@ struct Query {
     rule: Option<String>,
 }
 
+// WO-198@v1: an entry the compiler must refuse, and why.
 #[derive(Deserialize)]
 struct ErrorCase {
     source: String,
@@ -418,6 +427,7 @@ fn entry_cap_refuses_past_r_max() {
 
 // WO-198@v1: deterministic generator (xorshift64), fixed seed.
 struct Rng(u64);
+// WO-198@v1: draws for the generated policies and trees.
 impl Rng {
     // WO-198@v1: next pseudo-random value.
     fn next(&mut self) -> u64 {

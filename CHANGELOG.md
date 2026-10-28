@@ -112,7 +112,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-173@v2: per-item platform gates expose unrelated dead code on non-Linux builds. -->
 - Non-Linux builds scope dead-code allowances to the specific Linux-only items that need them;
   the crate comment names that per-item gate.
-<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1: source citations identify the current intent behind each attributed region. -->
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1 / WO-198@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
   Code that shipped without a recorded work order was given a retroactive one that records its
   behaviour, instead of a guessed id.
