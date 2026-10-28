@@ -195,3 +195,42 @@ expect_pkg_rejected "failed package expansion" "cannot expand package" \
   "$pkg" "__fail__"
 expect_pkg_rejected "missing package payload" "exactly one bulwark payload" \
   "$pkg" "__missing__"
+
+# WO-253@v1: the shipped gate is PREV's only while its inputs are unchanged; otherwise a
+# freshly built gate must be supplied, and the refusal names how to build one.
+expect_gate_plan() {
+  local name="$1" gate_app="$2" changed="$3" expected="$4" plan
+  plan=$(gate_plan "$gate_app" "$changed") || {
+    echo "FAIL: $name was refused"
+    exit 1
+  }
+  [ "$plan" = "$expected" ] || {
+    echo "FAIL: $name planned '$plan', expected '$expected'"
+    exit 1
+  }
+  echo "PASS: $name plans $expected"
+}
+
+# WO-253@v1: a refused plan must name the way forward, not just stop.
+expect_gate_plan_refused() {
+  local name="$1" gate_app="$2" changed="$3" output
+  shift 3
+  if output=$(gate_plan "$gate_app" "$changed" 2>&1); then
+    echo "FAIL: $name was accepted: $output"
+    exit 1
+  fi
+  local needle
+  for needle in "$@"; do
+    grep -qF "$needle" <<<"$output" || {
+      echo "FAIL: $name did not name '$needle': $output"
+      exit 1
+    }
+  done
+  echo "PASS: $name refused"
+}
+
+expect_gate_plan "unchanged inputs, no fresh gate" "" 0 reuse
+expect_gate_plan "changed inputs, fresh gate" "$WORK/bulwark_es_gate.app" 1 fresh
+expect_gate_plan "unchanged inputs, fresh gate" "$WORK/bulwark_es_gate.app" 0 fresh
+expect_gate_plan_refused "changed inputs, no fresh gate" "" 1 build-gate-bundle.sh GATE_APP
+expect_gate_plan_refused "relative fresh gate" "bulwark_es_gate.app" 1 "absolute path"

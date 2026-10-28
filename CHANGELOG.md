@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+<!-- WO-253@v1: a release whose gate sources changed had no way to ship a rebuilt gate. -->
+- `macos-es-proof/package-release.sh stage` accepts a freshly built, notarized gate through
+  `GATE_APP` (absolute path, checked before any download) when the gate sources changed since
+  the previous release; it still reuses the previous release's gate when they did not, and
+  without `GATE_APP` the refusal names `build-gate-bundle.sh` and `GATE_APP`.
+
 ## [0.10.0] - 2026-10-27
 
 ### Security

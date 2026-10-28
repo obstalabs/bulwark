@@ -23,7 +23,7 @@
 # hardware-sealed; its release binding is the tag SHA, by decision.
 #
 # Phases, run in order:
-#   stage    download the CI darwin tarballs + PREV's notarized gate app; verify both
+#   stage    download the CI darwin tarballs; take the gate from GATE_APP or PREV; verify both
 #   sign     Developer-ID-sign both staged CLI binaries before any hardware seal
 #   seal     re-run both seals on the exact pair that ships (needs sudo)
 #   repack   rebuild both darwin tarballs with bulwark_es_gate.app + .sha256
@@ -33,7 +33,11 @@
 #
 # The gate app is reused from PREV, which is valid only while es_gate.swift,
 # es_proof.entitlements and GateInfo.plist are unchanged vPREV..vVERSION; stage
-# refuses otherwise (then rebuild with macos-es-proof/build-gate-bundle.sh).
+# refuses otherwise. Then build a fresh signed + notarized + stapled gate and pass it:
+#   SIGNING_IDENTITY="Developer ID Application: ..." bash macos-es-proof/build-gate-bundle.sh
+#   GATE_APP=$PWD/macos-es-proof/bulwark_es_gate.app VERSION=... PREV=... \
+#     bash macos-es-proof/package-release.sh stage
+# (WO-253@v1: GATE_APP must be absolute; stage runs check_app on it before downloading.)
 set -euo pipefail
 
 # WO-140@v1: read one exact identity field from a hardware-seal receipt.
@@ -139,6 +143,26 @@ release_pkg_gate() {
   rm -rf "$expand_dir"
 }
 
+# WO-253@v1: pick the gate the release ships. PREV's notarized gate is reused only while its
+# inputs are unchanged; otherwise the operator supplies a freshly built one through GATE_APP.
+# Prints `reuse` or `fresh`; refuses (status 1, reason on stderr) when neither is possible.
+gate_plan() {
+  local gate_app="$1" inputs_changed="$2"
+  if [ -n "$gate_app" ]; then
+    case "$gate_app" in
+      /*) echo fresh; return 0 ;;
+      *) echo "!! GATE_APP must be an absolute path: $gate_app" >&2; return 1 ;;
+    esac
+  fi
+  if [ "$inputs_changed" = 0 ]; then
+    echo reuse
+    return 0
+  fi
+  echo "!! gate inputs changed since the previous release: build a fresh gate with" \
+    "macos-es-proof/build-gate-bundle.sh and set GATE_APP to its absolute path" >&2
+  return 1
+}
+
 # WO-140@v1: let fixture tests source the pure upload gate without release inputs.
 if [ -n "${RELEASE_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
@@ -163,24 +187,44 @@ die() { echo "!! $*" >&2; exit 1; }
 gh_() { (cd "$SRC_REPO" && gh "$@"); }   # gh resolves the account from the repo cwd
 
 # WO-95@v2: the CI release ships darwin tarballs without the signed gate app; stage collects the CI
-# build and the previous notarized gate, refusing reuse when the gate sources changed.
+# build and a notarized gate.
+# WO-253@v1: that gate is PREV's while its sources are unchanged, else the fresh GATE_APP.
 stage() {
+  # WO-253@v1: a failed comparison (missing tag) must stop, not read as "inputs changed".
+  local changed=0 plan
   git -C "$SRC_REPO" diff --quiet "v$PREV" "v$VERSION" -- macos-es-proof/es_gate.swift \
-    macos-es-proof/es_proof.entitlements macos-es-proof/GateInfo.plist \
-    || die "gate inputs changed v$PREV..v$VERSION: rebuild the gate app (build-gate-bundle.sh), do not reuse"
+    macos-es-proof/es_proof.entitlements macos-es-proof/GateInfo.plist || changed=$?
+  case "$changed" in
+    0|1) ;;
+    *) die "cannot compare gate inputs v$PREV..v$VERSION (git exit $changed)" ;;
+  esac
+  plan=$(gate_plan "${GATE_APP:-}" "$changed") || die "no gate to ship for v$VERSION"
+  # WO-253@v1: vet a supplied gate before downloading anything.
+  if [ "$plan" = fresh ]; then
+    [ -d "$GATE_APP" ] || die "GATE_APP is not a directory: $GATE_APP"
+    check_app "$GATE_APP"
+  fi
   rm -rf "$W"; mkdir -p "$W/dl" "$W/ci" "$W/prev"
   for t in "${TRIPLES[@]}"; do
     gh_ release download "v$VERSION" --repo "$REPO" -D "$W/dl" \
       -p "bulwark-$VERSION-$t.tar.gz" -p "bulwark-$VERSION-$t.tar.gz.sha256"
-    gh_ release download "v$PREV" --repo "$REPO" -D "$W/dl" -p "bulwark-$PREV-$t.tar.gz"
     (cd "$W/dl" && shasum -a 256 -c "bulwark-$VERSION-$t.tar.gz.sha256")
     tar xzf "$W/dl/bulwark-$VERSION-$t.tar.gz" -C "$W/ci"
-    mkdir -p "$W/prev/$t" && tar xzf "$W/dl/bulwark-$PREV-$t.tar.gz" -C "$W/prev/$t"
+    # WO-253@v1: PREV's tarballs are needed only to reuse its gate.
+    if [ "$plan" = reuse ]; then
+      gh_ release download "v$PREV" --repo "$REPO" -D "$W/dl" -p "bulwark-$PREV-$t.tar.gz"
+      mkdir -p "$W/prev/$t" && tar xzf "$W/dl/bulwark-$PREV-$t.tar.gz" -C "$W/prev/$t"
+    fi
   done
-  local a="$W/prev/aarch64-apple-darwin/bulwark-$PREV-aarch64-apple-darwin/$APP"
-  local i="$W/prev/x86_64-apple-darwin/bulwark-$PREV-x86_64-apple-darwin/$APP"
-  diff -r "$a" "$i" >/dev/null || die "the two $PREV tarballs carry different gate apps"
-  COPYFILE_DISABLE=1 cp -R "$a" "$W/$APP"
+  # WO-253@v1: ship the supplied fresh gate, or PREV's when its inputs are unchanged.
+  if [ "$plan" = fresh ]; then
+    COPYFILE_DISABLE=1 cp -R "$GATE_APP" "$W/$APP"
+  else
+    local a="$W/prev/aarch64-apple-darwin/bulwark-$PREV-aarch64-apple-darwin/$APP"
+    local i="$W/prev/x86_64-apple-darwin/bulwark-$PREV-x86_64-apple-darwin/$APP"
+    diff -r "$a" "$i" >/dev/null || die "the two $PREV tarballs carry different gate apps"
+    COPYFILE_DISABLE=1 cp -R "$a" "$W/$APP"
+  fi
   check_app "$W/$APP"
   for t in "${TRIPLES[@]}"; do
     local b="$W/ci/bulwark-$VERSION-$t/bulwark"
