@@ -100,9 +100,24 @@ identity is the inode, not a string a symlink can forge.
 > ([why, and how to set it up](docs/macos-permissions.md)). Prebuilt binaries:
 > `brew install obstalabs/tap/bulwark` or the **[Releases page](https://github.com/obstalabs/bulwark/releases)**.
 
+<!-- WO-240@v1: start with the mode that cannot break the agent. -->
+Start by watching. `watch` enforces nothing: every open by the supervised tree is
+allowed and recorded, the ones the policy would deny are flagged, and a report at
+exit names what was read and what you would protect (Linux only for now).
+
 ```sh
 cargo build --release
 
+# See what the command reads. Nothing is denied.
+sudo ./target/release/bulwark watch --protect ~/.ssh -- bash -c 'cat ~/.ssh/known_hosts'
+
+# Re-print the report from the receipts file later.
+sudo ./target/release/bulwark report /var/lib/bulwark/watch/<file>.jsonl
+```
+
+Then enforce:
+
+```sh
 # Deny the supervised command any read of files under ~/.ssh, by inode.
 sudo ./target/release/bulwark run \
   --protect ~/.ssh \
@@ -263,6 +278,8 @@ as plainly as the ones it does — see **Known limitations** below and
 
 <!-- WO-190@v1: no paid tier or fleet control plane is planned; only research items remain. -->
 - Windows support (minifilter gate) — under research.
+- Linux BPF LSM enforcement core (deny decisions held in the kernel, so they survive
+  the gate process dying) — under research.
 
 ## License & positioning
 

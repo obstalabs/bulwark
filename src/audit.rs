@@ -21,6 +21,8 @@ struct Row {
     source: String,
     path: String,
     ancestry: String,
+    // WO-240@v1: shadow-mode flag; absent on every non-watch receipt.
+    would_deny: bool,
 }
 
 // WO-5@v1: make policy matching and decision audit output deterministic.
@@ -52,8 +54,43 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
+// WO-240@v1: field() returns the raw JSON text; decode it once so a path is the
+// path the gate saw, and re-encoding for JSON output does not double-escape it.
+/// Decode JSON string escapes. An invalid escape or code point becomes U+FFFD.
+fn json_unescape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                let code = (hex.len() == 4)
+                    .then(|| u32::from_str_radix(&hex, 16).ok())
+                    .flatten();
+                out.push(code.and_then(char::from_u32).unwrap_or('\u{fffd}'));
+            }
+            _ => out.push('\u{fffd}'),
+        }
+    }
+    out
+}
+
 // WO-5@v1: make policy matching and decision audit output deterministic.
 fn parse_row(line: &str) -> Option<Row> {
+    // WO-240@v1: string fields are decoded, numbers and flags are read as written.
+    let text = |key: &str| field(line, key).map(json_unescape);
     Some(Row {
         ts_ms: field(line, "ts_ms")
             .and_then(|s| s.parse().ok())
@@ -61,11 +98,255 @@ fn parse_row(line: &str) -> Option<Row> {
         pid: field(line, "pid")
             .and_then(|s| s.parse().ok())
             .unwrap_or(-1),
-        decision: field(line, "decision")?.to_string(),
-        source: field(line, "source").unwrap_or("").to_string(),
-        path: field(line, "path").unwrap_or("?").to_string(),
-        ancestry: field(line, "ancestry").unwrap_or("").to_string(),
+        decision: text("decision")?,
+        source: text("source").unwrap_or_default(),
+        path: text("path").unwrap_or_else(|| "?".to_string()),
+        ancestry: text("ancestry").unwrap_or_default(),
+        // WO-240@v1: only the literal `true` written by the gate sets the flag.
+        would_deny: field(line, "would_deny") == Some("true"),
     })
+}
+
+// WO-240@v1: name the credential store an opened path belongs to, deterministically.
+/// Credential stores the report calls out, as (path suffix pattern, label). A
+/// pattern ending in `/` matches any path inside that directory; any other
+/// pattern must match the final components exactly. Matching is on the path as
+/// recorded, so it covers every home, not only the invoking user's.
+const CREDENTIAL_STORES: &[(&str, &str)] = &[
+    ("/.ssh/", "ssh"),
+    ("/.aws/", "aws"),
+    ("/.config/gcloud/", "gcloud"),
+    ("/.kube/", "kube"),
+    ("/.gnupg/", "gnupg"),
+    ("/.docker/config.json", "docker"),
+    ("/.npmrc", "npm"),
+    ("/.pypirc", "pypi"),
+    ("/.netrc", "netrc"),
+    ("/.git-credentials", "git-credentials"),
+    ("/.config/gh/hosts.yml", "gh"),
+    // WO-240@v1: common token files, so "none opened" does not overstate coverage.
+    ("/.azure/", "azure"),
+    ("/.pgpass", "pgpass"),
+    ("/.vault-token", "vault"),
+];
+
+// WO-240@v1: the file sink's drop count from the gate's summary line. The stderr
+// sink's drops lose only terminal echoes, never receipts, so they are not counted.
+fn summary_file_dropped(line: &str) -> Option<u64> {
+    if field(line, "kind") != Some("summary") {
+        return None;
+    }
+    let start = line.find("\"file\":{")? + "\"file\":".len();
+    let end = start + line[start..].find('}')?;
+    field(&line[start..=end], "dropped")?.parse().ok()
+}
+
+// WO-240@v1: name the credential store an opened path belongs to, deterministically.
+fn credential_store(path: &str) -> Option<&'static str> {
+    CREDENTIAL_STORES.iter().find_map(|(pat, label)| {
+        let hit = if pat.ends_with('/') {
+            path.contains(pat)
+        } else {
+            path.ends_with(pat)
+        };
+        hit.then_some(*label)
+    })
+}
+
+/// How many most-opened paths the report lists.
+const REPORT_TOP_N: usize = 10;
+
+// WO-240@v1: one summary shared by `bulwark watch` and `bulwark report`.
+/// Aggregate view of a receipts file for the shadow-mode report.
+#[derive(Debug, Default, PartialEq)]
+pub struct Report {
+    /// Receipt lines with a decision (every gated open).
+    pub opens: usize,
+    /// Distinct paths among them (`?` excluded).
+    pub distinct_paths: usize,
+    /// Opens flagged `would_deny`.
+    pub would_deny_opens: usize,
+    /// Distinct would-deny paths, sorted: the suggested `--protect` set.
+    pub would_deny_paths: Vec<String>,
+    // WO-240@v1: receipts the gate dropped before the file, from its summary line;
+    // when non-zero the counts and the suggested set may be incomplete.
+    pub dropped: u64,
+    /// (store label, distinct paths opened in it, sorted), stores sorted by label.
+    pub credential_paths: Vec<(String, Vec<String>)>,
+    /// Up to [`REPORT_TOP_N`] (path, opens), most opened first, ties by path.
+    pub top_paths: Vec<(String, usize)>,
+    /// Lines that are neither a decision nor a known metadata record.
+    pub unparsed: usize,
+}
+
+// WO-240@v1: one summary shared by `bulwark watch` and `bulwark report`.
+/// Build the report from receipts text. Metadata records (`"kind":...`, e.g. the
+/// gate's summary line) are not opens and are not counted as unparsed.
+pub fn summarize(raw: &str) -> Report {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut rep = Report::default();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut would: BTreeSet<String> = BTreeSet::new();
+    let mut creds: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(r) = parse_row(line) else {
+            if field(line, "kind").is_none() {
+                rep.unparsed += 1;
+            }
+            // WO-240@v1: a run's summary line says how many receipts never reached the file.
+            if let Some(n) = summary_file_dropped(line) {
+                rep.dropped += n;
+            }
+            continue;
+        };
+        rep.opens += 1;
+        if r.path != "?" {
+            *counts.entry(r.path.clone()).or_insert(0) += 1;
+            if let Some(store) = credential_store(&r.path) {
+                creds.entry(store).or_default().insert(r.path.clone());
+            }
+        }
+        if r.would_deny {
+            rep.would_deny_opens += 1;
+            would.insert(r.path.clone());
+        }
+    }
+    rep.distinct_paths = counts.len();
+    rep.would_deny_paths = would.into_iter().collect();
+    rep.credential_paths = creds
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into_iter().collect()))
+        .collect();
+    let mut top: Vec<(String, usize)> = counts.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    top.truncate(REPORT_TOP_N);
+    rep.top_paths = top;
+    rep
+}
+
+// WO-240@v1: render the shadow-mode report for a person or an agent.
+/// Read `path`, summarise it, and print the report (human or JSON) to stdout.
+pub fn report(path: &Path, json: bool) -> Result<Report> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("cannot read receipts {}", path.display()))?;
+    let rep = summarize(&raw);
+    if json {
+        println!("{}", report_json(&rep));
+    } else {
+        print!("{}", report_human(&rep));
+    }
+    Ok(rep)
+}
+
+// WO-240@v1: machine-readable form of the same report.
+fn report_json(rep: &Report) -> String {
+    let strs = |v: &[String]| {
+        v.iter()
+            .map(|s| format!("\"{}\"", json_escape(s)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let creds = rep
+        .credential_paths
+        .iter()
+        .map(|(k, v)| format!(r#"{{"store":"{}","paths":[{}]}}"#, json_escape(k), strs(v)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let top = rep
+        .top_paths
+        .iter()
+        .map(|(p, n)| format!(r#"{{"path":"{}","opens":{n}}}"#, json_escape(p)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"opens":{},"distinct_paths":{},"would_deny_opens":{},"would_deny_paths":[{}],"credential_stores":[{}],"top_paths":[{}],"unparsed":{},"dropped":{}}}"#,
+        rep.opens,
+        rep.distinct_paths,
+        rep.would_deny_opens,
+        strs(&rep.would_deny_paths),
+        creds,
+        top,
+        rep.unparsed,
+        rep.dropped
+    )
+}
+
+// WO-240@v1: human form; the suggested block is ready to paste after `bulwark run`.
+fn report_human(rep: &Report) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "{} opens, {} distinct files, {} would-deny opens",
+        rep.opens, rep.distinct_paths, rep.would_deny_opens
+    );
+    if rep.credential_paths.is_empty() {
+        let _ = writeln!(s, "credential stores: none opened");
+    } else {
+        let _ = writeln!(s, "credential stores opened:");
+        for (store, paths) in &rep.credential_paths {
+            let _ = writeln!(s, "  {store}:");
+            for p in paths {
+                let _ = writeln!(s, "    {p}");
+            }
+        }
+    }
+    if !rep.top_paths.is_empty() {
+        let _ = writeln!(s, "most opened:");
+        for (p, n) in &rep.top_paths {
+            let _ = writeln!(s, "  {n:>6}  {p}");
+        }
+    }
+    if rep.would_deny_paths.is_empty() {
+        let _ = writeln!(
+            s,
+            "suggested --protect: none (no protected path was opened)"
+        );
+    } else {
+        let _ = writeln!(
+            s,
+            "suggested --protect (opens the current policy would deny):"
+        );
+        for p in &rep.would_deny_paths {
+            let _ = writeln!(s, "  {}", protect_arg(p));
+        }
+    }
+    if rep.unparsed > 0 {
+        let _ = writeln!(s, "{} unparsed line(s)", rep.unparsed);
+    }
+    // WO-240@v1: a lossy run must not present its suggestion as complete.
+    if rep.dropped > 0 {
+        let _ = writeln!(
+            s,
+            "{} receipts dropped; the suggested set may be incomplete",
+            rep.dropped
+        );
+    }
+    s
+}
+
+// WO-240@v1: the suggested block is pasted into a shell, so each path must stay one
+// argument and never be read as shell syntax or as an option.
+/// One `--protect` argument, shell-quoted. A value starting with `-` uses the
+/// `--protect=VALUE` form so it cannot be taken for a flag.
+fn protect_arg(path: &str) -> String {
+    let safe = !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+=:,@%".contains(&b));
+    let quoted = if safe {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    };
+    if path.starts_with('-') {
+        format!("--protect={quoted}")
+    } else {
+        format!("--protect {quoted}")
+    }
 }
 
 // WO-5@v1: make policy matching and decision audit output deterministic.
@@ -183,6 +464,165 @@ mod tests {
         assert_eq!(r.decision, "deny");
         assert_eq!(r.path, "/tmp/guard/secret.env");
         assert!(r.ancestry.contains("cat(959596)"));
+    }
+
+    // WO-240@v1: credential stores are named by directory or exact file suffix.
+    #[test]
+    fn credential_store_matches_directories_and_exact_files() {
+        assert_eq!(credential_store("/home/a/.ssh/id_ed25519"), Some("ssh"));
+        assert_eq!(credential_store("/home/a/.ssh/known_hosts"), Some("ssh"));
+        assert_eq!(credential_store("/Users/a/.aws/credentials"), Some("aws"));
+        assert_eq!(credential_store("/home/a/.npmrc"), Some("npm"));
+        assert_eq!(credential_store("/home/a/.config/gh/hosts.yml"), Some("gh"));
+        // A suffix that is not a whole component is not the store.
+        assert_eq!(credential_store("/home/a/project.npmrc"), None);
+        assert_eq!(credential_store("/home/a/.ssh"), None);
+        assert_eq!(credential_store("/repo/src/main.rs"), None);
+    }
+
+    // WO-240@v1: the report counts opens, flags, stores and ranks paths deterministically.
+    #[test]
+    fn summarize_builds_the_shadow_mode_report() {
+        let raw = concat!(
+            r#"{"ts_ms":1,"pid":1,"decision":"allow","source":"watch","path":"/h/.ssh/id_ed25519","ancestry":"cat(1)","reason":"watch: protected inode; run would deny","would_deny":true}"#,
+            "\n",
+            r#"{"ts_ms":2,"pid":1,"decision":"allow","source":"watch","path":"/h/.ssh/id_ed25519","ancestry":"cat(1)","reason":"watch: protected inode; run would deny","would_deny":true}"#,
+            "\n",
+            r#"{"ts_ms":3,"pid":1,"decision":"allow","source":"watch","path":"/h/.npmrc","ancestry":"npm(1)","reason":"watch: not protected"}"#,
+            "\n",
+            r#"{"ts_ms":4,"pid":1,"decision":"allow","source":"watch","path":"/repo/a.rs","ancestry":"x(1)","reason":"watch: not protected"}"#,
+            "\n",
+            r#"{"ts_ms":5,"pid":1,"decision":"allow","source":"watch","path":"/repo/a.rs","ancestry":"x(1)","reason":"watch: not protected"}"#,
+            "\n",
+            r#"{"ts_ms":6,"pid":1,"decision":"allow","source":"watch","path":"/repo/b.rs","ancestry":"x(1)","reason":"watch: not protected"}"#,
+            "\n",
+            r#"{"ts_ms":7,"kind":"summary","file":{"state":"finished"}}"#,
+            "\n",
+            "garbage-not-json\n",
+        );
+        let rep = summarize(raw);
+        assert_eq!(rep.opens, 6);
+        assert_eq!(rep.distinct_paths, 4);
+        assert_eq!(rep.would_deny_opens, 2);
+        assert_eq!(rep.would_deny_paths, vec!["/h/.ssh/id_ed25519".to_string()]);
+        assert_eq!(
+            rep.credential_paths,
+            vec![
+                ("npm".to_string(), vec!["/h/.npmrc".to_string()]),
+                ("ssh".to_string(), vec!["/h/.ssh/id_ed25519".to_string()]),
+            ]
+        );
+        // Most opened first; ties ordered by path.
+        assert_eq!(
+            rep.top_paths,
+            vec![
+                ("/h/.ssh/id_ed25519".to_string(), 2),
+                ("/repo/a.rs".to_string(), 2),
+                ("/h/.npmrc".to_string(), 1),
+                ("/repo/b.rs".to_string(), 1),
+            ]
+        );
+        // The summary record is metadata, not an unparsed line; garbage is.
+        assert_eq!(rep.unparsed, 1);
+        let json = report_json(&rep);
+        assert!(json.starts_with(r#"{"opens":6,"distinct_paths":4,"would_deny_opens":2,"would_deny_paths":["/h/.ssh/id_ed25519"]"#), "{json}");
+        let human = report_human(&rep);
+        assert!(
+            human.contains("  --protect /h/.ssh/id_ed25519\n"),
+            "{human}"
+        );
+        assert!(human.contains("  npm:\n    /h/.npmrc\n"), "{human}");
+    }
+
+    // WO-240@v1: a decoded path re-encodes once, so JSON output names the real path.
+    #[test]
+    fn parse_row_decodes_escaped_values_once() {
+        let line = r#"{"ts_ms":1,"pid":1,"decision":"allow","path":"/x/a\"b\\c\u0001\/d","ancestry":"sh(1)","would_deny":true}"#;
+        let r = parse_row(line).unwrap();
+        assert_eq!(r.path, "/x/a\"b\\c\u{1}/d");
+        let rep = summarize(line);
+        let json = report_json(&rep);
+        assert!(
+            json.contains(r#""would_deny_paths":["/x/a\"b\\c\u0001/d"]"#),
+            "{json}"
+        );
+        // A bad escape is replaced, never dropped silently.
+        assert_eq!(json_unescape(r"a\qb\u12"), "a\u{fffd}b\u{fffd}");
+    }
+
+    // WO-240@v1: every suggested path pastes as exactly one non-option argument.
+    #[test]
+    fn suggested_protect_paths_are_shell_quoted() {
+        assert_eq!(
+            protect_arg("/h/.ssh/id_ed25519"),
+            "--protect /h/.ssh/id_ed25519"
+        );
+        assert_eq!(protect_arg("/h/My Docs/key"), "--protect '/h/My Docs/key'");
+        assert_eq!(
+            protect_arg("/h/$(rm -rf ~);x"),
+            "--protect '/h/$(rm -rf ~);x'"
+        );
+        assert_eq!(protect_arg("/h/it's"), r"--protect '/h/it'\''s'");
+        assert_eq!(protect_arg("-rf"), "--protect=-rf");
+        assert_eq!(protect_arg("-a b"), "--protect='-a b'");
+        assert_eq!(protect_arg(""), "--protect ''");
+        let rep = Report {
+            would_deny_paths: vec!["/h/a b".to_string()],
+            ..Report::default()
+        };
+        assert!(
+            report_human(&rep).contains("  --protect '/h/a b'\n"),
+            "{}",
+            report_human(&rep)
+        );
+    }
+
+    // WO-240@v1: receipts the file sink dropped are reported; stderr drops are not.
+    #[test]
+    fn summary_line_file_drops_mark_the_report_incomplete() {
+        let raw = concat!(
+            r#"{"ts_ms":1,"pid":1,"decision":"allow","path":"/a","ancestry":"x(1)"}"#,
+            "\n",
+            r#"{"ts_ms":9,"kind":"summary","file":{"state":"finished","submitted":5,"written":2,"dropped":3},"stderr":{"state":"finished","submitted":4,"written":0,"dropped":4}}"#,
+            "\n",
+        );
+        let rep = summarize(raw);
+        assert_eq!(rep.dropped, 3);
+        assert_eq!(rep.unparsed, 0);
+        assert!(
+            report_human(&rep)
+                .contains("3 receipts dropped; the suggested set may be incomplete\n"),
+            "{}",
+            report_human(&rep)
+        );
+        assert!(report_json(&rep).ends_with(r#""unparsed":0,"dropped":3}"#));
+        // A clean run says nothing about drops.
+        let clean = r#"{"ts_ms":9,"kind":"summary","file":{"state":"finished","submitted":1,"written":1,"dropped":0},"stderr":{"state":"finished","submitted":0,"written":0,"dropped":7}}"#;
+        let rep = summarize(clean);
+        assert_eq!(rep.dropped, 0);
+        assert!(!report_human(&rep).contains("dropped"));
+    }
+
+    // WO-240@v1: the added stores are named like the others.
+    #[test]
+    fn credential_store_names_azure_pgpass_and_vault() {
+        assert_eq!(
+            credential_store("/home/a/.azure/msal_token_cache.json"),
+            Some("azure")
+        );
+        assert_eq!(credential_store("/home/a/.pgpass"), Some("pgpass"));
+        assert_eq!(credential_store("/root/.vault-token"), Some("vault"));
+        assert_eq!(credential_store("/home/a/my.pgpass"), None);
+    }
+
+    // WO-240@v1: an empty run says so instead of suggesting nothing silently.
+    #[test]
+    fn summarize_of_no_opens_reports_no_suggestion() {
+        let rep = summarize("");
+        assert_eq!(rep, Report::default());
+        let human = report_human(&rep);
+        assert!(human.contains("credential stores: none opened"), "{human}");
+        assert!(human.contains("suggested --protect: none"), "{human}");
     }
 
     #[test]

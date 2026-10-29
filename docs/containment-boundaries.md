@@ -96,11 +96,16 @@ Three facts make this hold, and they are worth stating plainly:
    migrate cgroups, or overwrite a root-owned file. The one path that could undo the drop —
    `exec`ing a setuid-root binary to climb back to root — is closed by `PR_SET_NO_NEW_PRIVS`.
 
-2. **The fanotify gate fails *open* on supervisor death — but the agent cannot cause that death.**
-   If the supervisor is hard-killed, the kernel releases a held permission event as allowed
-   (documented fanotify behaviour). The residual is therefore an *external* root process killing
-   the supervisor — which is outside the agent's reach, and a host with a hostile root process is
-   already compromised by any measure. The agent itself, unprivileged, cannot open that window.
+2. **The fanotify gate fails *open* on supervisor death, so the agent tree is also the OOM
+   boundary.** If the supervisor is hard-killed, the kernel releases a held permission event as
+   allowed (documented fanotify behaviour). Bulwark gives the root gate and its crash watcher a
+   lower OOM score than the agent, resets the agent to the kernel default before `exec`, and asks
+   cgroup v2 to kill the supervised tree as one group. If the memory controller is not delegated,
+   Bulwark warns and keeps the OOM-score protection. If the gate cannot write
+   `/proc/self/oom_score_adj` (which needs `CAP_SYS_RESOURCE`), Bulwark refuses before the agent
+   starts. The remaining hard-death residual is an
+   external root process, kernel failure or power loss rather than memory pressure created by the
+   supervised process.
 
 3. **`--hardened` removes the entire class.** There is no supervisor to kill, `ptrace`, or
    starve: Bulwark applies a Landlock floor to the agent process and `execve`s into the agent in

@@ -142,27 +142,27 @@ release_pkg_gate() {
 # WO-140@v1: let fixture tests source the pure upload gate without release inputs.
 if [ -n "${RELEASE_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
-# WO-95@v1: the release being packaged; required so a run never guesses it.
+# WO-95@v2: the release being packaged; required so a run never guesses it.
 VERSION="${VERSION:?set VERSION to the tagged release, e.g. 0.9.4}"
-# WO-95@v1: the release whose notarized gate app is reused when the gate sources are unchanged.
+# WO-95@v2: the release whose notarized gate app is reused when the gate sources are unchanged.
 PREV="${PREV:?set PREV to the previous release whose notarized gate app is reused}"
-# WO-95@v1: the GitHub repo whose tagged release receives the macOS assets.
+# WO-95@v2: the GitHub repo whose tagged release receives the macOS assets.
 REPO=obstalabs/bulwark
-# WO-95@v1: the checkout this script lives in; gh and git run from it.
+# WO-95@v2: the checkout this script lives in; gh and git run from it.
 SRC_REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# WO-95@v1: scratch work dir for downloads, seals and the upload set.
+# WO-95@v2: scratch work dir for downloads, seals and the upload set.
 W="${W:-${TMPDIR:-/tmp}/bulwark-pkg-${VERSION}}"
-# WO-95@v1: the two macOS targets release.yml builds.
+# WO-95@v2: the two macOS targets release.yml builds.
 TRIPLES=(aarch64-apple-darwin x86_64-apple-darwin)
-# WO-95@v1: the signed Endpoint Security gate bundle the darwin tarballs must carry.
+# WO-95@v2: the signed Endpoint Security gate bundle the darwin tarballs must carry.
 APP=bulwark_es_gate.app
 
-# WO-95@v1: every phase stops at the first failed check, so a broken artifact never reaches upload.
+# WO-95@v2: every phase stops at the first failed check, so a broken artifact never reaches upload.
 die() { echo "!! $*" >&2; exit 1; }
-# WO-95@v1: gh picks the GitHub account from the repo checkout, so release calls run from there.
+# WO-95@v2: gh picks the GitHub account from the repo checkout, so release calls run from there.
 gh_() { (cd "$SRC_REPO" && gh "$@"); }   # gh resolves the account from the repo cwd
 
-# WO-95@v1: the CI release ships darwin tarballs without the signed gate app; stage collects the CI
+# WO-95@v2: the CI release ships darwin tarballs without the signed gate app; stage collects the CI
 # build and the previous notarized gate, refusing reuse when the gate sources changed.
 stage() {
   git -C "$SRC_REPO" diff --quiet "v$PREV" "v$VERSION" -- macos-es-proof/es_gate.swift \
@@ -191,7 +191,7 @@ stage() {
   echo "==> staged in $W"
 }
 
-# WO-95@v1: a gate app is shippable only if universal, ES-entitled, stapled and notarized.
+# WO-95@v2: a gate app is shippable only if universal, ES-entitled, stapled and notarized.
 check_app() {
   local app="$1"
   [ "$(lipo -archs "$app/Contents/MacOS/bulwark_es_gate")" = "x86_64 arm64" ] || die "gate not universal"
@@ -236,7 +236,7 @@ sign() {
   echo "==> Developer-ID-signed binaries staged in $W/signed"
 }
 
-# WO-95@v1: the hardware seals must run on the exact binary + gate pair that ships.
+# WO-95@v2: the hardware seals must run on the exact binary + gate pair that ships.
 seal() {
   # The seal scripts cd into their own directory and look for ./bulwark_es_gate.app,
   # so seal from a staging copy instead of swapping the app in the checkout.
@@ -259,7 +259,7 @@ seal() {
   printf '  sudo BULWARK_SOURCE_SHA=%q BULWARK=%q %q\n' "$source_sha" "$s/bulwark" "$s/verify-allowlist-gate.sh"
 }
 
-# WO-95@v1: rebuild the darwin tarballs with the gate app, in the layout release.yml uses.
+# WO-95@v2: rebuild the darwin tarballs with the gate app, in the layout release.yml uses.
 repack() {
   mkdir -p "$W/out"
   for t in "${TRIPLES[@]}"; do
@@ -273,7 +273,7 @@ repack() {
   done
 }
 
-# WO-95@v1: signed, notarized and stapled .pkg per arch, built from the released CI binaries.
+# WO-95@v2: signed, notarized and stapled .pkg per arch, built from the released CI binaries.
 pkg() {
   : "${APP_ID:?set APP_ID to 'Developer ID Application: NAME (TEAMID)'}"
   : "${INSTALLER_ID:?set INSTALLER_ID to 'Developer ID Installer: NAME (TEAMID)'}"
@@ -293,7 +293,7 @@ pkg() {
   done
 }
 
-# WO-95@v1: re-check every artifact from a fresh extract before anything is published.
+# WO-95@v2: re-check every artifact from a fresh extract before anything is published.
 verify() {
   local v="$W/verify"; rm -rf "$v"; mkdir -p "$v"
   for t in "${TRIPLES[@]}"; do
@@ -312,7 +312,7 @@ verify() {
   echo "==> all artifacts verified; upload set:"; ls -1 "$W/out"
 }
 
-# WO-95@v1: replace the CI darwin assets and add the pkgs on the tagged release.
+# WO-95@v2: replace the CI darwin assets and add the pkgs on the tagged release.
 # WO-140@v1: validate identity from a fresh extract of the archive sent to GitHub.
 upload() {
   # WO-140@v1: the shared upload point fails before gh sees any unsealed asset.

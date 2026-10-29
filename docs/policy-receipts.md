@@ -23,6 +23,12 @@
 - **CLI**: `bulwark run --profile <name> | --policy <file>`; `bulwark allow
   <glob>` / `bulwark deny <glob>` mutate the policy; `bulwark audit <receipts>`
   renders the log; `bulwark check <path>` reports the policy decision.
+<!-- WO-240@v1: document the one additive receipt field shadow mode writes. -->
+- **`bulwark watch`** (Linux) writes the same receipts with `"source":"watch"` and every
+  decision `allow`. An open the selected policy would deny under `run` adds
+  `"would_deny":true`; the field is absent on every other receipt. `bulwark report
+  <receipts>` summarises any receipts file (opens, distinct files, would-deny paths,
+  credential-store paths, most opened files, suggested `--protect` set).
 
 ## Live demo
 
@@ -82,15 +88,43 @@ for an absolute path. Bulwark stats only the expanded protect paths: it never
 reads a directory listing *inside* a home, so it does not deliberately trigger
 an automount.
 
+## How `check` decides a protected path
+
+<!-- WO-198@v1: check runs the decision-rule contract the gates are moving onto. -->
+`bulwark check` decides protection with the same rule contract the gates are
+moving onto. Each protect entry protects both the file or directory that exists
+when the policy is read (it follows that object through renames) and the
+**location** it names (whatever sits there later: a replaced file, a file
+created afterwards, a file renamed into it). An entry that does not exist yet
+is protected from its nearest existing parent, so it is covered the moment it
+appears, including everything below it if it appears as a directory.
+
+- Name matching in protect entries ignores ASCII case (`**/.env` also covers
+  `.ENV`); a pattern that matches a directory name (`~/.*`) covers that name,
+  not the directory's contents, unless the entry ends in `/**`.
+- Entries must be absolute, start with `~/` or start with `**/`. A component may
+  hold at most two `*`; an entry at most two wildcard components, two `**`
+  components and 16
+  components below its anchor; `{a,b}` alternatives are allowed. An entry
+  outside these limits, a bare relative entry, `..`, or a non-ASCII name in a
+  protect entry is refused by name and nothing is checked.
+- A protected file entry stays protected through a hard link made elsewhere:
+  the link reaches the same inode. For a directory entry, `check` does not yet
+  report a hard link made outside the directory to a file inside it as
+  protected (WO-254).
+- `check` resolves symlinks and relative paths first, like a real open, and reports the entry that
+  decided and its precedence step, for example
+  `rule: **/.env (step 3)` (`"rule"` and `"step"` in `--format json`).
+
 ## MVP semantics (operator-narrowed)
 
 `default.outside_workspace=prompt` and `default.on_timeout=deny` are stored
 canonically, but the Linux MVP has no interactive prompt (deferred to WO-8), so
 a `prompt` outcome resolves to **deny** (fail-safe) at the gate and `check`
-states this explicitly. Concrete protected paths resolve to inodes at launch as
-before; decision-time matching of wildcard protected patterns (`**/*secret*`) in
-the running gate is a thin follow-up — the matcher and `decide()` logic are
-implemented and unit-tested here, surfaced via `bulwark check`.
+states this explicitly. The running gate still resolves concrete protected
+paths to inodes at launch and does not yet match wildcard entries at decision
+time; moving the Linux and macOS gates onto the rule contract that `check`
+uses is the next step.
 
 ## Acceptance mapping
 

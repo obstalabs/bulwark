@@ -6,7 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-27
+
 ### Security
+<!-- WO-187@v1: agent memory pressure must not select the fanotify gate. -->
+- Linux fanotify runs make the supervised tree one OOM group and lower the gate and
+  crash watcher's OOM score while restoring the agent's default score; a missing
+  cgroup memory controller warns without removing the score protection, while failure
+  to lower the gate's score refuses the run before the agent starts.
 <!-- WO-140@v1: release and CI gates bind macOS seal evidence to exact artifacts. -->
 - macOS hardware-seal receipts identify the tested binary, source commit and signed
   gate; release upload checks the extracted arm64 archive and gate identity, and CI
@@ -16,13 +23,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arm64 tarball and installer payload match the hardware-seal receipts.
 
 ### Added
-<!-- WO-95@v1: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
+<!-- WO-240@v1: an on-ramp that cannot break the agent and shows what it reads. -->
+- `bulwark watch -- <cmd>` (Linux): shadow mode that enforces nothing. Every open by the
+  supervised tree is allowed and recorded, opens the selected policy would deny carry
+  `"would_deny":true`, and a report at exit lists opens, credential-store paths, the most
+  opened files and a suggested `--protect` set, shell-quoted so each path pastes as one
+  argument; when the gate dropped receipts it says the suggestion may be incomplete.
+  Receipts default to the root-owned
+  `/var/lib/bulwark/watch/`, and a `--receipts` file must sit in a directory that is also
+  root-owned and not group- or other-writable; only would-deny opens are echoed to
+  stderr. `bulwark report
+  <receipts>` prints the same report from any receipts file. macOS refuses `watch` for now.
+<!-- WO-95@v2: CI does not sign macOS; the manual packaging steps lived only in session notes. -->
 - `macos-es-proof/package-release.sh`: the macOS release packaging steps for maintainers
   (bundle the signed gate app into the darwin tarballs, re-run both hardware seals on the
   exact pair that ships, build signed + notarized + stapled `.pkg` files, verify, upload),
   until CI signs macOS releases.
 
 ### Fixed
+<!-- WO-188@v1: rejected fanotify responses must not leave permission events held. -->
+- Fanotify response writes retry once as deny, and a persistent rejection tears
+  down the supervised tree instead of leaving an opener blocked; the held open stays
+  denied through teardown, including when the consent worker hits the failure.
 <!-- WO-179@v1: preserve the single-use scope of remote allow-once verdicts. -->
 - Remote `allow-once` verdicts authorize exactly one matching open instead of the
   rest of the session; `allow-session` remains reusable and is shared by processes
@@ -59,10 +81,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enumerator documents its non-Linux fallback.
 
 ### Changed
+<!-- WO-191@v1: tests pin the shared 90-second off-band consent default. -->
+- The default operator consent timeout is 90 seconds for both `run` and `launch`.
+<!-- WO-195@v2: CI must execute the privileged remote lane safety proofs. -->
+- CI runs the remote lane safety root integration suite.
+<!-- WO-198@v1: check decides through the rule contract the gates are moving onto. -->
+- `bulwark check` decides protection by location as well as by object: a replaced
+  file, a file created later at a protected path, and case variants of protected
+  names are reported protected, together with the entry and precedence step that
+  decided; a relative path is resolved from the working directory, and symlinks in
+  both the queried path and the protect entry are resolved first. Out-of-limit, bare
+  relative, `..` and non-ASCII protect entries are refused by name. The starter profile's
+  file carve-outs are written `**/package.json`,
+  `**/go.mod` and `**/Cargo.toml`.
 <!-- WO-190@v1: public copy promised a paid tier that is not planned. -->
 <!-- WO-193@v1: the site no longer offers an assessment, so the README does not either. -->
 - README leads with why an independent layer matters and drops the Pro / Fleet tier,
-  its roadmap items and any paid offer.
+  its roadmap items and any paid offer; the roadmap lists a Linux BPF LSM enforcement
+  core as research.
 <!-- WO-177@v1: pid-based supervisor tests must wait for complete writer output. -->
 - Supervisor reaping tests read newline-terminated pid records with a bounded deadline.
 <!-- WO-182@v1: the verdict delivery test must not lose a line written just before the writer exits. -->
@@ -78,7 +114,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-173@v2: per-item platform gates expose unrelated dead code on non-Linux builds. -->
 - Non-Linux builds scope dead-code allowances to the specific Linux-only items that need them;
   the crate comment names that per-item gate.
-<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1: source citations identify the current intent behind each attributed region. -->
+<!-- WO-123@v1 / WO-124@v1 / WO-125@v1 / WO-126@v1 / WO-161@v1 / WO-162@v1 / WO-163@v2 / WO-164@v2 / WO-166@v1 / WO-167@v1 / WO-168@v1 / WO-169@v1 / WO-170@v1 / WO-171@v1 / WO-198@v1: source citations identify the current intent behind each attributed region. -->
 - Source comments cite the work order behind each function and test, so every change traces to its stated intent.
   Code that shipped without a recorded work order was given a retroactive one that records its
   behaviour, instead of a guessed id.

@@ -30,6 +30,8 @@ mod hivebus_keys;
 mod integrity;
 // WO-5@v1: expose policy loading and decisions to the CLI.
 mod policy;
+// WO-198@v1: the shared decision-time rule contract.
+mod rules;
 // WO-3@v1: expose Linux process ancestry for gate attribution.
 mod proctree;
 // WO-3@v1: expose inode-based protected object resolution.
@@ -102,6 +104,9 @@ const POLICY_FILE: &str = "Bulwark.toml";
 /// case-sensitive filesystems (Linux); on case-insensitive ones either resolves
 /// to the same file anyway.
 const POLICY_FILE_CANDIDATES: &[&str] = &["Bulwark.toml", "bulwark.toml"];
+
+// WO-191@v1: leave enough time for a person to answer over the off-band channel.
+const DEFAULT_CONSENT_TIMEOUT_SECS: u64 = 90;
 
 /// WO-24: environment variable that points at the signed macOS ES edge binary.
 // WO-163@v2: doctor honours the same override the gate does, before auto-discovery.
@@ -250,9 +255,14 @@ enum Cmd {
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 
+        // WO-191@v1: use the shared human-scale timeout for direct runs.
         /// Seconds to wait for an operator decision before denying (kernel
-        /// deadline safe; default 30).
-        #[arg(long = "consent-timeout", value_name = "SECS", default_value = "30")]
+        /// deadline safe; default 90).
+        #[arg(
+            long = "consent-timeout",
+            value_name = "SECS",
+            default_value_t = DEFAULT_CONSENT_TIMEOUT_SECS
+        )]
         consent_timeout: u64,
 
         /// (`--consent remote`) Host label shown in prompts, so a local operator
@@ -335,6 +345,65 @@ enum Cmd {
         command: Vec<String>,
     },
 
+    // WO-240@v1: an on-ramp that cannot break the agent and shows what it reads.
+    /// Shadow mode: run a command under the gate with NOTHING enforced. Every
+    /// open by the supervised tree is allowed and recorded; opens the same
+    /// policy would deny under `run` are flagged `would_deny`. Prints a report
+    /// at exit. Needs the same privilege as `run` (root). Linux only for now.
+    Watch {
+        /// Flag opens of this path as would-deny (same selection as `run`).
+        /// Repeatable. Without it, the policy/profile selection of `run` applies.
+        #[arg(long = "protect", value_name = "PATH")]
+        protect: Vec<PathBuf>,
+
+        /// Use a named built-in profile (`default`, `dev`).
+        #[arg(long = "profile", value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Load policy from a Bulwark.toml file.
+        #[arg(long = "policy", value_name = "FILE")]
+        policy: Option<PathBuf>,
+
+        /// Write receipts here instead of the default root-owned directory
+        /// (`/var/lib/bulwark/watch/`). The file's directory must also be
+        /// root-owned and not writable by group or others.
+        #[arg(long = "receipts", value_name = "FILE")]
+        receipts: Option<PathBuf>,
+
+        /// Report format printed at exit: `human` or `json`.
+        #[arg(long = "format", value_name = "FMT", default_value = "human")]
+        format: OutputFormat,
+
+        /// Drop the watched agent to this uid (see `run --worker-uid`).
+        #[arg(long = "worker-uid", value_name = "UID")]
+        worker_uid: Option<u32>,
+
+        /// Primary gid for `--worker-uid` (defaults to the uid).
+        #[arg(long = "worker-gid", value_name = "GID")]
+        worker_gid: Option<u32>,
+
+        /// Keep the watched agent at uid 0 (see `run --allow-root`).
+        #[arg(long = "allow-root")]
+        allow_root: bool,
+
+        /// Command (and arguments) to run, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+
+    // WO-240@v1: the shadow-mode report, reproducible from any receipts file.
+    /// Summarise a receipts file: total opens, distinct files, would-deny
+    /// opens, opens under credential stores, top paths, and a suggested
+    /// `--protect` list.
+    Report {
+        /// Receipts file to read (JSON lines).
+        #[arg(value_name = "FILE")]
+        receipts: PathBuf,
+        /// Output format: `human` or `json`.
+        #[arg(long = "format", value_name = "FMT", default_value = "human")]
+        format: OutputFormat,
+    },
+
     /// Launch a named agent from Bulwark.toml. Refuses to guess policy: no
     /// config and unknown agents fail closed with an explicit init hint.
     Launch {
@@ -360,8 +429,13 @@ enum Cmd {
         #[arg(long = "consent-socket", value_name = "FILE")]
         consent_socket: Option<PathBuf>,
 
-        /// Seconds to wait for an operator decision before denying.
-        #[arg(long = "consent-timeout", value_name = "SECS", default_value = "30")]
+        // WO-191@v1: keep launch on the same timeout as a direct run.
+        /// Seconds to wait for an operator decision before denying (default 90).
+        #[arg(
+            long = "consent-timeout",
+            value_name = "SECS",
+            default_value_t = DEFAULT_CONSENT_TIMEOUT_SECS
+        )]
         consent_timeout: u64,
 
         /// Path to the integrity state file. Hidden — primarily for tests.
@@ -663,8 +737,61 @@ fn main() -> Result<()> {
                 allow_root,
                 state: state.as_deref(),
                 command: &command,
+                watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
+                watch_json: false,
             })?;
             exit(code);
+        }
+        // WO-240@v1: shadow mode shares run's policy, privilege drop and reaping.
+        Cmd::Watch {
+            protect,
+            profile,
+            policy,
+            receipts,
+            format,
+            worker_uid,
+            worker_gid,
+            allow_root,
+            command,
+        } => {
+            let code = cmd_run(RunArgs {
+                protect: &protect,
+                launch_protect: &[],
+                profile: profile.as_deref(),
+                policy_path: policy.as_deref(),
+                policy_input: match run_policy_source(
+                    &protect,
+                    profile.as_deref(),
+                    policy.as_deref(),
+                )? {
+                    Some(source) => PolicyInput::Resolve(source),
+                    None => PolicyInput::None,
+                },
+                receipts: receipts.as_deref(),
+                consent: ConsentMode::Static,
+                consent_socket: None,
+                consent_timeout: DEFAULT_CONSENT_TIMEOUT_SECS,
+                host_label: String::new(),
+                prompt_out: None,
+                verdict_in: None,
+                deny_all: false,
+                allow: &[],
+                no_base_set: false,
+                hardened: false,
+                worker_uid,
+                worker_gid,
+                allow_root,
+                state: None,
+                command: &command,
+                watch: true,
+                watch_json: matches!(format, OutputFormat::Json),
+            })?;
+            exit(code);
+        }
+        // WO-240@v1: the same report `watch` prints, from any receipts file.
+        Cmd::Report { receipts, format } => {
+            audit::report(&receipts, matches!(format, OutputFormat::Json))?;
+            Ok(())
         }
         Cmd::Reset { state } => cmd_reset(state.as_deref()),
         Cmd::Launch {
@@ -2218,6 +2345,11 @@ struct RunArgs<'a> {
     allow_root: bool,
     state: Option<&'a Path>,
     command: &'a [String],
+    // WO-240@v1: shadow mode reuses run's policy resolution but enforces nothing.
+    /// `bulwark watch`: allow every open, flag would-deny, print a report at exit.
+    watch: bool,
+    /// Report format for `watch` (`json` when true).
+    watch_json: bool,
 }
 
 /// WO-27: owned launch plan derived from [agents.<name>] and then passed into
@@ -2327,6 +2459,8 @@ fn cmd_launch(
         allow_root: false,
         state,
         command: &plan.command,
+        watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
+        watch_json: false,
     })
 }
 
@@ -2731,7 +2865,14 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             .prompt
             .iter()
             .any(|e| e == "~" || e.starts_with("~/"));
-        if has_tilde {
+        // WO-240@v1: watch enforces nothing, so its line must not claim protection.
+        if has_tilde && args.watch {
+            eprintln!(
+                "[bulwark] watching: `~/` entries are flagged would_deny under every home \
+                 directory on this host ({} home(s))",
+                homes.len()
+            );
+        } else if has_tilde {
             eprintln!(
                 "[bulwark] protecting: `~/` entries are protected under every home directory \
                  on this host ({} home(s))",
@@ -2827,6 +2968,19 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         (resolved.set, marks)
     };
 
+    // WO-240@v1: watch has the same protect set and privilege drop as run, but it
+    // enforces nothing, so it neither consults nor records integrity state.
+    if args.watch {
+        let _ = mark_paths;
+        return cmd_watch(
+            &protected,
+            args.receipts,
+            args.command,
+            worker,
+            args.watch_json,
+        );
+    }
+
     // Integrity circuit-breaker (WO-13): evaluate whether this run is tainted by
     // an unclean prior restart or object-identity drift, record this run's
     // context, and (if tainted) bypass the allow-session cache so every protected
@@ -2860,6 +3014,7 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             ancestry: "",
             reason: &format!("integrity tainted: {desc}"),
             source: "integrity",
+            would_deny: false, // WO-240@v1: only watch receipts carry the flag.
         });
     }
     let tainted = verdict.is_tainted();
@@ -2948,6 +3103,110 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         eprintln!("[bulwark] warn: could not record clean shutdown: {e}");
     }
     code
+}
+
+// WO-240@v1: study evidence lives where the watched (non-root) uid cannot edit it.
+/// Root-owned directory for `bulwark watch` receipts when `--receipts` is not given.
+#[cfg(target_os = "linux")]
+const WATCH_RECEIPTS_DIR: &str = "/var/lib/bulwark/watch";
+
+// WO-240@v1: refuse a receipts directory the watched agent could write: write
+// access to the directory is enough to unlink the root-owned receipts file, and
+// the report would then have no evidence to read.
+/// Require `dir` to be a real (non-symlink) root-owned directory that group and
+/// others cannot write.
+#[cfg(target_os = "linux")]
+fn check_watch_receipts_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(dir)
+        .with_context(|| format!("cannot stat {}; nothing was run", dir.display()))?;
+    if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+        anyhow::bail!(
+            "{} must be a root-owned directory not writable by group or others; nothing was run",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+// WO-240@v1: the default receipts directory passes the same check as a supplied one.
+/// Default receipts path for `watch`: a fresh file in [`WATCH_RECEIPTS_DIR`],
+/// which must be a root-owned directory writable by nobody else.
+#[cfg(target_os = "linux")]
+fn default_watch_receipts() -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Path::new(WATCH_RECEIPTS_DIR);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir)
+        .with_context(|| format!("cannot create {}; nothing was run", dir.display()))?;
+    check_watch_receipts_dir(dir)?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Ok(dir.join(format!("watch-{ms}-{}.jsonl", std::process::id())))
+}
+
+// WO-240@v1: run the tree under the record-only gate, then print the report.
+/// `bulwark watch`: every open by the tree is allowed and recorded on every real
+/// mount; protected inodes are flagged `would_deny`. The report goes to stdout
+/// after the agent exits; the agent's exit code is returned unchanged.
+#[cfg(target_os = "linux")]
+fn cmd_watch(
+    protected: &ProtectedSet,
+    receipts: Option<&Path>,
+    command: &[String],
+    worker: Option<gate::WorkerCreds>,
+    json: bool,
+) -> Result<i32> {
+    // WO-240@v1: a supplied --receipts path gets the default directory's check on
+    // its parent, so the watched uid cannot delete the evidence before the report.
+    let path = match receipts {
+        Some(p) => {
+            let parent = match p.parent() {
+                Some(d) if !d.as_os_str().is_empty() => d,
+                _ => Path::new("."),
+            };
+            check_watch_receipts_dir(parent)?;
+            p.to_path_buf()
+        }
+        None => default_watch_receipts()?,
+    };
+    eprintln!(
+        "[bulwark] watch: RECORDING ONLY — NOTHING ENFORCED. Needs the same privilege as \
+         `run`; every open by the tree is allowed and recorded to {}",
+        path.display()
+    );
+    let marks = real_mount_points();
+    let out = gate::run(
+        GateMode::Watch { protected },
+        None,
+        Duration::from_secs(DEFAULT_CONSENT_TIMEOUT_SECS),
+        &marks,
+        Some(&path),
+        command,
+        worker,
+    )?;
+    eprintln!("[bulwark] watch report from {}:", path.display());
+    audit::report(&path, json)?;
+    Ok(out.exit_code)
+}
+
+// WO-240@v1: macOS needs an Endpoint Security edge change first; refuse before any spawn.
+#[cfg(not(target_os = "linux"))]
+fn cmd_watch(
+    _protected: &ProtectedSet,
+    _receipts: Option<&Path>,
+    _command: &[String],
+    _worker: Option<gate::WorkerCreds>,
+    _json: bool,
+) -> Result<i32> {
+    anyhow::bail!(
+        "bulwark watch is Linux-only for now: macOS needs an Endpoint Security edge \
+         change that is not built yet; nothing was run"
+    )
 }
 
 // WO-13@v1: record protected object identities for persistent integrity checks.
@@ -3274,7 +3533,9 @@ fn cmd_check(
              grants nothing; pass an absolute --allow path instead"
         );
     }
-    let decision = policy.decide(path, &homes);
+    // WO-198@v1: decide through the shared rule contract the gates will use.
+    let checked = policy.decide_rules(path, &homes)?;
+    let decision = checked.decision;
     // `decided` is a stable machine token; `label`/`effect` are human strings.
     let (decided, label, effect) = match decision {
         PolicyDecision::AllowWorkspace => ("allow_workspace", "allow (workspace)", "read allowed"),
@@ -3291,15 +3552,24 @@ fn cmd_check(
     };
     match format {
         OutputFormat::Json => {
+            let rule = checked
+                .rule
+                .as_deref()
+                .map(|r| format!(r#","rule":"{}","step":{}"#, json_escape(r), checked.step))
+                .unwrap_or_default();
             println!(
-                r#"{{"path":"{}","decision":"{}","effect":"{}"}}"#,
+                r#"{{"path":"{}","decision":"{}","effect":"{}"{}}}"#,
                 json_escape(path),
                 decided,
-                effect
+                effect,
+                rule
             );
         }
         OutputFormat::Human => {
             println!("{path}\n  policy:     {label}\n  effect:     {effect}");
+            if let Some(rule) = &checked.rule {
+                println!("  rule:       {rule} (step {})", checked.step);
+            }
         }
     }
     Ok(())
@@ -4164,6 +4434,73 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
         assert_eq!(state, Some(PathBuf::from("/tmp/isolated state.toml")));
     }
 
+    // WO-191@v1: keep run and launch on the same operator consent window.
+    #[test]
+    fn run_and_launch_share_the_consent_timeout_default() {
+        // WO-191@v1: pin the human-scale default independently of the parser's constant.
+        assert_eq!(DEFAULT_CONSENT_TIMEOUT_SECS, 90);
+        let run = Cli::try_parse_from(["bulwark", "run", "--", "true"]).unwrap();
+        let Cmd::Run {
+            consent_timeout, ..
+        } = run.cmd
+        else {
+            panic!("expected run command");
+        };
+        // WO-191@v1: a changed shared constant must not silently change direct runs.
+        assert_eq!(consent_timeout, 90);
+
+        let launch = Cli::try_parse_from(["bulwark", "launch", "agent"]).unwrap();
+        let Cmd::Launch {
+            consent_timeout, ..
+        } = launch.cmd
+        else {
+            panic!("expected launch command");
+        };
+        // WO-191@v1: profile launches must retain the same explicit 90-second window.
+        assert_eq!(consent_timeout, 90);
+    }
+
+    // WO-240@v1: watch takes run's selection flags and a report format; report reads a file.
+    #[test]
+    fn watch_and_report_parse() {
+        let w = Cli::try_parse_from([
+            "bulwark",
+            "watch",
+            "--protect",
+            "/x",
+            "--format",
+            "json",
+            "--",
+            "sh",
+            "-c",
+            "true",
+        ])
+        .unwrap();
+        let Cmd::Watch {
+            protect,
+            format,
+            receipts,
+            command,
+            ..
+        } = w.cmd
+        else {
+            panic!("expected watch command");
+        };
+        assert_eq!(protect, vec![PathBuf::from("/x")]);
+        assert!(matches!(format, OutputFormat::Json));
+        assert_eq!(receipts, None);
+        assert_eq!(command, vec!["sh", "-c", "true"]);
+        // A command is mandatory: watch never starts a gate around nothing.
+        assert!(Cli::try_parse_from(["bulwark", "watch"]).is_err());
+
+        let r = Cli::try_parse_from(["bulwark", "report", "/r.jsonl"]).unwrap();
+        let Cmd::Report { receipts, format } = r.cmd else {
+            panic!("expected report command");
+        };
+        assert_eq!(receipts, PathBuf::from("/r.jsonl"));
+        assert!(matches!(format, OutputFormat::Human));
+    }
+
     // WO-149@v1: forward the isolated path to every remote run mode with shell quoting.
     #[test]
     fn ssh_state_is_shell_quoted_in_remote_run_scripts() {
@@ -4489,7 +4826,8 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         let plan = resolve_launch_plan("claude", &policy).unwrap();
         assert_eq!(plan.command, vec!["claude".to_string()]);
         assert!(plan.protect.iter().any(|p| p == Path::new("~/.ssh")));
-        assert!(plan.allow.iter().any(|p| p == "Cargo.toml"));
+        // WO-198@v1: starter carve-outs name a location (`**/`), not a bare file name.
+        assert!(plan.allow.iter().any(|p| p == "**/Cargo.toml"));
         assert!(plan.audit);
         assert!(!plan.deny_all);
         if cfg!(any(target_os = "linux", target_os = "macos")) {

@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::glob;
+use crate::rules;
 
 // WO-5@v1: represent the default decision outside configured workspace grants.
 /// What to do for an open that is neither explicitly allowed nor protected.
@@ -136,11 +137,13 @@ impl AgentProfile {
                 "**/.env".into(),
                 "~/dev/**/secrets/**".into(),
             ],
+            // WO-198@v1: carve-outs must be absolute, `~/` or `**/`; a bare name has
+            // no defined location, so the starter matches these names at any depth.
             allow: vec![
                 "~/dev/**/README*".into(),
-                "package.json".into(),
-                "go.mod".into(),
-                "Cargo.toml".into(),
+                "**/package.json".into(),
+                "**/go.mod".into(),
+                "**/Cargo.toml".into(),
             ],
             decision: AgentDecision::Ask,
             audit: true,
@@ -297,12 +300,16 @@ impl Policy {
         true
     }
 
+    /// Superseded by [`Self::decide_rules`] (WO-198), which `check` uses; kept
+    /// until the live gate moves onto the shared rule contract.
+    ///
     /// Decide what the policy says about `path`. WO-145@v2: a `~/` entry is
     /// matched under every home in `homes` (the same rule `run` applies), so
     /// `check` and the live gate agree. Protected takes precedence over
     /// workspace-allow: a protected file inside an allowed workspace is still
     /// protected.
     // WO-145@v2: evaluate protected entries against the same host-home set as run.
+    #[allow(dead_code)]
     pub fn decide(&self, path: &str, homes: &[String]) -> PolicyDecision {
         // WO-145@v2: protected entries expand through run's own
         // expand_protect_entry — same home set, same cap, same relative-refusal —
@@ -327,6 +334,68 @@ impl Policy {
             return PolicyDecision::AllowWorkspace;
         }
         PolicyDecision::Outside(self.default.outside_workspace)
+    }
+
+    // WO-198@v1: protected entries become rule specs through the same home
+    // expansion `run` uses, one rule id per written entry.
+    /// The protected entries as rule specs, each `~/` entry expanded over `homes`.
+    pub fn protect_specs(&self, homes: &[String]) -> Result<Vec<rules::Spec>> {
+        let mut specs = Vec::new();
+        for (i, entry) in self.protected.prompt.iter().enumerate() {
+            let id = u16::try_from(i).context("too many protected entries")?;
+            for pattern in expand_protect_entry(entry, homes)? {
+                specs.push(rules::Spec {
+                    id,
+                    kind: rules::Kind::Protect,
+                    source: entry.clone(),
+                    pattern: canonical_prefix(&pattern),
+                });
+            }
+        }
+        Ok(specs)
+    }
+
+    // WO-198@v1: `check` decides through the shared rule contract, so a path it calls
+    // protected is decided by the same ladder the gates will run.
+    /// Decide `path` with the shared rule contract. Out-of-grammar protect entries
+    /// are an error naming the entry. Paths the rules do not protect fall through to
+    /// the workspace allow list and the outside-workspace default, as before.
+    pub fn decide_rules(&self, path: &str, homes: &[String]) -> Result<RuleCheck> {
+        let compiled = rules::compile(&self.protect_specs(homes)?, &FsResolver)?;
+        // WO-198@v1: a relative query resolves from the working directory, as an open would.
+        let absolute = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            std::env::current_dir()
+                .context("cannot resolve a relative path without a working directory")?
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let path = absolute.as_str();
+        let d = rules::decide(&fs_chain(path), &compiled);
+        let rule = d
+            .rule
+            .and_then(|id| compiled.sources.get(id as usize).cloned());
+        let decision = match d.verdict {
+            rules::Verdict::Protected => PolicyDecision::Protected,
+            rules::Verdict::Allowed => PolicyDecision::AllowWorkspace,
+            rules::Verdict::NotProtected => {
+                let allow_hit = |pat: &String| {
+                    !(pat == "~" || pat.starts_with("~/")) && glob::matches(pat, path)
+                };
+                if self.workspace.allow.iter().any(allow_hit) {
+                    PolicyDecision::AllowWorkspace
+                } else {
+                    PolicyDecision::Outside(self.default.outside_workspace)
+                }
+            }
+        };
+        Ok(RuleCheck {
+            decision,
+            step: d.step,
+            rule,
+        })
     }
 
     /// Resolve every concrete (wildcard-free) protected pattern to absolute
@@ -367,6 +436,124 @@ impl Policy {
         }
         Ok(out)
     }
+}
+
+/// WO-198@v1: a `check` result: the policy decision plus the ladder step and the
+/// entry that decided it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleCheck {
+    pub decision: PolicyDecision,
+    pub step: u8,
+    pub rule: Option<String>,
+}
+
+// WO-198@v1: resolve symlinks in the longest existing wildcard-free prefix of an
+// absolute entry, so its location is spelled the way the kernel reports opens
+// (macOS `/tmp`, `/etc` and `/var` are symlinks). `**` entries are unchanged.
+fn canonical_prefix(pattern: &str) -> String {
+    if !pattern.starts_with('/') {
+        return pattern.to_string();
+    }
+    let parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+    // WO-198@v1: resolving a prefix would erase a `..` the grammar must refuse by name;
+    // leave such an entry as written so the compiler sees it.
+    if parts.contains(&"..") {
+        return pattern.to_string();
+    }
+    let concrete = parts
+        .iter()
+        .position(|p| p.contains('*') || p.contains('?') || p.contains('{'))
+        .unwrap_or(parts.len());
+    for j in (1..=concrete).rev() {
+        let head = format!("/{}", parts[..j].join("/"));
+        if let Ok(canon) = fs::canonicalize(&head) {
+            let mut out = canon.to_string_lossy().into_owned();
+            for p in &parts[j..] {
+                out.push('/');
+                out.push_str(p);
+            }
+            if pattern.ends_with('/') && !out.ends_with('/') {
+                out.push('/');
+            }
+            return out;
+        }
+    }
+    pattern.to_string()
+}
+
+// WO-198@v1: the inode key `stat` reports, in the rule contract's form.
+fn key_of(m: &fs::Metadata) -> rules::Key {
+    use std::os::unix::fs::MetadataExt;
+    rules::Key {
+        dev: m.dev(),
+        ino: m.ino(),
+    }
+}
+
+// WO-198@v1: join contract components back into an absolute path.
+fn comps_path(comps: &[Vec<u8>]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let mut p = std::path::PathBuf::from("/");
+    for c in comps {
+        p.push(std::ffi::OsStr::from_bytes(c));
+    }
+    p
+}
+
+/// WO-198@v1: launch-time resolution against the live filesystem (follows
+/// symlinks like `stat`; an unreadable path is Unknown, not absent).
+pub struct FsResolver;
+
+// WO-198@v1: `check` resolves rule anchors against the live filesystem.
+impl rules::Resolver for FsResolver {
+    // WO-198@v1: classify a launch path for object and anchor rules.
+    fn lookup(&self, comps: &[Vec<u8>]) -> rules::Lookup {
+        match fs::metadata(comps_path(comps)) {
+            Ok(m) if m.is_dir() => rules::Lookup::Dir(key_of(&m)),
+            Ok(m) => rules::Lookup::File(key_of(&m)),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                rules::Lookup::Absent
+            }
+            Err(_) => rules::Lookup::Unknown,
+        }
+    }
+}
+
+// WO-198@v1: build the ancestor chain `check` evaluates. The longest existing
+// prefix is canonicalized (the kernel resolves symlinks before an open), each of its
+// components keyed by lstat; the absent tail keeps its names without keys.
+pub fn fs_chain(path: &str) -> rules::Chain {
+    let comps = rules::split_path(path);
+    for j in (0..=comps.len()).rev() {
+        let Ok(canon) = fs::canonicalize(comps_path(&comps[..j])) else {
+            continue;
+        };
+        let canon_comps = rules::split_path(&canon.to_string_lossy());
+        let mut chain = rules::Chain {
+            root: fs::metadata("/").ok().map(|m| key_of(&m)),
+            comps: Vec::new(),
+        };
+        for i in 0..canon_comps.len() {
+            let key = fs::symlink_metadata(comps_path(&canon_comps[..=i]))
+                .ok()
+                .map(|m| key_of(&m));
+            chain.comps.push(rules::Component {
+                name: canon_comps[i].clone(),
+                key,
+            });
+        }
+        for name in &comps[j..] {
+            chain.comps.push(rules::Component {
+                name: name.clone(),
+                key: None,
+            });
+        }
+        return chain;
+    }
+    rules::Chain::from_path_unkeyed(path)
 }
 
 /// WO-145@v2: true if `path` matches an already-expanded (or as-written)
@@ -520,7 +707,7 @@ mod tests {
         let claude = p.agents.get("claude").expect("claude starter agent");
         assert_eq!(claude.command, vec!["claude".to_string()]);
         assert!(claude.protect.iter().any(|s| s == "~/.ssh"));
-        assert!(claude.allow.iter().any(|s| s == "Cargo.toml"));
+        assert!(claude.allow.iter().any(|s| s == "**/Cargo.toml"));
         assert_eq!(claude.decision, AgentDecision::Ask);
         assert!(claude.audit);
     }
@@ -607,6 +794,65 @@ mod tests {
             PolicyDecision::Protected,
             "~/.ssh must cover /home/nullbot too"
         );
+    }
+
+    // WO-198@v1: every entry the shipped profiles carry compiles into the rule
+    // contract (protect lists and starter carve-outs alike).
+    #[test]
+    fn shipped_profiles_compile_into_rules() {
+        let homes = vec!["/home/u".to_string(), "/root".to_string()];
+        let p = Policy::default_profile();
+        let specs = p.protect_specs(&homes).unwrap();
+        rules::compile(&specs, &FsResolver).expect("default profile protect list compiles");
+        let starter = AgentProfile::starter(vec!["agent".into()]);
+        let mut specs = Vec::new();
+        for (i, e) in starter.protect.iter().enumerate() {
+            for pattern in expand_protect_entry(e, &homes).unwrap() {
+                specs.push(rules::Spec {
+                    id: i as u16,
+                    kind: rules::Kind::Protect,
+                    source: e.clone(),
+                    pattern,
+                });
+            }
+        }
+        let base = starter.protect.len();
+        for (i, e) in starter.allow.iter().enumerate() {
+            if e.starts_with("~/") {
+                continue; // WO-145@v2: a `~/` allow grants nothing and is not compiled.
+            }
+            specs.push(rules::Spec {
+                id: (base + i) as u16,
+                kind: rules::Kind::Allow,
+                source: e.clone(),
+                pattern: e.clone(),
+            });
+        }
+        rules::compile(&specs, &FsResolver).expect("starter profile compiles");
+    }
+
+    // WO-198@v1: check decides through the rules and names the deciding entry.
+    #[test]
+    fn decide_rules_reports_the_rule() {
+        let p = Policy::default_profile();
+        let homes = vec!["/nonexistent-home-198".to_string()];
+        let c = p
+            .decide_rules("/nonexistent-home-198/dev/x/.env", &homes)
+            .unwrap();
+        assert_eq!(c.decision, PolicyDecision::Protected);
+        assert_eq!(c.rule.as_deref(), Some("**/.env"));
+        assert_eq!(c.step, 3);
+        let c = p
+            .decide_rules("/nonexistent-home-198/.ssh/id_key", &homes)
+            .unwrap();
+        assert_eq!(c.decision, PolicyDecision::Protected);
+        assert_eq!(c.rule.as_deref(), Some("~/.ssh"));
+        let c = p.decide_rules("/var/log/syslog", &homes).unwrap();
+        assert_eq!(
+            c.decision,
+            PolicyDecision::Outside(OutsideWorkspace::Prompt)
+        );
+        assert_eq!(c.rule, None);
     }
 
     // WO-5@v1: prove adding an existing protected glob is idempotent.

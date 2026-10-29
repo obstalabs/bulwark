@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// WO-188@v1: a rejected response must tear down promptly instead of holding
+// the kernel permission event indefinitely.
+#[cfg(feature = "fault-injection")]
+const RESPONSE_FAILURE_EXIT_BOUND: Duration = Duration::from_secs(10);
+
 // WO-154@v1: run the real gate binary for permission-loop tests.
 // WO-155@v1: run the real supervisor for teardown and reaping tests.
 fn bin() -> PathBuf {
@@ -154,6 +159,304 @@ fn pending_consent_does_not_delay_outside_opens() {
 
     let _ = gate.kill();
     let _ = gate.wait();
+}
+
+/// WO-188@v1: two rejected fanotify response writes make the gate fatal; the
+/// real CLI must reap the supervised tree and exit within a fixed bound.
+#[test]
+#[cfg(feature = "fault-injection")]
+#[ignore = "requires Linux + root"]
+fn persistent_response_write_failure_tears_down_without_blocking() {
+    let state = isolated_state("persistent_response_write_failure");
+    let fs = common::TestFs::new("wo188");
+    let protected = fs.path("secret");
+    let stderr_path = fs.path("gate.stderr");
+    // WO-188@v1: a child EACCES alone does not prove fatal response handling.
+    let stdout_path = fs.path("agent.stdout");
+    fs::write(&protected, "secret\n").unwrap();
+
+    // WO-188@v1: cover both the inline responder and the deferred consent worker.
+    for deny_all in [true, false] {
+        let stderr = fs::File::create(&stderr_path).expect("create gate stderr");
+        let stdout = fs::File::create(&stdout_path).expect("create agent stdout");
+        let mut command = Command::new(bin());
+        command.args(["run", "--allow-root"]);
+        if deny_all {
+            command.arg("--deny-all");
+        } else {
+            command.arg("--protect").arg(&protected);
+        }
+        // WO-188@v1: inject only DENY failures so the agent can reach its protected read.
+        let gate = command
+            .arg("--state")
+            .arg(&state)
+            .arg("--")
+            .args(["sh", "-c", &format!("cat {}", protected.display())])
+            .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
+            .env("BULWARK_TEST_RESPONSE_DENY_ONLY", "1")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn gate");
+        let mut gate = common::HardKillScopeGuard::new(gate);
+
+        let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
+        let status = loop {
+            if let Some(status) = gate.try_wait().expect("try wait gate") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the gate held a rejected permission response past {RESPONSE_FAILURE_EXIT_BOUND:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        assert!(
+            !status.success(),
+            "a persistent response failure must be fatal"
+        );
+        let stderr = fs::read_to_string(&stderr_path).expect("read gate stderr");
+        assert!(
+            stderr.contains("persistent fanotify response failure"),
+            "the fatal response failure must be observable; stderr:\n{stderr}"
+        );
+        let stdout = fs::read_to_string(&stdout_path).expect("read agent stdout");
+        assert!(
+            // WO-188@v1: termination alone cannot hide bytes delivered before teardown.
+            !stdout.contains("secret"),
+            "protected content leaked: {stdout}"
+        );
+        // WO-188@v1: repeat the same outcome checks for both delivery paths.
+    }
+}
+
+// WO-188@v1: keep unrelated opens active across enough consent timeouts to exercise reuse.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+const RESPONSE_REUSE_TRIALS: usize = 30;
+
+// WO-188@v1: outside-open loops must be reaped even when a leak assertion fails.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+struct ResponseNoise(Vec<std::process::Child>);
+
+// WO-188@v1: each loop owns its process group, including an in-flight head child.
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+impl Drop for ResponseNoise {
+    // WO-188@v1: kill every noise loop's process group so no writer outlives the test.
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+    }
+}
+
+// WO-188@v1: a failed deferred DENY must never be answered by an outside ALLOW
+// that reuses its fd number while the kernel still holds the protected open.
+#[test]
+#[cfg(all(feature = "fault-injection", target_os = "linux"))]
+#[ignore = "requires Linux + root"]
+fn persistent_consent_response_failure_never_reuses_the_held_fd() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::process::CommandExt;
+
+    // WO-188@v1: /tmp may be tmpfs; the canary must share /etc/hostname's filesystem.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = PathBuf::from(format!(
+        "/var/tmp/bulwark-wo188-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let protected = dir.join("secret");
+    const CANARY: &str = "WO188_PROTECTED_CONTENT";
+    fs::write(&protected, CANARY).unwrap();
+    assert_eq!(
+        fs::metadata(&protected).unwrap().dev(),
+        fs::metadata("/etc/hostname").unwrap().dev(),
+        "the outside opens must exercise the marked filesystem"
+    );
+
+    // WO-188@v1: unrelated ALLOW traffic exposes reuse of a failed event's fd number.
+    let mut noise = ResponseNoise(Vec::new());
+    for _ in 0..4 {
+        noise.0.push(
+            Command::new("sh")
+                .args(["-c", "while :; do head -c 1 /etc/hostname >/dev/null; done"])
+                .process_group(0)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn outside opens"),
+        );
+    }
+
+    let mut leaks = Vec::new();
+    for trial in 0..RESPONSE_REUSE_TRIALS {
+        let stdout_path = dir.join(format!("agent-{trial}.stdout"));
+        let stderr_path = dir.join(format!("gate-{trial}.stderr"));
+        let gate = Command::new(bin())
+            .args([
+                "run",
+                "--allow-root",
+                "--consent",
+                "socket",
+                "--consent-timeout",
+                "2",
+            ])
+            .arg("--consent-socket")
+            .arg(dir.join(format!("c{trial}.sock")))
+            .arg("--protect")
+            .arg(&protected)
+            .arg("--state")
+            .arg(dir.join(format!("state-{trial}.toml")))
+            .args(["--", "sh", "-c"])
+            .arg(format!("cat {}; echo cat_rc=$?", protected.display()))
+            .env("BULWARK_TEST_RESPONSE_WRITE_FAILURES", "2")
+            .env("BULWARK_TEST_RESPONSE_DENY_ONLY", "1")
+            .stdout(fs::File::create(&stdout_path).unwrap())
+            .stderr(fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .expect("spawn gate");
+        let mut gate = common::HardKillScopeGuard::new(gate);
+        let deadline = Instant::now() + RESPONSE_FAILURE_EXIT_BOUND;
+        let status = loop {
+            if let Some(status) = gate.try_wait().expect("wait gate") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "trial {trial}: gate did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stderr = fs::read_to_string(&stderr_path).unwrap();
+        assert!(
+            !status.success()
+                && stderr.contains("persistent fanotify response failure in consent worker"),
+            "trial {trial}: the deferred failure path did not run: {status}; {stderr}"
+        );
+        let stdout = fs::read_to_string(&stdout_path).unwrap();
+        if stdout.contains(CANARY) {
+            leaks.push((trial, stdout));
+        }
+    }
+    drop(noise);
+    assert!(
+        // WO-188@v1: inspect every trial's real stdout, including reads before fatal exit.
+        leaks.is_empty(),
+        "protected content reached agent stdout in {}/{RESPONSE_REUSE_TRIALS} trials: {leaks:?}",
+        leaks.len()
+    );
+    // WO-188@v1: discard fixtures only after the gate and outside-open loops are gone.
+    fs::remove_dir_all(dir).expect("remove response test fixtures");
+}
+
+// WO-187@v1: the agent must lose the gate's OOM preference before dropping uid,
+// including the kernel minimum that would otherwise let it restore that preference.
+#[test]
+#[cfg(feature = "fault-injection")]
+#[ignore = "requires Linux + root"]
+fn agent_cannot_restore_the_gate_oom_score_after_the_uid_drop() {
+    const OBSERVATION_BOUND: Duration = Duration::from_secs(10);
+    const OBSERVATION_POLL: Duration = Duration::from_millis(20);
+    const WORKER_UID: u32 = 65534;
+    let fs = common::TestFs::new("wo187score");
+    let secret = fs.path("secret");
+    let output = fs.path("agent.stdout");
+    let errors = fs.path("gate.stderr");
+    let release = fs.path("release");
+    fs::write(&secret, "protected\n").unwrap();
+    let script = format!(
+        "printf 'AGENT_PID=%s\\n' \"$$\"; \
+         printf 'AGENT_UID=%s\\n' \"$(id -u)\"; \
+         printf 'INITIAL_SCORE=%s\\n' \"$(cat /proc/$$/oom_score_adj)\"; \
+         if (printf '%s\\n' -900 > /proc/$$/oom_score_adj) 2>/dev/null; \
+         then echo SCORE_LOWERED; else echo SCORE_REFUSED; fi; \
+         echo READY; while [ ! -e '{}' ]; do sleep 0.02; done; exit 7",
+        release.display()
+    );
+    let gate = Command::new(bin())
+        .args(["run", "--worker-uid", &WORKER_UID.to_string(), "--protect"])
+        .arg(&secret)
+        .arg("--state")
+        .arg(fs.path("state.toml"))
+        .args(["--", "sh", "-c", &script])
+        .stdout(fs::File::create(&output).unwrap())
+        .stderr(fs::File::create(&errors).unwrap())
+        .spawn()
+        .expect("spawn gate");
+    let mut gate = common::HardKillScopeGuard::new(gate);
+    let ready_deadline = Instant::now() + OBSERVATION_BOUND;
+    let stdout = loop {
+        let stdout = fs::read_to_string(&output).expect("read agent evidence");
+        if stdout.lines().any(|line| line == "READY") {
+            break stdout;
+        }
+        assert!(
+            gate.try_wait().unwrap().is_none() && Instant::now() < ready_deadline,
+            "agent did not reach the score probe: {stdout}; {}",
+            fs::read_to_string(&errors).unwrap()
+        );
+        std::thread::sleep(OBSERVATION_POLL);
+    };
+    let agent_pid = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("AGENT_PID="))
+        .expect("agent published its pid")
+        .parse::<i32>()
+        .expect("valid agent pid");
+    assert!(
+        stdout.lines().any(|line| line == "AGENT_UID=65534"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "INITIAL_SCORE=0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "SCORE_REFUSED")
+            && !stdout.lines().any(|line| line == "SCORE_LOWERED"),
+        "the dropped agent must not be able to lower its score: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(format!("/proc/{agent_pid}/oom_score_adj"))
+            .unwrap()
+            .trim(),
+        "0",
+        "the live agent must retain the default score after its attempt"
+    );
+    let gate_pid = gate.id() as i32;
+    assert_eq!(
+        fs::read_to_string(format!("/proc/{gate_pid}/oom_score_adj"))
+            .unwrap()
+            .trim(),
+        "-900",
+        "the gate must remain less attractive than the agent"
+    );
+    let watchers = watcher_pids_of(gate_pid);
+    assert_eq!(watchers.len(), 1, "the run must have its crash watcher");
+    for pid in watchers {
+        assert_eq!(
+            fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+                .unwrap()
+                .trim(),
+            "-900",
+            "the watcher must inherit the gate's OOM preference"
+        );
+    }
+    fs::write(release, "done\n").unwrap();
+    let exit_deadline = Instant::now() + OBSERVATION_BOUND;
+    loop {
+        if let Some(status) = gate.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(7), "agent must finish its real command");
+            break;
+        }
+        assert!(Instant::now() < exit_deadline, "gate did not finish");
+        std::thread::sleep(OBSERVATION_POLL);
+    }
 }
 
 /// WO-154@v1: the receipts FILE must never wait on stderr. Two bounded
@@ -2481,5 +2784,161 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
     assert!(
         so.contains("clean_shutdown = true") && !so.contains("taint"),
         "integrity state must be clean; got: {so}"
+    );
+}
+
+// WO-240@v1: shadow mode must never deny, and must still name the protected open.
+#[test]
+#[ignore = "requires Linux + root"]
+fn watch_allows_a_protected_read_and_flags_it_would_deny() {
+    let fs = common::TestFs::new("wo240w");
+    let protected = fs.path("guarded");
+    let other = fs.path("plain.txt");
+    // WO-240@v1: the tmpfs root is 1777, which watch refuses as a receipts parent.
+    let evidence = fs.path("evidence");
+    fs::create_dir(&evidence).unwrap();
+    fs::set_permissions(
+        &evidence,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let receipts = evidence.join("r.jsonl");
+    fs::write(&protected, "WO240_GUARDED\n").unwrap();
+    fs::write(&other, "WO240_PLAIN\n").unwrap();
+    // WO-240@v1: a policy `~/` entry prints the home-expansion line, which must not
+    // claim protection; a `--protect ~/…` flag is literal and would refuse the run.
+    let policy = evidence.join("Bulwark.toml");
+    fs::write(
+        &policy,
+        format!(
+            "[protected]\nprompt = [\"~/.bulwark-wo240-absent\", \"{}\"]\n",
+            protected.display()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args(["watch", "--allow-root", "--policy"])
+        .arg(&policy)
+        .arg("--receipts")
+        .arg(&receipts)
+        .args(["--format", "json", "--", "sh", "-c"])
+        .arg(format!("cat {} {}", protected.display(), other.display()))
+        .output()
+        .expect("spawn watch");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "watch must pass the agent's exit through; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("WO240_GUARDED") && stdout.contains("WO240_PLAIN"),
+        "watch must not deny any read; stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("RECORDING ONLY"),
+        "the banner must say nothing is enforced: {stderr}"
+    );
+    assert!(
+        stderr.contains("[bulwark] watching: `~/` entries are flagged would_deny")
+            && !stderr.contains("protecting:"),
+        "watch must not claim protection: {stderr}"
+    );
+    // WO-240@v1: ordinary allows go to the receipts file only, never the agent's terminal.
+    assert!(
+        !stderr.contains(&format!("path={} ", other.display())),
+        "an ordinary allow must not be echoed to stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("path={} ", protected.display())),
+        "a would-deny open must be echoed to stderr: {stderr}"
+    );
+
+    let raw = fs::read_to_string(&receipts).expect("read receipts");
+    let guarded = format!("\"path\":\"{}\"", protected.display());
+    let plain = format!("\"path\":\"{}\"", other.display());
+    assert!(
+        raw.lines().any(|l| l.contains(&guarded)
+            && l.contains("\"decision\":\"allow\"")
+            && l.contains("\"would_deny\":true")),
+        "the protected open must be allowed and flagged would_deny: {raw}"
+    );
+    assert!(
+        raw.lines().any(|l| l.contains(&plain)
+            && l.contains("\"decision\":\"allow\"")
+            && !l.contains("would_deny")),
+        "an unprotected open must be recorded without the flag: {raw}"
+    );
+    assert!(
+        !raw.contains("\"decision\":\"deny\""),
+        "watch denied an open: {raw}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "\"would_deny_paths\":[\"{}\"]",
+            protected.display()
+        )),
+        "the report must suggest exactly the protected path: {stdout}"
+    );
+}
+
+// WO-240@v1: a receipts directory the watched uid can write lets the agent unlink the
+// evidence before the report, so watch must refuse it before the agent starts.
+#[test]
+#[ignore = "requires Linux + root"]
+fn watch_refuses_a_receipts_dir_the_agent_could_empty() {
+    const WORKER_UID: u32 = 65534;
+    let fs = common::TestFs::new("wo240rm");
+    let protected = fs.path("guarded");
+    let marker = fs.path("agent-ran");
+    let agent_dir = fs.path("agent-owned");
+    fs::write(&protected, "WO240_GUARDED\n").unwrap();
+    fs::create_dir(&agent_dir).unwrap();
+    fs::set_permissions(
+        &agent_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let c = std::ffi::CString::new(agent_dir.to_str().unwrap()).unwrap();
+    let rc = unsafe { libc::chown(c.as_ptr(), WORKER_UID, WORKER_UID) };
+    assert_eq!(
+        rc, 0,
+        "chown the receipts dir to the worker failed (needs root)"
+    );
+    let receipts = agent_dir.join("r.jsonl");
+
+    let out = Command::new(bin())
+        .args([
+            "watch",
+            "--worker-uid",
+            &WORKER_UID.to_string(),
+            "--protect",
+        ])
+        .arg(&protected)
+        .arg("--receipts")
+        .arg(&receipts)
+        .args(["--", "sh", "-c"])
+        .arg(format!(
+            "touch {}; rm -f {}",
+            marker.display(),
+            receipts.display()
+        ))
+        .output()
+        .expect("spawn watch");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "watch must refuse an agent-writable receipts dir; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("must be a root-owned directory not writable by group or others")
+            && stderr.contains("nothing was run"),
+        "the refusal must name the rule: {stderr}"
+    );
+    assert!(!marker.exists(), "the agent ran despite the refusal");
+    assert!(
+        !receipts.exists(),
+        "receipts were written despite the refusal"
     );
 }

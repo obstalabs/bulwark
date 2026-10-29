@@ -53,6 +53,11 @@ pub struct Receipt<'a> {
     /// How the decision was reached (operator/cache/timeout/static), or "" when
     /// not applicable (e.g. a plain allow of an unprotected file).
     pub source: &'a str,
+    // WO-240@v1: shadow mode allows every open but must still name the protected ones.
+    /// Set only by `bulwark watch`: the open was allowed, but the same policy
+    /// under `run` would have denied it. Serialized only when true, so every
+    /// receipt written outside watch keeps its existing bytes.
+    pub would_deny: bool,
 }
 
 // WO-3@v1: key the Linux permission gate to stable inode identity.
@@ -86,8 +91,15 @@ impl Receipt<'_> {
     // WO-3@v1: key the Linux permission gate to stable inode identity.
     /// Serialize to a single JSON line (no trailing newline).
     pub fn to_json_line(&self) -> String {
+        // WO-240@v1: append the shadow-mode flag only when set (additive field).
+        let would = if self.would_deny {
+            r#","would_deny":true"#
+        } else {
+            ""
+        };
+        // WO-240@v1: `{would}` is empty unless the shadow-mode flag is set.
         format!(
-            r#"{{"ts_ms":{ts},"pid":{pid},"dev":{dev},"ino":{ino},"decision":"{dec}","source":"{src}","path":"{path}","ancestry":"{anc}","reason":"{reason}"}}"#,
+            r#"{{"ts_ms":{ts},"pid":{pid},"dev":{dev},"ino":{ino},"decision":"{dec}","source":"{src}","path":"{path}","ancestry":"{anc}","reason":"{reason}"{would}}}"#,
             ts = now_unix_millis(),
             pid = self.pid,
             dev = self.dev,
@@ -226,11 +238,14 @@ fn route(
     human: String,
     json: Option<String>,
 ) {
-    stderr_counters.submitted.fetch_add(1, Ordering::SeqCst);
-    match stderr_tx.try_send(human) {
-        Ok(()) => {}
-        Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
-            stderr_counters.dropped.fetch_add(1, Ordering::SeqCst);
+    // WO-240@v1: an empty human line means "receipts file only"; it is not counted.
+    if !human.is_empty() {
+        stderr_counters.submitted.fetch_add(1, Ordering::SeqCst);
+        match stderr_tx.try_send(human) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+                stderr_counters.dropped.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
     if let Some(json) = json {
@@ -569,6 +584,13 @@ impl ReceiptLog {
         self.route(Some(r.to_json_line()), human_decision_line(r.decision, r));
     }
 
+    /// Record one decision in the receipts file only, with no stderr line.
+    // WO-240@v1: shadow mode must not flood the watched agent's terminal with allows.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn record_file_only(&mut self, r: &Receipt) {
+        self.route(Some(r.to_json_line()), String::new());
+    }
+
     /// Record one dispatch-time hivebus key handoff (fingerprints only — never
     /// seed bytes). Enqueued like any other line.
     // WO-29@v1: record key-handoff fingerprints without persisting seed material.
@@ -814,6 +836,7 @@ mod tests {
             ancestry: "cat(42) <- bash(7)",
             reason: "protected inode",
             source: "operator",
+            would_deny: false, // WO-240@v1: only watch receipts carry the flag.
         };
         let line = r.to_json_line();
         assert!(line.contains(r#""pid":42"#));
@@ -823,6 +846,35 @@ mod tests {
         assert!(line.contains(r#""source":"operator""#));
         assert!(line.contains(r#""path":"/tmp/guard/secret.env""#));
         assert!(line.contains(r#""ancestry":"cat(42) <- bash(7)""#));
+    }
+
+    // WO-240@v1: the shadow-mode flag is additive; without it a line is unchanged.
+    #[test]
+    fn would_deny_is_written_only_when_set() {
+        let mk = |would_deny| Receipt {
+            pid: 1,
+            dev: 2,
+            ino: 3,
+            decision: Decision::Allow,
+            path: "/h/.ssh/id_ed25519",
+            ancestry: "cat(1)",
+            reason: "watch: protected inode; run would deny",
+            source: "watch",
+            would_deny,
+        };
+        let flagged = mk(true).to_json_line();
+        assert!(
+            flagged.ends_with(
+                r#""reason":"watch: protected inode; run would deny","would_deny":true}"#
+            ),
+            "{flagged}"
+        );
+        let plain = mk(false).to_json_line();
+        assert!(!plain.contains("would_deny"), "{plain}");
+        assert!(
+            plain.ends_with(r#""reason":"watch: protected inode; run would deny"}"#),
+            "{plain}"
+        );
     }
 
     // WO-29@v1: derive fresh auditable Hivebus credentials for each dispatch.
@@ -880,6 +932,7 @@ mod tests {
             ancestry: "",
             reason: "",
             source: "",
+            would_deny: false, // WO-240@v1: only watch receipts carry the flag.
         };
         let line = r.to_json_line();
         assert!(line.contains(r#"\"weird\""#));
@@ -920,6 +973,7 @@ mod tests {
                     ancestry: "",
                     reason: "",
                     source: "",
+                    would_deny: false, // WO-240@v1: only watch receipts carry the flag.
                 });
             }
         }

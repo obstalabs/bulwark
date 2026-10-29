@@ -1,6 +1,6 @@
 [package]
 name = "bulwark"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 description = "Kernel-boundary file-read gate for AI agent process trees (Linux fanotify MVP)"
 license = "AGPL-3.0-or-later"
@@ -39,6 +39,9 @@ fault-injection = []
 [dev-dependencies]
 # Integration tests send signals to the supervisor to exercise fail-closed.
 libc = "0.2"
+# WO-198@v1: the decision-rule conformance vectors are JSON so every evaluator
+# (Rust, the macOS gate, a kernel program) reads the same file.
+serde_json = "1"
 
 [profile.release]
 opt-level = 2
