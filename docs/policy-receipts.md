@@ -108,8 +108,10 @@ appears, including everything below it if it appears as a directory.
   components below its anchor; `{a,b}` alternatives are allowed. An entry
   outside these limits, a bare relative entry, `..`, or a non-ASCII name in a
   protect entry is refused by name and nothing is checked.
-- A file that was inside a protected directory when the policy was read stays
-  protected through a hard link made elsewhere.
+- A protected file entry stays protected through a hard link made elsewhere:
+  the link reaches the same inode. For a directory entry, `check` does not yet
+  report a hard link made outside the directory to a file inside it as
+  protected (WO-254).
 - `check` resolves symlinks and relative paths first, like a real open, and reports the entry that
   decided and its precedence step, for example
   `rule: **/.env (step 3)` (`"rule"` and `"step"` in `--format json`).

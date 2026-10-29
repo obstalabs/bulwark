@@ -27,7 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `bulwark watch -- <cmd>` (Linux): shadow mode that enforces nothing. Every open by the
   supervised tree is allowed and recorded, opens the selected policy would deny carry
   `"would_deny":true`, and a report at exit lists opens, credential-store paths, the most
-  opened files and a suggested `--protect` set. Receipts default to the root-owned
+  opened files and a suggested `--protect` set, shell-quoted so each path pastes as one
+  argument; when the gate dropped receipts it says the suggestion may be incomplete.
+  Receipts default to the root-owned
   `/var/lib/bulwark/watch/`, and a `--receipts` file must sit in a directory that is also
   root-owned and not group- or other-writable; only would-deny opens are echoed to
   stderr. `bulwark report
