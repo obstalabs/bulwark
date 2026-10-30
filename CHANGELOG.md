@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+<!-- WO-253@v1: a release whose gate sources changed had no way to ship a rebuilt gate. -->
+- `macos-es-proof/package-release.sh stage` accepts a freshly built, notarized gate through
+  `GATE_APP` (absolute path, checked before any download) when the gate sources changed since
+  the previous release; it still reuses the previous release's gate when they did not, and
+  without `GATE_APP` the refusal names `build-gate-bundle.sh` and `GATE_APP`.
+
+### Fixed
+<!-- WO-255@v1: the sign phase failed every correctly signed binary. -->
+- `macos-es-proof/package-release.sh sign` no longer fails with "cannot read signing authority"
+  on a correctly signed binary: the reader now consumes all of `codesign -dvvv`'s output
+  instead of stopping at the first match, which killed `codesign` mid-write. `upload` no longer
+  refuses with "cannot read gate CDHash" for the same reason, `upload` can expand the `.pkg` it
+  checks, and `pkg` keeps the sealed Developer ID signature instead of re-signing the CLI with
+  new bytes.
+
 ## [0.10.0] - 2026-10-27
 
 ### Security
