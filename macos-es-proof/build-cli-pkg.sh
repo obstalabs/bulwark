@@ -33,9 +33,11 @@ OUT="${OUT:-/tmp/bulwark-pkg}"
 mkdir -p "$OUT"
 
 # WO-174@v1: compare the verified leaf authority with the requested application identity.
+# WO-255@v1: read codesign's output to the end. An early awk exit killed codesign with
+# SIGPIPE, pipefail failed the check, and the fallback re-sign changed the sealed bytes.
 cli_signing_authority() {
   codesign -dvvv "$1" 2>&1 | awk -F= '
-    /^Authority=/ { print substr($0, index($0, "=") + 1); found = 1; exit }
+    /^Authority=/ && !found { print substr($0, index($0, "=") + 1); found = 1 }
     END { if (!found) exit 1 }
   '
 }

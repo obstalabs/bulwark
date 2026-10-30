@@ -122,7 +122,9 @@ release_pkg_gate() {
     echo "!! release seal check failed: cannot create package expansion directory" >&2
     return 1
   }
-  if ! pkgutil --expand-full "$package" "$expand_dir"; then
+  # WO-255@v1: pkgutil --expand-full refuses an existing destination ("File exists"),
+  # so expand into a fresh path inside the temporary directory.
+  if ! pkgutil --expand-full "$package" "$expand_dir/pkg"; then
     rm -rf "$expand_dir"
     echo "!! release seal check failed: cannot expand package $package" >&2
     return 1
@@ -161,6 +163,26 @@ gate_plan() {
   echo "!! gate inputs changed since the previous release: build a fresh gate with" \
     "macos-es-proof/build-gate-bundle.sh and set GATE_APP to its absolute path" >&2
   return 1
+}
+
+# WO-174@v1: read the leaf signing authority used to identify the CLI signer.
+# WO-255@v1: above the lib-only guard so the release test can exercise it. awk
+# reads to the end instead of exiting at the first match: an early exit kills
+# codesign with SIGPIPE, and pipefail then fails a correctly signed binary.
+signing_authority() {
+  codesign -dvvv "$1" 2>&1 | awk -F= '
+    /^Authority=/ && !found { print substr($0, index($0, "=") + 1); found = 1 }
+    END { if (!found) exit 1 }
+  '
+}
+
+# WO-255@v1: the gate CDHash that binds seal receipts to the shipped gate; read to
+# the end like signing_authority so codesign is never cut off under pipefail.
+gate_cdhash() {
+  codesign -dvvv "$1" 2>&1 | awk -F= '
+    /^CDHash=/ && !found { print $2; found = 1 }
+    END { if (!found) exit 1 }
+  '
 }
 
 # WO-140@v1: let fixture tests source the pure upload gate without release inputs.
@@ -246,13 +268,6 @@ check_app() {
   echo "    gate app ok: $app"
 }
 
-# WO-174@v1: read the leaf signing authority used to identify the CLI signer.
-signing_authority() {
-  codesign -dvvv "$1" 2>&1 | awk -F= '
-    /^Authority=/ { print substr($0, index($0, "=") + 1); found = 1; exit }
-    END { if (!found) exit 1 }
-  '
-}
 
 # WO-174@v1: sign both release binaries before sealing or packaging either one.
 sign() {
@@ -379,7 +394,8 @@ upload() {
     rm -rf "$extract_dir"
     die "macOS release upload refused: extracted archive is missing the binary or gate app"
   fi
-  if ! expected_cdhash=$(codesign -dvvv "$sealed_app" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}'); then
+  # WO-255@v1: the full-read reader; the inline early-exit awk failed every upload.
+  if ! expected_cdhash=$(gate_cdhash "$sealed_app"); then
     rm -rf "$extract_dir"
     die "macOS release upload refused: cannot read gate CDHash from extracted archive"
   fi

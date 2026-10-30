@@ -152,6 +152,8 @@ cat > "$fake_bin/pkgutil" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$1" = "--expand-full" ]
+# WO-255@v1: like the real tool, refuse a destination that already exists.
+[ ! -e "$3" ] || { echo "Could not unarchive $2 (File exists)" >&2; exit 1; }
 mkdir -p "$3/Payload/usr/local/bin"
 case "$PKG_PAYLOAD_SOURCE" in
   __fail__) exit 1 ;;
@@ -234,3 +236,75 @@ expect_gate_plan "changed inputs, fresh gate" "$WORK/bulwark_es_gate.app" 1 fres
 expect_gate_plan "unchanged inputs, fresh gate" "$WORK/bulwark_es_gate.app" 0 fresh
 expect_gate_plan_refused "changed inputs, no fresh gate" "" 1 build-gate-bundle.sh GATE_APP
 expect_gate_plan_refused "relative fresh gate" "bulwark_es_gate.app" 1 "absolute path"
+
+# WO-255@v1: a stand-in for `codesign -dvvv` that keeps writing after the leaf
+# Authority line, well past one pipe buffer, the way the real tool keeps writing.
+FAKE_CODESIGN_MODE=signed
+# shellcheck disable=SC2329  # called indirectly by signing_authority
+# WO-255@v1: signed stand-in; prints the leaf Authority, then keeps writing.
+codesign() {
+  [ "$FAKE_CODESIGN_MODE" = signed ] && echo "CDHash=0123456789abcdef0123456789abcdef01234567"
+  [ "$FAKE_CODESIGN_MODE" = signed ] && echo "Authority=Developer ID Application: Test (TEAMID)"
+  echo "Authority=Developer ID Certification Authority"
+  local i
+  for i in $(seq 1 2000); do
+    echo "Detail-$i=........................................................................"
+  done
+}
+
+# WO-255@v1: under pipefail the reader must take the leaf authority without
+# cutting the writer off (an early exit kills codesign with SIGPIPE, status 141).
+FAKE_CODESIGN_MODE=signed
+if ! authority=$(signing_authority "$WORK/bulwark"); then
+  echo "FAIL: signing authority unreadable from a signed binary"
+  exit 1
+fi
+[ "$authority" = "Developer ID Application: Test (TEAMID)" ] || {
+  echo "FAIL: signing authority read as '$authority'"
+  exit 1
+}
+echo "PASS: signing authority read in full output under pipefail"
+
+# WO-255@v1: the upload gate reads the gate CDHash the same way; it must not cut codesign off either.
+if ! cdhash=$(gate_cdhash "$WORK/bulwark_es_gate.app"); then
+  echo "FAIL: gate CDHash unreadable from a signed bundle"
+  exit 1
+fi
+[ "$cdhash" = 0123456789abcdef0123456789abcdef01234567 ] || {
+  echo "FAIL: gate CDHash read as '$cdhash'"
+  exit 1
+}
+echo "PASS: gate CDHash read in full output under pipefail"
+
+# WO-255@v1: an unsigned binary still has no leaf authority to report.
+FAKE_CODESIGN_MODE=unsigned
+# shellcheck disable=SC2329  # called indirectly by signing_authority
+# WO-255@v1: unsigned stand-in; no Authority line at all.
+codesign() { echo "code object is not signed at all"; }
+if authority=$(signing_authority "$WORK/bulwark"); then
+  echo "FAIL: unsigned binary reported authority '$authority'"
+  exit 1
+fi
+echo "PASS: unsigned binary has no signing authority"
+# WO-255@v1: an unsigned bundle has no CDHash to bind the seal receipts to.
+if cdhash=$(gate_cdhash "$WORK/bulwark_es_gate.app"); then
+  echo "FAIL: unsigned bundle reported CDHash '$cdhash'"
+  exit 1
+fi
+echo "PASS: unsigned bundle has no gate CDHash"
+unset -f codesign
+
+# WO-255@v1: no release-path script may read codesign output with an awk that exits
+# early; build-cli-pkg.sh had a third copy, and its fallback re-sign changed the
+# sealed bytes inside the pkg.
+for script in "$PACKAGE_RELEASE_SH" "$SCRIPT_DIR/build-cli-pkg.sh"; do
+  if grep -nE 'codesign -dv+' "$script" | grep -qE 'exit *\}'; then
+    echo "FAIL: $script reads codesign output with an early-exit awk on one line"
+    exit 1
+  fi
+  if grep -nE 'found = 1; exit' "$script" >/dev/null; then
+    echo "FAIL: $script stops reading codesign output at the first match"
+    exit 1
+  fi
+done
+echo "PASS: release-path codesign readers consume the whole output"
