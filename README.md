@@ -271,6 +271,10 @@ as plainly as the ones it does — see **Known limitations** below and
   the gate is wired, and the common setup errors are in
   [docs/macos-permissions.md](docs/macos-permissions.md); see also
   [docs/macos.md](docs/macos.md).
+- **Deny-list mode refuses any in-tree directory clone.** A `clonefile`/`copyfile`
+  of a directory copies every child without opening it, so per-inode checks would
+  never run; the macOS gate refuses the clone outright, so `cp -cR` of an
+  unprotected tree under a supervised agent fails with a receipt.
 - Requires root (`CAP_SYS_ADMIN` for fanotify; Endpoint Security privilege on
   macOS; Landlock for `--hardened`).
 
