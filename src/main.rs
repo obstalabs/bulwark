@@ -645,6 +645,27 @@ enum Cmd {
         force: bool,
     },
 
+    // WO-258@v1: install this engine to a root-owned location so `sudo bulwark`
+    // never executes a binary a non-root uid can replace.
+    /// Install this build to a root-owned directory and print the invocation to
+    /// use for privileged runs. Copies the engine (and, on macOS, the Endpoint
+    /// Security gate bundle) to `<prefix>/bulwark/<version>/`, verifies the copy
+    /// is root-owned 0755, and prints `sudo <path> run ...`.
+    InstallRoot {
+        /// Directory to install under (default /usr/local/libexec).
+        #[arg(
+            long = "prefix",
+            value_name = "DIR",
+            default_value = "/usr/local/libexec"
+        )]
+        prefix: PathBuf,
+
+        /// Do not copy the macOS Endpoint Security gate bundle (e.g. it is
+        /// already installed separately).
+        #[arg(long = "no-gate")]
+        no_gate: bool,
+    },
+
     /// Preflight: check that this host can actually enforce — kernel version,
     /// root/`CAP_SYS_ADMIN` for fanotify, and Landlock for `--hardened`. Run it
     /// before relying on the gate. Exit 0 if everything required is present.
@@ -835,6 +856,7 @@ fn main() -> Result<()> {
             let code = cmd_doctor(format);
             exit(code);
         }
+        Cmd::InstallRoot { prefix, no_gate } => cmd_install_root(&prefix, no_gate),
         Cmd::Consent { socket, verdict } => cmd_consent(socket, verdict.as_deref()),
         Cmd::BaseSet => {
             println!("# Bulwark runtime base set — read paths allowed in --deny-all mode");
@@ -893,6 +915,191 @@ fn main() -> Result<()> {
             exit(code);
         }
     }
+}
+
+// ===== WO-258: root must never execute a binary a non-root uid can replace =====
+
+/// Whether a single path component (the running executable, or one of its
+/// ancestor directories) can be modified by a non-root principal. A non-root
+/// owner can always chmod/write their own path, so `owner != 0` alone is unsafe;
+/// a group- or other-write bit lets a whole group or the world modify it.
+///
+/// WO-258 note: a macOS extended ACL can also grant write with no mode bit set.
+/// libc does not expose the ACL API, so this catches the load-bearing
+/// Homebrew/linuxbrew and world-writable shapes (`owner != 0`, group/other
+/// write); an extended-ACL write grant is a documented residual.
+fn component_user_writable(_path: &Path, meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if meta.uid() != 0 {
+        return true;
+    }
+    meta.mode() & 0o022 != 0
+}
+
+/// Walk the resolved executable and every ancestor directory up to `/`, returning
+/// the first component [`component_user_writable`] flags, or `None` when the whole
+/// chain is root-owned and neither group- nor other-writable.
+fn first_user_writable_component(exe: &Path) -> Option<PathBuf> {
+    let mut cur = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    loop {
+        if let Ok(meta) = std::fs::metadata(&cur) {
+            if component_user_writable(&cur, &meta) {
+                return Some(cur);
+            }
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
+/// WO-258@v1: refuse to proceed as uid 0 from a location a non-root uid can
+/// modify, so a trojaned binary (or a swapped symlink) cannot own the next
+/// privileged launch. Runs before any gate starts or any config is read.
+fn refuse_root_from_user_writable_path() -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("cannot resolve the running executable")?;
+    if let Some(offender) = first_user_writable_component(&exe) {
+        anyhow::bail!("{}", refusal_message(&offender));
+    }
+    Ok(())
+}
+
+/// The refusal message, factored out so a non-root test can assert it names both
+/// the offending path and the fix.
+fn refusal_message(offender: &Path) -> String {
+    format!(
+        "refusing to run as root: {} is writable by a non-root uid, so the binary \
+         (or an ancestor) could be replaced and own the next root launch. Install the \
+         engine to a root-owned location with `sudo bulwark install-root` and use the \
+         invocation it prints, or chown the binary and every ancestor to root and \
+         chmod them 0755.",
+        offender.display()
+    )
+}
+
+/// `bulwark install-root`: copy this engine (and on macOS the gate bundle) to a
+/// root-owned 0755 hierarchy, verify ownership and modes after the copy, and
+/// print the root invocation to use.
+fn cmd_install_root(prefix: &Path, no_gate: bool) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        anyhow::bail!("install-root must run as root (sudo bulwark install-root)");
+    }
+
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize().or(Ok(p)))
+        .context("cannot resolve the running executable")?;
+    let target_dir = prefix.join("bulwark").join(env!("CARGO_PKG_VERSION"));
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("create {}", target_dir.display()))?;
+
+    let engine = target_dir.join("bulwark");
+    std::fs::copy(&exe, &engine).with_context(|| format!("copy engine to {}", engine.display()))?;
+    harden_path_root_0755(&engine)?;
+    // The directories the engine sits in must be root-owned 0755 too, or a
+    // non-root uid could swap the engine out from underneath root later.
+    harden_path_root_0755(&target_dir)?;
+    if let Some(version_parent) = target_dir.parent() {
+        harden_path_root_0755(version_parent)?;
+    }
+
+    // Verify the DESTINATION chain, not just the self-image: installing under a
+    // user-writable ancestor (e.g. an Intel Homebrew-owned /usr/local) would be a
+    // root-owned file under a user-owned directory, which the gate must refuse.
+    if let Some(offender) = first_user_writable_component(&engine) {
+        anyhow::bail!(
+            "install would land under a user-writable hierarchy: {} is writable by a \
+             non-root uid; pick a root-owned --prefix",
+            offender.display()
+        );
+    }
+
+    // macOS: carry the signed Endpoint Security gate bundle beside the engine so
+    // `sudo <engine> run` can discover it next to the CLI.
+    #[cfg(target_os = "macos")]
+    if !no_gate {
+        copy_gate_bundle(&target_dir)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = no_gate;
+
+    println!("installed engine: {}", engine.display());
+    println!(
+        "run as root:      sudo {} run --protect <path> -- <agent>",
+        engine.display()
+    );
+    Ok(())
+}
+
+/// chown a path to root:root, chmod 0755, then verify both took effect.
+fn harden_path_root_0755(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
+    chown(path, Some(0), Some(0)).with_context(|| format!("chown root:root {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod 0755 {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if meta.uid() != 0 {
+        anyhow::bail!("owner is not root after chown: {}", path.display());
+    }
+    if meta.mode() & 0o777 != 0o755 {
+        anyhow::bail!("mode is not 0755 after chmod: {}", path.display());
+    }
+    Ok(())
+}
+
+/// Locate the `.app` bundle that contains the ES edge binary, by walking up until
+/// the path name ends in `.app`.
+#[cfg(target_os = "macos")]
+fn find_app_bundle(edge: &Path) -> Option<PathBuf> {
+    let mut cur = edge.to_path_buf();
+    loop {
+        if cur.file_name()?.to_str()?.ends_with(".app") {
+            return Some(cur);
+        }
+        cur = cur.parent()?.to_path_buf();
+    }
+}
+
+/// Copy the ES gate bundle next to the installed engine, preserving the signed
+/// bundle's internal modes and ownership (codesign cares about those bytes).
+#[cfg(target_os = "macos")]
+fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
+    let edge = gate::resolve_edge_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot locate the macOS gate bundle; it must ship beside the CLI or via \
+             BULWARK_MACOS_ES_GATE"
+        )
+    })?;
+    let app = find_app_bundle(&edge)
+        .ok_or_else(|| anyhow::anyhow!("cannot find the gate app bundle for {}", edge.display()))?;
+    let app_name = app.file_name().expect("app bundle name").to_owned();
+    let dst = target_dir.join(app_name);
+    copy_tree(&app, &dst).context("copy gate bundle")?;
+    Ok(())
+}
+
+/// Recursive copy that preserves file bytes and permission bits (used for the
+/// signed gate bundle, whose internal modes must not be rewritten).
+#[cfg(target_os = "macos")]
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+        for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::copy(src, dst)
+            .with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+    }
+    Ok(())
 }
 
 /// WO-147@v1: the root-owned runtime consent socket path, shared by the
@@ -2416,6 +2623,10 @@ fn cmd_launch(
         return cmd_launch_init(agent, &target).map(|()| 0);
     }
 
+    // WO-258@v1: same root-from-user-writable-path refusal as cmd_run, but placed
+    // here because launch reads policy in this function before delegating.
+    refuse_root_from_user_writable_path()?;
+
     // WO-117 (R1): one open and one read; the plan and the integrity record
     // both come from this snapshot, and cmd_run receives it instead of re-reading.
     let policy_source = launch_policy_source(agent, policy_path)?;
@@ -2725,6 +2936,11 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
 // WO-73@v1: refuse hardened grants that Landlock would enforce more broadly.
 // WO-117@v1: enforce and measure the same file-backed policy snapshot.
 fn cmd_run(mut args: RunArgs) -> Result<i32> {
+    // WO-258@v1: root must never start the gate from a location a non-root uid
+    // can modify — a trojaned binary owns the next root launch. Refuse before any
+    // config is read or any gate process starts.
+    refuse_root_from_user_writable_path()?;
+
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
     // kernel on the agent process itself. This call does not return on success
@@ -4080,6 +4296,36 @@ pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // WO-258@v1: a copy of the binary placed under a user-owned temp hierarchy is
+    // flagged, and the flagged path sits under that hierarchy (the ancestor chain
+    // a non-root uid controls). Mirrors acceptance 4's "user-owned temp hierarchy"
+    // — the refusal itself only fires at uid 0, which a non-root test cannot reach,
+    // so this exercises the load-bearing predicate and the message path.
+    #[test]
+    fn refusal_flags_a_user_writable_component() {
+        let dir = test_scratch_dir("wo258");
+        let nested = dir.join("cellar").join("bulwark").join("bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let bin = nested.join("bulwark");
+        std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
+
+        let offender =
+            first_user_writable_component(&bin).expect("a user-owned path must be flagged");
+        let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        assert!(
+            offender.starts_with(&dir_canon),
+            "offender {} should sit under the user-owned temp hierarchy {}",
+            offender.display(),
+            dir_canon.display()
+        );
+
+        // The message the refusal emits names the offending path and the fix.
+        let msg = refusal_message(&offender);
+        assert!(msg.contains("writable by a non-root uid"));
+        assert!(msg.contains("install-root"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // WO-117 (R1): one open, one read: the parsed policy and the recorded digest
     // come from the same bytes, and the identity from the same handle.
