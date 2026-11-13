@@ -150,7 +150,10 @@ membership *at process-creation time*, by a label that survives re-parenting:
   the double-fork read is **denied** under both modes.
 - **macOS (Endpoint Security):** the gate tracks the supervised PID set from
   `NOTIFY_FORK`/`EXEC`/`EXIT` events, inserting each child *at fork time* — before it can
-  run or reparent — and decides `AUTH_OPEN` by set membership. The edge keeps enforcing
+  run or reparent — and decides `AUTH_OPEN` by set membership. The edge also decides
+  `AUTH_CLONE`, `AUTH_COPYFILE` and `AUTH_EXCHANGEDATA` on the source inode (refusing a
+  directory clone outright), so a protected file cannot be reached through a clone or copy
+  that never opens it. The edge keeps enforcing
   until the set drains to empty, so an orphan that outlives the foreground process is still
   gated. Verified on hardware (macOS 26, Apple Silicon): the double-fork read is
   **denied**.

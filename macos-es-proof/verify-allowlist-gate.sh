@@ -319,6 +319,81 @@ if [ "$T4_STATUS" -ne 0 ]; then
   while IFS= read -r line; do echo "     stderr: $line"; done < "$T4_ERR"
 fi
 
+# ---------------------------------------------------------------------------
+# TEST 4c (WO-249): clonefile in allow-list mode. clonefile(2) copies a source
+# inode without opening it, so AUTH_OPEN never sees it; the gate must decide the
+# clone's source inode. A tiny C helper is compiled into the granted folder (its
+# dyld comes from the runtime base set) because no language runtime is in the
+# allow-list.
+# ---------------------------------------------------------------------------
+echo
+CLONE_C="$WORK/clone_probe.c"
+CLONE_BIN="$ALLOW_DIR/clone_probe"
+CLONE_RCPT="$PWD/allowlist-clone.jsonl"
+CLONE_IN_GRANT_DST="$ALLOW_DIR/clone_in_grant.txt"
+CLONE_SIBLING_DST="$ALLOW_DIR/clone_sibling.txt"
+CLONE_DIR_DST="$ALLOW_DIR/clone_dir"
+cat > "$CLONE_C" <<'CEOF'
+#include <sys/clonefile.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    for (int i = 1; i + 1 < argc; i += 2) {
+        errno = 0;
+        int rc = clonefile(argv[i], argv[i + 1], 0);
+        printf("clonefile src=%s rc=%d errno=%d (%s)\n", argv[i], rc, errno, strerror(errno));
+    }
+    return 0;
+}
+CEOF
+echo "==> TEST 4c (WO-249: allow-list clonefile): expect in-grant clone allowed, sibling clone denied, directory clone denied"
+CLONE_BUILD_OK=0
+if command -v clang >/dev/null 2>&1; then
+  clang -O2 -o "$CLONE_BIN" "$CLONE_C" 2>"$WORK/clone_build.err" && CLONE_BUILD_OK=1
+else
+  echo "   clone probe: clang not found; cannot compile the clonefile helper"
+fi
+CLONE_OUT="$WORK/clone.out"
+CLONE_ERR="$WORK/clone.err"
+CLONE_ALLOW_OK=0; CLONE_SIBLING_OK=0; CLONE_DIR_OK=0
+CLONE_ALLOW_RCPT=0; CLONE_SIBLING_RCPT=0; CLONE_DIR_RCPT=0
+CLONE_RUNS=0
+if [ "$CLONE_BUILD_OK" = 1 ]; then
+  ALLOW_FILE_INO=$(stat -f %i "$ALLOW_FILE")
+  DENY_FILE_INO=$(stat -f %i "$DENY_FILE")
+  ALLOW_DIR_INO=$(stat -f %i "$ALLOW_DIR")
+  : > "$CLONE_RCPT"
+  sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+    --deny-all --allow "$ALLOW_DIR/**" --receipts "$CLONE_RCPT" \
+    -- "$ALLOW_DIR/clone_probe" "$ALLOW_FILE" "$CLONE_IN_GRANT_DST" "$DENY_FILE" "$CLONE_SIBLING_DST" "$ALLOW_DIR" "$CLONE_DIR_DST" \
+    > "$CLONE_OUT" 2> "$CLONE_ERR"
+  CLONE_RUNS=1
+  grep -qF "clonefile src=$ALLOW_FILE rc=0 errno=0" "$CLONE_OUT" && CLONE_ALLOW_OK=1
+  grep -qE "clonefile src=$DENY_FILE rc=-1 " "$CLONE_OUT" && CLONE_SIBLING_OK=1
+  grep -qE "clonefile src=$ALLOW_DIR rc=-1 " "$CLONE_OUT" && CLONE_DIR_OK=1
+  # WO-137@v1: count complete parsed records, never substrings.
+  if command -v jq >/dev/null 2>&1; then
+    tally=$(receipt_tally "$CLONE_RCPT" "$ALLOW_FILE_INO"); rc=$?
+    if [ "$rc" = 0 ]; then read -r bad allowed denied <<<"$tally"; [ "$bad" = 0 ] && [ "$allowed" != 0 ] && CLONE_ALLOW_RCPT=1; fi
+    tally=$(receipt_tally "$CLONE_RCPT" "$DENY_FILE_INO"); rc=$?
+    if [ "$rc" = 0 ]; then read -r bad allowed denied <<<"$tally"; [ "$bad" = 0 ] && [ "$denied" != 0 ] && CLONE_SIBLING_RCPT=1; fi
+    tally=$(receipt_tally "$CLONE_RCPT" "$ALLOW_DIR_INO"); rc=$?
+    if [ "$rc" = 0 ]; then read -r bad allowed denied <<<"$tally"; [ "$bad" = 0 ] && [ "$denied" != 0 ] && CLONE_DIR_RCPT=1; fi
+  fi
+fi
+# WO-249@v1: every planned TEST 4c observation must have happened; a missing
+# compiler or jq cannot silently pass.
+[ "$CLONE_RUNS" -eq 1 ] && CLONE_RUNS_OK=1 || CLONE_RUNS_OK=0
+T4C_OK=0
+if [ "$CLONE_BUILD_OK" = 1 ] && [ "$CLONE_RUNS_OK" = 1 ] && \
+   [ "$CLONE_ALLOW_OK" = 1 ] && [ "$CLONE_SIBLING_OK" = 1 ] && [ "$CLONE_DIR_OK" = 1 ] && \
+   [ "$CLONE_ALLOW_RCPT" = 1 ] && [ "$CLONE_SIBLING_RCPT" = 1 ] && [ "$CLONE_DIR_RCPT" = 1 ]; then
+  T4C_OK=1
+fi
+echo "   allow=$CLONE_ALLOW_OK sibling_deny=$CLONE_SIBLING_OK directory_deny=$CLONE_DIR_OK allow_receipt=$CLONE_ALLOW_RCPT sibling_receipt=$CLONE_SIBLING_RCPT dir_receipt=$CLONE_DIR_RCPT runs=$CLONE_RUNS/1"
+if [ -f "$CLONE_OUT" ]; then while IFS= read -r line; do echo "     $line"; done < "$CLONE_OUT"; fi
+
 echo
 echo "==> TEST 6 (>=1000 opens under allow-list without a deadline miss): expect gate survives"
 LOAD_OUT="$WORK/load.out"
@@ -365,6 +440,7 @@ echo
   echo "test3_deny_symlink:    $([ "$DENY_SYMLINK_OK" = 1 ] && echo PASS || echo FAIL)"
   echo "test4a_granted_hardlink: $([ "$HARDLINK_OUTSIDE_OK" = 1 ] && echo PASS || echo FAIL) (hardlink of the granted inode outside the folder: allowed, same content)"
   echo "test4b_foreign_hardlink: $([ "$T4_FOREIGN_OK" = 1 ] && echo PASS || echo "FAIL (${T4_REASON:-run status $T4_STATUS})") (foreign ino $FOREIGN_INO linked into the folder after launch: denied, receipt)"
+  echo "test4c_clonefile:      $([ "$T4C_OK" = 1 ] && echo PASS || echo FAIL) (in-grant clone allowed, sibling and directory clones denied)"
   echo "test5_base_set_launch: $([ "$ALLOW_FILE_OK" = 1 ] && echo PASS || echo FAIL) (/bin/bash + /bin/cat ran)"
   echo "test6_run_status:      $([ "$LOAD_STATUS" = 0 ] && echo PASS || echo "FAIL ($LOAD_STATUS)")"
   echo "test6_throughput:      $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL) (${LOAD_N:-0} opens)"
@@ -379,8 +455,8 @@ echo
      [ "$ALLOW_FILE_OK" = 1 ] && [ "$DENY_OUTSIDE_OK" = 1 ] && \
      [ "$NO_PROMPT_OK" = 1 ] && [ "$DENY_SYMLINK_OK" = 1 ] && \
      [ "$HARDLINK_OUTSIDE_OK" = 1 ] && [ "$T4_FOREIGN_OK" = 1 ] && \
-     [ "$LOAD_OK" = 1 ]; then
-    echo "verdict:               SEALED - allow-list mode allowed the grant (by path and by hardlink of the granted inode), denied the sibling, the symlink escape and a foreign file hardlinked into the grant after launch with a receipt, launched through the macOS base set, and survived 1000+ opens on a real Mac."
+     [ "$T4C_OK" = 1 ] && [ "$LOAD_OK" = 1 ]; then
+    echo "verdict:               SEALED - allow-list mode allowed the grant (by path, by hardlink of the granted inode, and by in-grant clonefile), denied the sibling, the symlink escape, a foreign file hardlinked into the grant after launch, a sibling clonefile and a directory clone with receipts, launched through the macOS base set, and survived 1000+ opens on a real Mac."
   elif [ "$SOURCE_SHA_OK" != 1 ]; then
     echo "verdict:               NOT SEALED - source SHA unknown."
   elif [ "$CDHASH_OK" != 1 ]; then

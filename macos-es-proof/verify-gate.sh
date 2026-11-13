@@ -300,6 +300,58 @@ echo "   direct=$DIRECT_OK bash_c=$BASHC_OK sleep_exec=$SLEEP_OK runs=$SHAPE_RUN
 rm -rf "$USER_FIX_DIR"
 
 # ---------------------------------------------------------------------------
+# TEST 7 (WO-249): clonefile(2) of a protected inode must be denied, and so must
+# exchangedata between the fixture and a scratch file. BSD cp opens the source
+# first (already denied by AUTH_OPEN), so the probe calls clonefile directly from
+# ctypes; the deny receipts must name "cloned"/"exchanged" to prove the new ES
+# events are decided, not an incidental open.
+# ---------------------------------------------------------------------------
+echo
+T7_DIR="/private/tmp/bulwark-gate-clone.$$"
+T7_FIX="$T7_DIR/guarded.txt"
+T7_SCRATCH="$T7_DIR/scratch.txt"
+T7_HELPER="$T7_DIR/probe.py"
+T7_DST="$T7_DIR/clone_out.txt"
+mkdir -p "$T7_DIR"
+echo "top-secret" > "$T7_FIX"
+echo "scratch"    > "$T7_SCRATCH"
+chmod 644 "$T7_FIX" "$T7_SCRATCH"
+T7_FIX_INO=$(stat -f %i "$T7_FIX")
+cat > "$T7_HELPER" <<'PYEOF'
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+src, dst, other = sys.argv[1], sys.argv[2], sys.argv[3]
+ctypes.set_errno(0)
+rc = libc.clonefile(src.encode(), dst.encode(), 0)
+print("clonefile-rc=%d errno=%d dst_exists=%d" % (rc, ctypes.get_errno(), 1 if os.path.exists(dst) else 0))
+ctypes.set_errno(0)
+rc2 = libc.exchangedata(src.encode(), other.encode(), 0)
+print("exchangedata-rc=%d errno=%d" % (rc2, ctypes.get_errno()))
+PYEOF
+T7_RCPT="$WORK/test7.jsonl"
+T7_ERR="$WORK/test7.stderr"
+echo "==> TEST 7 (WO-249: clonefile + exchangedata of a protected inode, ino=$T7_FIX_INO): expect BOTH denied (rc=-1, errno=1) with deny receipts naming cloned/exchanged"
+T7_RUNS=0
+T7_OUT=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+          --receipts "$T7_RCPT" --protect "$T7_FIX" -- \
+          /usr/bin/python3 -I "$T7_HELPER" "$T7_FIX" "$T7_DST" "$T7_SCRATCH" 2>"$T7_ERR")
+T7_RUNS=1
+CLONE_OK=0; EXCHANGE_OK=0
+grep -qE '^clonefile-rc=-1 errno=1 dst_exists=0$' <<<"$T7_OUT" && CLONE_OK=1
+grep -qE '^exchangedata-rc=-1 errno=1$' <<<"$T7_OUT" && EXCHANGE_OK=1
+# WO-249: receipts are root-owned 0600; read them exactly as TEST 6 does.
+T7_RCPT_BODY=$($RECEIPT_READER "$T7_RCPT" 2>/dev/null) || T7_RCPT_BODY=""
+CLONE_RCPT_OK=0; EXCHANGE_RCPT_OK=0
+grep -q '"decision":"deny".*cloned' <<<"$T7_RCPT_BODY" && CLONE_RCPT_OK=1
+grep -q '"decision":"deny".*exchanged' <<<"$T7_RCPT_BODY" && EXCHANGE_RCPT_OK=1
+echo "   clonefile=$CLONE_OK exchangedata=$EXCHANGE_OK clone_receipt=$CLONE_RCPT_OK exchange_receipt=$EXCHANGE_RCPT_OK runs=$T7_RUNS/1"
+echo "$T7_OUT" | sed 's/^/     /'
+rm -rf "$T7_DIR"
+# WO-249@v1: every planned TEST 7 observation must have happened, not just the
+# ones that passed, and no fail-closed gap may pass silently.
+[ "$T7_RUNS" -eq 1 ] && T7_RUNS_OK=1 || T7_RUNS_OK=0
+
+# ---------------------------------------------------------------------------
 # Seal.
 # ---------------------------------------------------------------------------
 echo
@@ -327,11 +379,18 @@ echo
   echo "test6_bash_c:         $([ "$BASHC_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_sleep_exec:     $([ "$SLEEP_OK" = 1 ] && echo PASS || echo FAIL) (x$REPS, static receipts)"
   echo "test6_runs:           $([ "$RUNS_OK" = 1 ] && echo PASS || echo FAIL) ($SHAPE_RUNS of $((3 * REPS)) shape runs executed)"
+  echo "test7_clonefile:      $([ "$CLONE_OK" = 1 ] && echo PASS || echo FAIL) (rc=-1 errno=1, no clone written)"
+  echo "test7_exchangedata:   $([ "$EXCHANGE_OK" = 1 ] && echo PASS || echo FAIL) (rc=-1 errno=1)"
+  echo "test7_clone_receipt:  $([ "$CLONE_RCPT_OK" = 1 ] && echo PASS || echo FAIL) (deny reason names cloned)"
+  echo "test7_exchange_receipt: $([ "$EXCHANGE_RCPT_OK" = 1 ] && echo PASS || echo FAIL) (deny reason names exchanged)"
+  echo "test7_runs:           $([ "$T7_RUNS_OK" = 1 ] && echo PASS || echo FAIL) ($T7_RUNS of 1 TEST 7 run executed)"
   if [ "$SOURCE_SHA_OK" = 1 ] && [ "$CDHASH_OK" = 1 ] && \
      [ "${BUNDLE_VALID:-0}" = 1 ] && [ "$DENY_PATH_OK" = 1 ] && [ "$DENY_SYM_OK" = 1 ] && \
      [ "$DENY_HARD_OK" = 1 ] && [ "$UNSUP_OK" = 1 ] && [ "$LOAD_OK" = 1 ] && \
-     [ "$DIRECT_OK" = 1 ] && [ "$BASHC_OK" = 1 ] && [ "$SLEEP_OK" = 1 ] && [ "$RUNS_OK" = 1 ]; then
-    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink, and to direct cat / bash -c / sleep+exec x$REPS with static receipts), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
+     [ "$DIRECT_OK" = 1 ] && [ "$BASHC_OK" = 1 ] && [ "$SLEEP_OK" = 1 ] && [ "$RUNS_OK" = 1 ] && \
+     [ "$CLONE_OK" = 1 ] && [ "$EXCHANGE_OK" = 1 ] && [ "$CLONE_RCPT_OK" = 1 ] && \
+     [ "$EXCHANGE_RCPT_OK" = 1 ] && [ "$T7_RUNS_OK" = 1 ]; then
+    echo "verdict:         SEALED — protected inode denied to the supervised tree (by path, symlink, and hardlink, to direct cat / bash -c / sleep+exec x$REPS with static receipts, and to clonefile/exchangedata with deny receipts), allowed to an unsupervised process, and the gate survived 1000+ opens, on a real Mac."
   elif [ "$SOURCE_SHA_OK" != 1 ]; then
     echo "verdict:         NOT SEALED — source SHA unknown."
   elif [ "$CDHASH_OK" != 1 ]; then
