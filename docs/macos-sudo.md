@@ -13,6 +13,15 @@ deny a file open. This is Apple's rule for the ES API, not a Bulwark design choi
 you run `sudo bulwark run ...`. (You also need Full Disk Access for the launching
 terminal — see [docs/macos-permissions.md](macos-permissions.md).)
 
+**A second rule: root never executes Bulwark from a user-writable location.** A
+Homebrew prefix is owned by your user, so `sudo /opt/homebrew/bin/bulwark run` runs
+a binary that any process you run — or a confined agent, during a run — can
+overwrite; a trojaned copy then owns the next root launch. Bulwark refuses to start
+as root from a non-root-owned (or group/other-writable) binary or ancestor, naming
+the offending path. Install a root-owned copy once with `sudo bulwark install-root`
+(it copies the engine, and on macOS the gate bundle, to a root-owned 0755 location)
+and run root via the path it prints.
+
 ## Why **not** passwordless sudo (`NOPASSWD`) — the important part
 
 On macOS, `sudo bulwark run` drops a would-be-root agent to the invoking user

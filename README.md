@@ -24,12 +24,13 @@ denied even if the userspace gate dies.
 ```sh
 # Run an agent, but deny it any read of your SSH keys.
 brew install obstalabs/tap/bulwark
-sudo bulwark run --protect ~/.ssh -- claude
+sudo bulwark install-root    # root-owned engine; prints the exact path to run (`<installed>`)
+sudo <installed> run --protect ~/.ssh -- claude
 #   the agent works normally; a read of a protected file -> Operation not permitted
 
 # macOS note: sudo resets PATH, so on Homebrew/Apple Silicon use the full form,
 # which also keeps the agent's own runtime (e.g. node) on PATH:
-sudo env "PATH=$PATH" "$(which bulwark)" run --protect ~/.ssh -- claude
+sudo env "PATH=$PATH" <installed> run --protect ~/.ssh -- claude
 ```
 
 ## Why an independent layer
@@ -108,18 +109,22 @@ exit names what was read and what you would protect (Linux only for now).
 ```sh
 cargo build --release
 
+# Bulwark refuses to run as root from a build tree a non-root uid can rewrite,
+# so install a root-owned copy first (`<installed>` = the path it prints):
+sudo ./target/release/bulwark install-root
+
 # See what the command reads. Nothing is denied.
-sudo ./target/release/bulwark watch --protect ~/.ssh -- bash -c 'cat ~/.ssh/known_hosts'
+sudo <installed> watch --protect ~/.ssh -- bash -c 'cat ~/.ssh/known_hosts'
 
 # Re-print the report from the receipts file later.
-sudo ./target/release/bulwark report /var/lib/bulwark/watch/<file>.jsonl
+sudo <installed> report /var/lib/bulwark/watch/<file>.jsonl
 ```
 
 Then enforce:
 
 ```sh
 # Deny the supervised command any read of files under ~/.ssh, by inode.
-sudo ./target/release/bulwark run \
+sudo <installed> run \
   --protect ~/.ssh \
   --receipts /tmp/bulwark-receipts.jsonl \
   -- bash -c 'cat ~/.ssh/id_ed25519'   # -> cat: Permission denied

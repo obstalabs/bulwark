@@ -17,6 +17,13 @@ deny a file open). This is an Apple platform rule, not a Bulwark choice. So you 
 by default, but `--allow-root` and setuid-root re-escalation still leave a root path.
 A `NOPASSWD` rule for `bulwark` is a root-shell hole.)
 
+Root must also never execute a **user-writable** binary: a Homebrew-installed Bulwark
+is owned by your user, so any process you run (or a confined agent, during a run) can
+overwrite it and own the next root launch. Bulwark refuses to start as root from a
+non-root-owned (or group/other-writable) binary or ancestor. Run `sudo bulwark
+install-root` once to install a root-owned copy, and use the path it prints — see
+[docs/macos-sudo.md](macos-sudo.md).
+
 **2. Full Disk Access (FDA) for the terminal that launches Bulwark.** This is the one
 that surprises people — *"a security tool is asking for Full Disk Access?"* Here's the
 honest reason: macOS gates the **creation of an ES client** behind FDA. Without FDA,

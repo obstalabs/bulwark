@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 <!-- WO-249@v1: clonefile/copyfile/exchangedata copy an inode without opening it, so the gate never saw the read. -->
 - macOS: the gate now also decides `clonefile`, `copyfile` and `exchangedata` on the source inode, so a protected file cannot be cloned and read through the clone; directory clones are refused.
+<!-- WO-258@v1: root executing a user-writable binary from a Homebrew prefix is a privilege boundary. -->
+- `bulwark run`/`watch`/`launch` refuse to start as root when the binary's own path (or any
+  ancestor directory) is writable by a non-root uid, and `bulwark install-root` installs a
+  root-owned engine copy so `sudo` no longer executes a user-writable Homebrew binary.
 
 ## [0.10.0] - 2026-10-27
 
