@@ -22,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks, and `pkg` keeps the sealed Developer ID signature instead of re-signing the CLI with
   new bytes.
 
+### Security
+<!-- WO-249@v1: clonefile/copyfile/exchangedata copy an inode without opening it, so the gate never saw the read. -->
+- macOS: the gate now also decides `clonefile`, `copyfile` and `exchangedata` on the source inode, so a protected file cannot be cloned and read through the clone; directory clones are refused.
+
 ## [0.10.0] - 2026-10-27
 
 ### Security

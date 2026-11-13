@@ -566,6 +566,114 @@ func scheduleDrainExit() {
 }
 
 var allowOnce = config.allowOnce
+
+// WO-249@v1: lift the per-source-file decision out of the AUTH_OPEN arm so the
+// vnode-copy events (clone/copyfile/exchangedata) decide with the identical rule
+// instead of duplicating it. Returns the tuple the AUTH_OPEN arm consumed.
+func decideFile(
+    key: InodeKey,
+    path: String,
+    isDirectory: Bool,
+    treeHit: Bool,
+    membership: TreeAncestry
+) -> (allow: Bool, source: String, reason: String, cacheKernelAllow: Bool) {
+    switch config.mode {
+    case .denylist:
+        let protectedHit = config.protected.contains(key)
+        if !treeHit && protectedHit && membership == .unknown {
+            // WO-127@v4: a failed parent lookup is not proof the opener is
+            // outside the supervised tree; a protected open fails closed.
+            return (allow: false, source: "edge-error",
+                    reason: "protected inode opened by a process whose ancestry could not be established",
+                    cacheKernelAllow: false)
+        }
+        if !treeHit {
+            return (allow: true, source: "outside-tree",
+                    reason: protectedHit ? "protected inode opened outside supervised tree" : "outside supervised tree",
+                    cacheKernelAllow: !protectedHit)
+        }
+        if !protectedHit {
+            return (allow: true, source: "", reason: "not protected", cacheKernelAllow: true)
+        }
+        if allowOnce.contains(key) {
+            allowOnce.remove(key)
+            return (allow: true, source: "operator", reason: "operator allowed once", cacheKernelAllow: false)
+        }
+        if config.allowed.contains(key) {
+            return (allow: true, source: "cache", reason: "operator allowed for session", cacheKernelAllow: false)
+        }
+        return (allow: false, source: "static", reason: "protected inode opened by supervised tree", cacheKernelAllow: false)
+
+    case .allowlist:
+        // WO-41: default-deny mode has no prompt path; the pushed policy
+        // must decide immediately for every AUTH_OPEN event in-tree.
+        let allowedByPolicy = allowlistAllows(key, path: path, config: config)
+        if !treeHit {
+            // WO-128@v2: measurement instrument, decision unchanged. An outside
+            // open whose ancestry walk failed or hit maxDepth is named in the
+            // receipt; the rule is chosen from that count.
+            let reason: String
+            if membership == .unknown {
+                reason = "ancestry could not be established (treated as outside)"
+            } else {
+                reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
+            }
+            return (allow: true, source: "outside-tree", reason: reason, cacheKernelAllow: false)
+        }
+        if allowedByPolicy {
+            return (allow: true, source: "allowlist", reason: "allowlist match", cacheKernelAllow: true)
+        }
+        if isDirectory {
+            // WO-41 FIX: a DIRECTORY carries no file content, so it is opened
+            // only for traversal; the files beneath it stay gated by inode.
+            return (allow: true, source: "allowlist", reason: "directory traversal (no file content)", cacheKernelAllow: true)
+        }
+        return (allow: false, source: "allowlist", reason: "not in allowlist (default deny)", cacheKernelAllow: false)
+    }
+}
+
+// WO-249@v1: reword a decision reason from "opened" to the vnode-copy verb so a
+// clone/copy/exchange receipt names the operation that triggered it. Reasons
+// without "opened" ("not protected", "not in allowlist", "directory clone
+// bypasses per-file gating") pass through unchanged.
+func copyReason(_ base: String, verb: String) -> String {
+    base.replacingOccurrences(of: "opened", with: verb)
+}
+
+// WO-249@v1: respond to a vnode-copy AUTH event with the boolean responder
+// (unlike AUTH_OPEN's flags responder) and fail the run exactly as the AUTH_OPEN
+// arm does when the kernel rejects the answer.
+func respondAuthResult(
+    _ clientPtr: OpaquePointer,
+    _ message: UnsafePointer<es_message_t>,
+    allow: Bool,
+    cacheKernelAllow: Bool,
+    key: InodeKey,
+    path: String,
+    pid: pid_t
+) {
+    let rr: es_respond_result_t
+    if allow {
+        rr = es_respond_auth_result(clientPtr, message, ES_AUTH_RESULT_ALLOW, cacheKernelAllow)
+    } else {
+        rr = es_respond_auth_result(clientPtr, message, ES_AUTH_RESULT_DENY, false)
+    }
+    if rr != ES_RESPOND_RESULT_SUCCESS {
+        FileHandle.standardError.write("[bulwark-es] FATAL respond_auth_result=\(rr.rawValue)\n".data(using: .utf8)!)
+        appendReceipt(receiptLine(
+            pid: pid,
+            key: key,
+            decision: allow ? "allow" : "deny",
+            source: "edge-error",
+            path: path,
+            ancestry: ancestry(pid),
+            reason: "kernel response failed (\(rr.rawValue)); intended \(allow ? "allow" : "deny")"
+        ))
+        flushReceipts()
+        exit(70)
+    }
+}
+
 var client: OpaquePointer?
 
 let res = es_new_client(&client) { clientPtr, message in
@@ -605,6 +713,8 @@ let res = es_new_client(&client) { clientPtr, message in
     case ES_EVENT_TYPE_AUTH_OPEN:
         let file = msg.event.open.file
         let key = inodeKey(file)
+        let path = tokenPath(file.pointee.path)
+        let isDirectory = (file.pointee.stat.st_mode & S_IFMT) == S_IFDIR
         // Membership-set first (reparent-proof), ancestry walk only as an
         // additive fallback for a pid we have not yet seen fork (e.g. the very
         // first opens before its NOTIFY_FORK is processed).
@@ -627,95 +737,13 @@ let res = es_new_client(&client) { clientPtr, message in
             }
         }
 
-        let allow: Bool
-        let source: String
-        let reason: String
-        let cacheKernelAllow: Bool
-        var pathForReceipt = ""
-        switch config.mode {
-        case .denylist:
-            let protectedHit = config.protected.contains(key)
-            if !treeHit && protectedHit && membership == .unknown {
-                // WO-127@v4: a failed parent lookup is not proof the opener is
-                // outside the supervised tree; a protected open fails closed.
-                allow = false
-                source = "edge-error"
-                reason = "protected inode opened by a process whose ancestry could not be established"
-            } else if !treeHit {
-                allow = true
-                source = "outside-tree"
-                reason = protectedHit ? "protected inode opened outside supervised tree" : "outside supervised tree"
-            } else if !protectedHit {
-                allow = true
-                source = ""
-                reason = "not protected"
-            } else if allowOnce.contains(key) {
-                allowOnce.remove(key)
-                allow = true
-                source = "operator"
-                reason = "operator allowed once"
-            } else if config.allowed.contains(key) {
-                allow = true
-                source = "cache"
-                reason = "operator allowed for session"
-            } else {
-                allow = false
-                source = "static"
-                reason = "protected inode opened by supervised tree"
-            }
-            cacheKernelAllow = allow && !protectedHit
-
-        case .allowlist:
-            // WO-41: default-deny mode has no prompt path; the pushed policy
-            // must decide immediately for every AUTH_OPEN event in-tree.
-            let path = tokenPath(file.pointee.path)
-            pathForReceipt = path
-            let allowedByPolicy = allowlistAllows(key, path: path, config: config)
-            // WO-41 FIX: a DIRECTORY carries no file content to protect, and path
-            // resolution requires opening every directory component (/, /usr,
-            // /usr/lib, ...) on the way to an allowed file. Allowing only files
-            // under a glob denies the containing directories -> the kernel can't
-            // traverse to the file at all, and binaries fail to launch (dyld
-            // aborts -> SIGABRT, observed as `/` ino 2 denied). Default-deny gates
-            // FILE reads; directory opens are allowed so traversal works. The
-            // protected files themselves are still gated by their own inode.
-            let isDirectory = (file.pointee.stat.st_mode & S_IFMT) == S_IFDIR
-            if !treeHit {
-                allow = true
-                source = "outside-tree"
-                // WO-128@v2: measurement instrument, decision unchanged. An outside
-                // open whose ancestry walk failed or hit maxDepth is named in the
-                // receipt so a desktop run can count how often option (a) would
-                // have denied an unrelated process; the rule is chosen from that count.
-                if membership == .unknown {
-                    reason = "ancestry could not be established (treated as outside)"
-                } else {
-                    reason = allowedByPolicy ? "allowed inode opened outside supervised tree" : "outside supervised tree"
-                }
-                cacheKernelAllow = false
-            } else if allowedByPolicy {
-                allow = true
-                source = "allowlist"
-                reason = "allowlist match"
-                cacheKernelAllow = true
-            } else if isDirectory {
-                allow = true
-                source = "allowlist"
-                reason = "directory traversal (no file content)"
-                cacheKernelAllow = true
-            } else {
-                allow = false
-                source = "allowlist"
-                reason = "not in allowlist (default deny)"
-                cacheKernelAllow = false
-            }
-        }
+        let d = decideFile(key: key, path: path, isDirectory: isDirectory, treeHit: treeHit, membership: membership)
 
         // WO-23: AUTH_OPEN requires a FLAGS response. Do not use
         // es_respond_auth_result for this event type.
         let rr: es_respond_result_t
-        if allow {
-            rr = es_respond_flags_result(clientPtr, message, UInt32.max, cacheKernelAllow)
+        if d.allow {
+            rr = es_respond_flags_result(clientPtr, message, UInt32.max, d.cacheKernelAllow)
         } else {
             rr = es_respond_flags_result(clientPtr, message, 0, false)
         }
@@ -727,25 +755,196 @@ let res = es_new_client(&client) { clientPtr, message in
             appendReceipt(receiptLine(
                 pid: eventPid,
                 key: key,
-                decision: allow ? "allow" : "deny",
+                decision: d.allow ? "allow" : "deny",
                 source: "edge-error",
-                path: pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt,
+                path: path,
                 ancestry: ancestry(eventPid),
-                reason: "kernel response failed (\(rr.rawValue)); intended \(allow ? "allow" : "deny")"
+                reason: "kernel response failed (\(rr.rawValue)); intended \(d.allow ? "allow" : "deny")"
             ))
             flushReceipts()
             exit(70)
         }
 
-        let path = pathForReceipt.isEmpty ? tokenPath(file.pointee.path) : pathForReceipt
-        let chain = ancestry(eventPid)
         appendReceipt(receiptLine(
             pid: eventPid,
             key: key,
+            decision: d.allow ? "allow" : "deny",
+            source: d.source,
+            path: path,
+            ancestry: ancestry(eventPid),
+            reason: d.reason
+        ))
+        return
+
+    case ES_EVENT_TYPE_AUTH_CLONE:
+        // WO-249@v1: clonefile(2) copies a source inode without opening it, so
+        // AUTH_OPEN never sees the read. Decide the clone's SOURCE exactly as an
+        // open of that inode would be decided, and refuse a directory clone
+        // outright (it copies every child without opening any of them).
+        let file = msg.event.clone.source
+        let key = inodeKey(file)
+        let path = tokenPath(file.pointee.path)
+        let isDirectory = (file.pointee.stat.st_mode & S_IFMT) == S_IFDIR
+        let membership: TreeAncestry = treeContains(eventPid)
+            ? .inTree
+            : ancestryOf(eventPid, root: config.rootPid)
+        let treeHit = membership == .inTree
+        if treeHit {
+            treeInsert(eventPid)
+        }
+        let tracked = membership != .outside
+        if tracked {
+            authInFlight.enter()
+        }
+        defer {
+            if tracked {
+                authInFlight.leave()
+            }
+        }
+        var decision = decideFile(key: key, path: path, isDirectory: isDirectory, treeHit: treeHit, membership: membership)
+        if decision.allow && treeHit && isDirectory {
+            decision = (allow: false, source: config.mode == .denylist ? "static" : "allowlist",
+                        reason: "directory clone bypasses per-file gating", cacheKernelAllow: false)
+        }
+        respondAuthResult(clientPtr, message, allow: decision.allow, cacheKernelAllow: decision.cacheKernelAllow,
+                          key: key, path: path, pid: eventPid)
+        appendReceipt(receiptLine(
+            pid: eventPid,
+            key: key,
+            decision: decision.allow ? "allow" : "deny",
+            source: decision.source,
+            path: path,
+            ancestry: ancestry(eventPid),
+            reason: copyReason(decision.reason, verb: "cloned")
+        ))
+        return
+
+    case ES_EVENT_TYPE_AUTH_COPYFILE:
+        // WO-249@v1: copyfile(3) copies without opening the source; decide the
+        // source as an open, and also refuse to overwrite a protected target in
+        // deny-list mode. Guarded: AUTH_COPYFILE exists only on macOS 12+.
+        if #available(macOS 12.0, *) {
+            let file = msg.event.copyfile.source
+            var key = inodeKey(file)
+            var path = tokenPath(file.pointee.path)
+            let isDirectory = (file.pointee.stat.st_mode & S_IFMT) == S_IFDIR
+            let membership: TreeAncestry = treeContains(eventPid)
+                ? .inTree
+                : ancestryOf(eventPid, root: config.rootPid)
+            let treeHit = membership == .inTree
+            if treeHit {
+                treeInsert(eventPid)
+            }
+            let tracked = membership != .outside
+            if tracked {
+                authInFlight.enter()
+            }
+            defer {
+                if tracked {
+                    authInFlight.leave()
+                }
+            }
+            var decision = decideFile(key: key, path: path, isDirectory: isDirectory, treeHit: treeHit, membership: membership)
+            if decision.allow && treeHit && isDirectory {
+                decision = (allow: false, source: config.mode == .denylist ? "static" : "allowlist",
+                            reason: "directory clone bypasses per-file gating", cacheKernelAllow: false)
+            }
+            if decision.allow, config.mode == .denylist, let targetFile = msg.event.copyfile.target_file {
+                let targetKey = inodeKey(targetFile)
+                if config.protected.contains(targetKey) {
+                    key = targetKey
+                    path = tokenPath(targetFile.pointee.path)
+                    decision = (allow: false, source: "static", reason: "protected inode copied by supervised tree", cacheKernelAllow: false)
+                }
+            }
+            respondAuthResult(clientPtr, message, allow: decision.allow, cacheKernelAllow: decision.cacheKernelAllow,
+                              key: key, path: path, pid: eventPid)
+            appendReceipt(receiptLine(
+                pid: eventPid,
+                key: key,
+                decision: decision.allow ? "allow" : "deny",
+                source: decision.source,
+                path: path,
+                ancestry: ancestry(eventPid),
+                reason: copyReason(decision.reason, verb: "copied")
+            ))
+        }
+        return
+
+    case ES_EVENT_TYPE_AUTH_EXCHANGEDATA:
+        // WO-249@v1: exchangedata(2) swaps two inodes' data without opening
+        // either. Deny in-tree when either inode is protected (deny-list) or
+        // either is not allowed (allow-list); the receipt names file1.
+        let file1 = msg.event.exchangedata.file1
+        let file2 = msg.event.exchangedata.file2
+        let key1 = inodeKey(file1)
+        let key2 = inodeKey(file2)
+        let path1 = tokenPath(file1.pointee.path)
+        let path2 = tokenPath(file2.pointee.path)
+        let membership: TreeAncestry = treeContains(eventPid)
+            ? .inTree
+            : ancestryOf(eventPid, root: config.rootPid)
+        let treeHit = membership == .inTree
+        if treeHit {
+            treeInsert(eventPid)
+        }
+        let tracked = membership != .outside
+        if tracked {
+            authInFlight.enter()
+        }
+        defer {
+            if tracked {
+                authInFlight.leave()
+            }
+        }
+        let allow: Bool
+        let source: String
+        let reason: String
+        let cacheKernelAllow: Bool
+        if !treeHit {
+            allow = true
+            source = "outside-tree"
+            reason = "exchangedata outside supervised tree"
+            cacheKernelAllow = false
+        } else {
+            switch config.mode {
+            case .denylist:
+                if config.protected.contains(key1) || config.protected.contains(key2) {
+                    allow = false
+                    source = "static"
+                    reason = "protected inode exchanged by supervised tree"
+                    cacheKernelAllow = false
+                } else {
+                    allow = true
+                    source = ""
+                    reason = "not protected"
+                    cacheKernelAllow = true
+                }
+            case .allowlist:
+                let a1 = allowlistAllows(key1, path: path1, config: config)
+                let a2 = allowlistAllows(key2, path: path2, config: config)
+                if a1 && a2 {
+                    allow = true
+                    source = "allowlist"
+                    reason = "allowlist match"
+                    cacheKernelAllow = true
+                } else {
+                    allow = false
+                    source = "allowlist"
+                    reason = "not in allowlist (default deny)"
+                    cacheKernelAllow = false
+                }
+            }
+        }
+        respondAuthResult(clientPtr, message, allow: allow, cacheKernelAllow: cacheKernelAllow,
+                          key: key1, path: path1, pid: eventPid)
+        appendReceipt(receiptLine(
+            pid: eventPid,
+            key: key1,
             decision: allow ? "allow" : "deny",
             source: source,
-            path: path,
-            ancestry: chain,
+            path: path1,
+            ancestry: ancestry(eventPid),
             reason: reason
         ))
         return
@@ -800,7 +999,14 @@ var events: [es_event_type_t] = [
     ES_EVENT_TYPE_NOTIFY_FORK,
     ES_EVENT_TYPE_NOTIFY_EXEC,
     ES_EVENT_TYPE_NOTIFY_EXIT,
+    ES_EVENT_TYPE_AUTH_CLONE,
+    ES_EVENT_TYPE_AUTH_EXCHANGEDATA,
 ]
+// WO-249@v1: AUTH_COPYFILE exists only on macOS 12+; do not subscribe to it on
+// an older deployment target.
+if #available(macOS 12.0, *) {
+    events.append(ES_EVENT_TYPE_AUTH_COPYFILE)
+}
 let sub = es_subscribe(client, &events, UInt32(events.count))
 guard sub == ES_RETURN_SUCCESS else {
     FileHandle.standardError.write("[bulwark-es] es_subscribe failed\n".data(using: .utf8)!)
@@ -808,7 +1014,7 @@ guard sub == ES_RETURN_SUCCESS else {
     exit(67)
 }
 
-FileHandle.standardError.write("[bulwark-es] AUTH_OPEN gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
+FileHandle.standardError.write("[bulwark-es] AUTH_OPEN+CLONE+COPYFILE+EXCHANGEDATA gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
 
 // WO-127@v4: a normal run ends through the drain exit above; the Rust supervisor
 // sends SIGTERM only when startup fails (terminate_edge), and an operator may
