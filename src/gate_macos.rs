@@ -28,6 +28,9 @@ use crate::receipt::{Decision, Receipt, ReceiptLog};
 const ES_EDGE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 const EDGE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+// WO-207@v1: the edge exits with this code, without writing its ready marker,
+// when it could not mute its own process; keep in step with es_gate.swift.
+const EDGE_EXIT_NOT_SELF_MUTED: i32 = 69;
 
 /// Same public surface as the Linux gate.
 pub enum GateMode<'a> {
@@ -231,11 +234,7 @@ pub fn run(
         }
     };
 
-    if let Err(err) = wait_for_ready(&temp.ready, &mut edge_child) {
-        let _ = kill_pid(child_pid, libc::SIGKILL);
-        let _ = terminate_edge(&mut edge_child);
-        return Err(err);
-    }
+    refuse_unless_ready(&temp.ready, &mut edge_child, child_pid)?;
 
     match worker {
         Some(w) => eprintln!(
@@ -522,6 +521,10 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
             return Ok(());
         }
         if let Some(status) = edge.try_wait().context("poll ES edge readiness")? {
+            // WO-207@v1: name the self-mute refusal instead of a bare exit status.
+            if status.code() == Some(EDGE_EXIT_NOT_SELF_MUTED) {
+                bail!("ES edge refused to go ready: it could not mute its own process ({status})");
+            }
             bail!("ES edge exited before readiness: {status}");
         }
         if start.elapsed().unwrap_or_default() > EDGE_READY_TIMEOUT {
@@ -532,6 +535,18 @@ fn wait_for_ready(ready: &Path, edge: &mut Child) -> Result<()> {
         }
         thread::sleep(EDGE_POLL_INTERVAL);
     }
+}
+
+// WO-207@v1: the marker is written only after es_subscribe succeeded, so a
+// missing marker means no kernel gate. Refuse the run: the still-stopped child is
+// killed without ever receiving SIGCONT, so the command never executes ungated.
+fn refuse_unless_ready(ready: &Path, edge: &mut Child, child_pid: libc::pid_t) -> Result<()> {
+    if let Err(err) = wait_for_ready(ready, edge) {
+        let _ = kill_pid(child_pid, libc::SIGKILL);
+        let _ = terminate_edge(edge);
+        return Err(err);
+    }
+    Ok(())
 }
 
 // WO-127@v4: an abnormal edge death is a fail-open window the kernel already
@@ -840,5 +855,66 @@ mod supervise_tests {
         let code = supervise(child_pid, &mut edge, None).expect("clean drain");
         assert_eq!(code, 7);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // WO-207@v1: an edge that exits without ever writing the ready marker. The
+    // launched command, if it ran, would create `ran`; it must never appear.
+    fn edge_exits_before_ready(tag: &str, edge_exit: i32) -> (anyhow::Error, bool) {
+        let dir = scratch(tag);
+        let ran = dir.join("ran");
+        let command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("echo ran > '{}'", ran.display()),
+        ];
+        let child = spawn_stopped(&command, None).expect("spawn stopped child");
+        wait_until_stopped(child.pid).expect("child stopped");
+        let ready = dir.join("ready");
+        let mut edge = Command::new("/bin/sh")
+            .args(["-c", &format!("exit {edge_exit}")])
+            .spawn()
+            .expect("spawn fake edge");
+
+        let err = refuse_unless_ready(&ready, &mut edge, child.pid)
+            .expect_err("an edge that never went ready must refuse the run");
+
+        // Reap: the stopped child was killed, never resumed.
+        let mut status: libc::c_int = 0;
+        let r = unsafe { libc::waitpid(child.pid, &mut status, 0) };
+        assert_eq!(r, child.pid);
+        assert!(libc::WIFSIGNALED(status), "child was not killed");
+        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+        assert!(!ready.exists(), "no ready marker may exist");
+        let command_ran = ran.exists();
+        let _ = fs::remove_dir_all(&dir);
+        (err, command_ran)
+    }
+
+    #[test]
+    // WO-207@v1: a failed self-mute refuses the run and the command never executes.
+    fn edge_not_self_muted_refuses_and_never_resumes_the_child() {
+        let (err, command_ran) = edge_exits_before_ready("nomute", EDGE_EXIT_NOT_SELF_MUTED);
+        assert!(
+            err.to_string().contains("could not mute its own process"),
+            "{err}"
+        );
+        assert!(
+            !command_ran,
+            "the command ran although the edge never went ready"
+        );
+    }
+
+    #[test]
+    // WO-207@v1: a failed es_subscribe (edge exit 67) now happens before readiness.
+    fn edge_subscribe_failure_refuses_and_never_resumes_the_child() {
+        let (err, command_ran) = edge_exits_before_ready("nosub", 67);
+        assert!(
+            err.to_string().contains("ES edge exited before readiness"),
+            "{err}"
+        );
+        assert!(
+            !command_ran,
+            "the command ran although the edge never went ready"
+        );
     }
 }

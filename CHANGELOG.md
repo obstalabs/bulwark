@@ -40,6 +40,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 <!-- WO-249@v1: clonefile/copyfile/exchangedata copy an inode without opening it, so the gate never saw the read. -->
 - macOS: the gate now also decides `clonefile`, `copyfile` and `exchangedata` on the source inode, so a protected file cannot be cloned and read through the clone; directory clones are refused.
+<!-- WO-207@v1: the edge reported ready before it had subscribed, so the command's first opens could run ungated. -->
+- macOS: the Endpoint Security edge now reports ready only after its subscription has
+  succeeded, so the supervised command is never resumed before the gate is live; before,
+  a command whose first action was reading a protected file could read it. An edge that
+  cannot mute its own process now refuses to go ready (exit 69) instead of continuing
+  with a warning, and a run whose edge never went ready is refused with the command
+  killed while still stopped.
 <!-- WO-258@v1: root executing a user-writable binary from a Homebrew prefix is a privilege boundary. -->
 - `bulwark run`/`watch`/`launch` refuse to start as root when the binary's own path (or any
   ancestor directory) is writable by a non-root uid, and `bulwark install-root` installs a
