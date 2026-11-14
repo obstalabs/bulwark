@@ -572,7 +572,11 @@ fn tilde_protects_every_home_not_the_sudo_home() {
     // takes its command from the profile).
     let cmd = vec!["/bin/sh".to_string(), "-c".to_string(), script.clone()];
     let surfaces: [(&str, Vec<String>, Vec<String>); 3] = [
-        ("default profile", vec!["run".into(), "--allow-user-writable-engine".into()], cmd.clone()),
+        (
+            "default profile",
+            vec!["run".into(), "--allow-user-writable-engine".into()],
+            cmd.clone(),
+        ),
         (
             "--policy",
             vec![

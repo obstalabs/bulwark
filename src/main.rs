@@ -538,6 +538,16 @@ enum Cmd {
         #[arg(long = "deploy", value_name = "MODE", default_value = "auto")]
         deploy: String,
 
+        // WO-258@v1 (R258-4): the remote engine at a user-writable path (shm/scp/
+        // dist, or an uninstalled binary under --deploy never) runs only with this;
+        // production remotes run `sudo bulwark install-root` on the host and
+        // --deploy never, so the default stays refuse.
+        /// Allow the REMOTE engine to run from a user-writable path, marking the
+        /// remote receipts `engine_unverified`. Development lanes only; a
+        /// production remote installs with `sudo bulwark install-root`.
+        #[arg(long = "allow-user-writable-engine")]
+        allow_user_writable_engine: bool,
+
         // WO-29: dispatch-time hivebus key handoff.
         // WO-120: hardened dispatch never places key material; reject the pair at
         // parse time instead of silently skipping the handoff.
@@ -921,6 +931,7 @@ fn main() -> Result<()> {
             no_base_set,
             auto,
             deploy,
+            allow_user_writable_engine,
             hivebus_architect_pub,
             hivebus_worker_seed_generate,
             worker_uid,
@@ -945,6 +956,7 @@ fn main() -> Result<()> {
                 hivebus,
                 worker_uid,
                 auto_worker_uid,
+                allow_user_writable_engine,
                 state: state.as_deref(),
                 command: &command,
             };
@@ -1354,6 +1366,7 @@ fn build_gate_script(
     state: Option<&Path>,
     worker_uid: Option<u32>,
     agent: &str,
+    allow_user_writable_engine: bool,
 ) -> String {
     // WO-49: emit `--worker-uid <uid> ` on the remote sudo line when requested.
     // Empty otherwise, so the script is byte-identical to the pre-WO-49 form when
@@ -1375,6 +1388,14 @@ fn build_gate_script(
     let state = remote_state_arg(state);
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
+    // WO-258@v1 (R258-4): the waiver is opt-in and absent by default; the default
+    // script is therefore byte-identical to the pre-waiver form. When set, it is
+    // a single `--allow-user-writable-engine` token on the remote `run`.
+    let waiver = if allow_user_writable_engine {
+        " --allow-user-writable-engine"
+    } else {
+        ""
+    };
 
     // `mkdir {dir}` (NOT `-p`) so a pre-existing directory at the run path is a
     // hard error under `set -e` — combined with the unguessable random suffix in
@@ -1409,7 +1430,7 @@ trap cleanup EXIT INT TERM HUP
 mkfifo -m 600 {pl} {vl}
 {deploy}{invoke} run --consent remote --host-label {hl} \
   --prompt-out {pl} --verdict-in {vl} \
-  {state}{worker}{protect} -- {agent}
+  {state}{worker}{protect}{waiver} -- {agent}
 "#,
         dir = remote_dir,
         pl = prompt_lane,
@@ -1422,6 +1443,7 @@ mkfifo -m 600 {pl} {vl}
         worker = worker,
         protect = protect_args,
         agent = agent,
+        waiver = waiver,
     )
 }
 
@@ -1444,9 +1466,17 @@ fn build_hardened_gate_script(
     deploy_cleanup_dir: Option<&str>,
     run_args: &str,
     agent: &str,
+    allow_user_writable_engine: bool,
 ) -> String {
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
+    // WO-258@v1 (R258-4): opt-in waiver token on the remote `run`; absent by
+    // default so the hardened script bytes stay unchanged.
+    let waiver = if allow_user_writable_engine {
+        " --allow-user-writable-engine"
+    } else {
+        ""
+    };
     format!(
         r#"set -e
 cleanup() {{
@@ -1457,7 +1487,7 @@ cleanup() {{
 }}
 trap cleanup EXIT INT TERM HUP
 mkdir -p {dir}
-{deploy}{invoke} run --hardened {args} -- {agent}
+{deploy}{invoke} run --hardened {args}{waiver} -- {agent}
 "#,
         dir = remote_dir,
         cleanup = cleanup_targets,
@@ -1465,6 +1495,7 @@ mkdir -p {dir}
         invoke = remote_invocation,
         args = run_args,
         agent = agent,
+        waiver = waiver,
     )
 }
 
@@ -1591,6 +1622,8 @@ struct SshArgs<'a> {
     hivebus: HivebusDispatch<'a>,
     worker_uid: Option<u32>,
     auto_worker_uid: bool,
+    // WO-258@v1: waiver for the REMOTE engine (development deploy lanes only).
+    allow_user_writable_engine: bool,
     // WO-149@v1: forward a test-isolated integrity state path to remote runs.
     state: Option<&'a Path>,
     command: &'a [String],
@@ -1854,6 +1887,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         hivebus,
         worker_uid,
         auto_worker_uid,
+        allow_user_writable_engine,
         state,
         command,
     } = args;
@@ -1873,7 +1907,15 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
             anyhow::bail!("--hardened requires at least one --allow <glob>");
         }
         reject_widening_hardened_grants(allow)?;
-        return cmd_ssh_hardened(target, allow, no_base_set, deploy_mode, state, command);
+        return cmd_ssh_hardened(
+            target,
+            allow,
+            no_base_set,
+            deploy_mode,
+            state,
+            command,
+            allow_user_writable_engine,
+        );
     }
     if protect.is_empty() {
         anyhow::bail!("--protect is required (or use --hardened with --allow)");
@@ -1991,6 +2033,7 @@ fn cmd_ssh(args: SshArgs) -> Result<i32> {
         state,
         worker_uid,
         &agent,
+        allow_user_writable_engine,
     );
 
     eprintln!("[bulwark] ssh {target}: enforcement on the REMOTE kernel; consent routed locally");
@@ -2108,6 +2151,7 @@ fn cmd_ssh_hardened(
     deploy_mode: deploy::DeployMode,
     state: Option<&Path>,
     command: &[String],
+    allow_user_writable_engine: bool,
 ) -> Result<i32> {
     // Make a runnable bulwark available on the remote first (so the preflight can
     // call it), then PREFLIGHT: the remote kernel must support Landlock, or
@@ -2153,6 +2197,7 @@ fn cmd_ssh_hardened(
         remote_bulwark.cleanup_dir(),
         &run_args,
         &agent,
+        allow_user_writable_engine,
     );
 
     eprintln!(
@@ -4501,6 +4546,7 @@ mod tests {
             None,
             None,
             "'claude' '-p' 'fix it'",
+            false,
         );
         let expected = "set -e\n\
 cleanup() {\n  \
@@ -4557,6 +4603,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             None,
             "'agent'",
+            false,
         );
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -4601,6 +4648,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             Some(1000),
             "'agent'",
+            false,
         );
         let sequence = format!("{run_dir}\n{hivebus_dir}\n{script}");
 
@@ -4661,6 +4709,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             Some(1000),
             "'claude'",
+            false,
         );
         assert!(
             with.contains("--worker-uid 1000 --protect '/etc/shadow'"),
@@ -4683,6 +4732,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             None,
             "'claude'",
+            false,
         );
         assert!(
             !without.contains("--worker-uid"),
@@ -4715,6 +4765,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             Some(60000),
             "'agent'",
+            false,
         );
         assert!(
             script.contains("--worker-uid 60000"),
@@ -4855,6 +4906,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             Some(state),
             Some(60000),
             "'agent'",
+            false,
         );
         assert!(
             consent.contains("--state '/tmp/isolated state.toml' --worker-uid 60000"),
@@ -4868,6 +4920,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             &hardened_remote_args("--allow '/x'", Some(state), false),
             "'agent'",
+            false,
         );
         assert!(
             hardened.contains("run --hardened --state '/tmp/isolated state.toml' --allow '/x'"),
@@ -4900,6 +4953,7 @@ sudo /usr/local/bin/bulwark run --consent remote --host-label 'nullbot@host' \\\
             None,
             &hardened_remote_args("--allow '/var/log/**'", None, false),
             "'claude'",
+            false,
         );
         let expected = "set -e\n\
 cleanup() {\n  \
@@ -4949,6 +5003,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             None,
             &hardened_remote_args("--allow '/x'", None, true),
             "'a'",
+            false,
         );
         assert!(
             with.contains("run --hardened --no-base-set --allow '/x'"),
@@ -4961,8 +5016,48 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             None,
             &hardened_remote_args("--allow '/x'", None, false),
             "'a'",
+            false,
         );
         assert!(!without.contains("--no-base-set"), "off => flag absent");
+    }
+
+    // WO-258@v1 (R258-4): the remote engine waiver is opt-in and absent by
+    // default; when set, each builder emits the token exactly once.
+    #[test]
+    fn remote_scripts_emit_the_waiver_only_when_requested() {
+        let consent = build_gate_script(
+            "/tmp/d",
+            "/tmp/d/p",
+            "/tmp/d/v",
+            "sudo /usr/local/bin/bulwark",
+            None,
+            None,
+            "nullbot@host",
+            "--protect '/etc/shadow'",
+            None,
+            None,
+            "'agent'",
+            true,
+        );
+        assert_eq!(
+            consent.matches("--allow-user-writable-engine").count(),
+            1,
+            "waived consent script must carry the token once:\n{consent}"
+        );
+        let hardened = build_hardened_gate_script(
+            "/tmp/d",
+            "sudo /b",
+            None,
+            None,
+            &hardened_remote_args("--allow '/var/log/**'", None, false),
+            "'claude'",
+            true,
+        );
+        assert_eq!(
+            hardened.matches("--allow-user-writable-engine").count(),
+            1,
+            "waived hardened script must carry the token once:\n{hardened}"
+        );
     }
 
     // WO-141@v1: a launch profile's protect entries must come out of the plan

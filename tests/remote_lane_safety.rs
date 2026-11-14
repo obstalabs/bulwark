@@ -184,15 +184,21 @@ printf '%s\n' done > "$FIXTURE_ROOT/evidence/agent-done"
     }
 
     // WO-181@v1: launch the actual ssh command in a group the test can always reap.
-    fn spawn(&self) -> RunningCli {
+    // WO-258@v1 (R258-4): `waive` passes the engine waiver; the fail-closed test
+    // passes `false`.
+    fn spawn(&self, waive: bool) -> RunningCli {
         let stdout = File::create(self.root.join("stdout")).expect("create stdout capture");
         let stderr = File::create(self.root.join("stderr")).expect("create stderr capture");
         let mut paths = vec![self.root.join("bin")];
         paths.extend(std::env::split_paths(
             &std::env::var_os("PATH").expect("PATH is set"),
         ));
+        let mut ssh_args = vec!["ssh", "fixture.invalid", "--deploy", "never"];
+        if waive {
+            ssh_args.push("--allow-user-writable-engine");
+        }
         let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
-            .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            .args(&ssh_args)
             .args(["--worker-uid", &self.worker_uid.to_string()])
             .arg("--state")
             .arg(self.root.join("state.toml"))
@@ -344,7 +350,7 @@ fn pipe_capacity(path: &Path) -> usize {
 #[ignore = "requires root and Linux fanotify"]
 fn stopped_prompt_reader_never_blocks_remote_decisions() {
     let fixture = RemoteLaneFixture::new();
-    let mut cli = fixture.spawn();
+    let mut cli = fixture.spawn(true);
 
     wait_for_file(&fixture.root.join("lanes"), STARTUP_BOUND, "lane creation");
     wait_for_file(
@@ -423,6 +429,34 @@ fn stopped_prompt_reader_never_blocks_remote_decisions() {
     assert!(
         stderr.contains("prompt line(s) dropped"),
         "queue overflow was not reported\n{stderr}"
+    );
+}
+
+// WO-258@v1 (R258-4): without the waiver, the remote gate must refuse, and the
+// refusal must surface locally as a non-zero exit + stderr — never a silent
+// timeout that a stuck prompt reader would hide.
+#[test]
+#[ignore = "requires Linux + root for fanotify"]
+fn remote_gate_without_waiver_refuses_fail_closed() {
+    let fixture = RemoteLaneFixture::new();
+    let mut cli = fixture.spawn(false);
+
+    // The gate refuses before opening the prompt FIFO, so it exits non-zero and
+    // the prompt-reader fixture never publishes its pid.
+    let status = cli.wait(STARTUP_BOUND);
+    assert!(
+        !status.success(),
+        "remote gate without the waiver must refuse"
+    );
+
+    let stderr = fixture.contents("stderr");
+    assert!(
+        stderr.contains("refusing to run as root"),
+        "the remote refusal must reach the local stderr:\n{stderr}"
+    );
+    assert!(
+        !fixture.root.join("prompt-reader.pid").exists(),
+        "no prompt reader may start when the remote gate refuses"
     );
 }
 
@@ -735,7 +769,13 @@ exec /bin/sh -c "$remote_command"
         let marker = self.root.join("agent-ran");
         let agent = format!("printf '%s\\n' ran > {}", marker.display());
         let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
-            .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            .args([
+                "ssh",
+                "fixture.invalid",
+                "--deploy",
+                "never",
+                "--allow-user-writable-engine",
+            ])
             .args(["--worker-uid", &self.worker_uid.to_string()])
             .arg("--state")
             .arg(self.root.join("state.toml"))
@@ -1032,7 +1072,13 @@ printf '%s\n%s\n' "$1" "$2" > "$FIXTURE_ROOT/lanes"
             &std::env::var_os("PATH").expect("PATH is set"),
         ));
         let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
-            .args(["ssh", "fixture.invalid", "--deploy", "never"])
+            .args([
+                "ssh",
+                "fixture.invalid",
+                "--deploy",
+                "never",
+                "--allow-user-writable-engine",
+            ])
             .args(["--worker-uid", &self.worker_uid.to_string()])
             .arg("--state")
             .arg(self.root.join("state.toml"))
