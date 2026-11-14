@@ -235,6 +235,15 @@ In short:
 - Bulwark does **not** deliver the agent.
 - The agent runs as a normal remote command, inside the gated tree.
 
+The `--deploy` modes place the gate binary differently, and that difference is a
+trust boundary. `memfd` (the default) runs the gate from memory; `shm`, `scp` and
+`dist` place it at a user-writable path; `never` uses an existing remote binary —
+which is user-writable until you install it. Root must not execute a user-writable
+engine, so those development lanes run only with `--allow-user-writable-engine`, and
+the remote receipts then carry `engine_unverified`. The production lane is
+`sudo bulwark install-root` on the remote host followed by `--deploy never`: the
+installed engine is root-owned and needs no waiver.
+
 This is a deliberate boundary: Bulwark is a read-gate for a process tree, not a
 payload-delivery mechanism. An agent binary or installer you place on the host is a
 persistent footprint that Bulwark does not manage — bounding what the agent can read

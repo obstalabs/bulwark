@@ -2908,7 +2908,12 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
     .unwrap();
 
     let out = Command::new(bin())
-        .args(["watch", "--allow-user-writable-engine", "--allow-root", "--policy"])
+        .args([
+            "watch",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--policy",
+        ])
         .arg(&policy)
         .arg("--receipts")
         .arg(&receipts)

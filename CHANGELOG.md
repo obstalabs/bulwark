@@ -12,7 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binary as root: when a genuinely writable component exists it warns once (naming the component
   and why) and marks the summary `engine_unverified`, and it skips the refusal; the refusal now
   also covers the macOS Endpoint Security edge, and `install-root` refuses to overwrite an
-  existing engine unless `--force`.
+  existing engine unless `--force`. `ssh` gains the same opt-in flag for its development deploy
+  lanes (`shm`/`scp`/`dist`, or `--deploy never` with an uninstalled binary), so a dispatched
+  remote engine can acknowledge the waiver (and its receipts mark `engine_unverified`) instead of
+  refusing; the default stays refuse, and the production lane remains `install-root` on the
+  remote plus `--deploy never`.
 <!-- WO-253@v1: a release whose gate sources changed had no way to ship a rebuilt gate. -->
 - `macos-es-proof/package-release.sh stage` accepts a freshly built, notarized gate through
   `GATE_APP` (absolute path, checked before any download) when the gate sources changed since
