@@ -535,6 +535,7 @@ impl GateLaneFixture {
         let child = Command::new(env!("CARGO_BIN_EXE_bulwark"))
             .args([
                 "run",
+                "--allow-user-writable-engine",
                 "--consent",
                 "remote",
                 "--host-label",

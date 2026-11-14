@@ -48,6 +48,7 @@ fn run_allowlist(grant: &str, cmd: &[&str]) -> String {
     let mut c = Command::new(bin());
     c.args([
         "run",
+        "--allow-user-writable-engine",
         "--state",
         state.to_str().unwrap(),
         "--allow-root",

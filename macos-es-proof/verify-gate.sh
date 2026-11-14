@@ -196,7 +196,7 @@ sudo -v || fail "sudo auth failed"
 echo
 echo "==> TEST 1/3/4 (supervised tree, protected inode by path + symlink + hardlink): expect ALL DENIED"
 SUP_OUT="$WORK/supervised.out"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --protect "$PROT" -- /bin/bash -c "
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine --protect "$PROT" -- /bin/bash -c "
   for f in '$PROT' '$SYM' '$HARD'; do
     if cat \"\$f\" >/dev/null 2>&1; then echo \"READABLE \$f\"; else echo \"denied \$f\"; fi
   done
@@ -219,7 +219,7 @@ cat "$SUP_OUT" | sed 's/^/     /'
 echo
 echo "==> TEST 2 (unsupervised read while a gate is LIVE): expect ALLOWED"
 HOLD_DONE="$WORK/hold.done"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --protect "$PROT" -- /bin/bash -c "
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine --protect "$PROT" -- /bin/bash -c "
   # supervised holder: confirm WE are denied, then idle so the gate stays live
   cat '$PROT' >/dev/null 2>&1 && echo supervised-READABLE || echo supervised-denied
   sleep 4
@@ -242,7 +242,7 @@ echo "   (holder saw: $(cat "$WORK/hold.out" 2>/dev/null | tr '\n' ' '))"
 echo
 echo "==> TEST 5 (>=1000 opens under the gate without a deadline miss): expect gate survives"
 LOAD_OUT="$WORK/load.out"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --protect "$PROT" -- /bin/bash -c "
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine --protect "$PROT" -- /bin/bash -c "
   n=0
   for i in \$(seq 1 1200); do cat '$PLAIN' >/dev/null 2>&1 && n=\$((n+1)); done
   echo \"opened \$n\"
@@ -277,7 +277,7 @@ shape_denied() {
   local tag="$1" var="$2"; shift 2
   local rcpt="$WORK/$tag.jsonl" err="$WORK/$tag.stderr" out reason
   SHAPE_RUNS=$((SHAPE_RUNS + 1))
-  out=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+  out=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
           --receipts "$rcpt" --protect "$USER_FIX" -- "$@" 2>"$err")
   reason=$(shape_verdict "$out" "$err" "$rcpt" "$USER_FIX_INO")
   if [ -n "$reason" ]; then
@@ -332,7 +332,7 @@ T7_RCPT="$WORK/test7.jsonl"
 T7_ERR="$WORK/test7.stderr"
 echo "==> TEST 7 (WO-249: clonefile + exchangedata of a protected inode, ino=$T7_FIX_INO): expect BOTH denied (rc=-1, errno=1) with deny receipts naming cloned/exchanged"
 T7_RUNS=0
-T7_OUT=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+T7_OUT=$(sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
           --receipts "$T7_RCPT" --protect "$T7_FIX" -- \
           /usr/bin/python3 -I "$T7_HELPER" "$T7_FIX" "$T7_DST" "$T7_SCRATCH" 2>"$T7_ERR")
 T7_RUNS=1
