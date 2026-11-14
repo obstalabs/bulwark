@@ -73,6 +73,17 @@ if [ "${BULWARK_TEST_FAULTS:-0}" = "1" ]; then
     exit 0
 fi
 
+# WO-207@v1: by construction, not by discipline. Whatever flags built it, a gate
+# whose binary carries the fault-injection marker is refused before it can be
+# notarized, so a release gate cannot contain the knob. `grep -c` reads the whole
+# stream (no early close, no SIGPIPE under pipefail) and prints 0 on no match.
+FAULT_MARKERS=$(strings "$APP/Contents/MacOS/$BIN" | grep -c 'TEST-FAULT' || true)
+if [ "$FAULT_MARKERS" != "0" ]; then
+    echo "!! refusing to notarize: $APP contains test-fault code ($FAULT_MARKERS marker strings)"
+    exit 3
+fi
+echo "==> no test-fault code in $APP (checked: strings | grep -c 'TEST-FAULT' = 0)"
+
 # Notarize + staple (the WO-38 sealability requirement: WO-23's verification seal
 # runs against the production artifact, not a dev-only signed bundle). A locally
 # signed bundle DOES run under AMFI for dev iteration (embedded profile + no
