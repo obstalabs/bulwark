@@ -956,32 +956,37 @@ fn main() -> Result<()> {
 
 // ===== WO-258: root must never execute a binary a non-root uid can replace =====
 
-/// Whether a single path component (the running executable, or one of its
-/// ancestor directories) can be modified by a non-root principal. A non-root
-/// owner can always chmod/write their own path, so `owner != 0` alone is unsafe;
-/// a group- or other-write bit lets a whole group or the world modify it.
+/// Why a single path component (the running executable, or one of its ancestor
+/// directories) can be modified by a non-root principal: a non-root owner, or a
+/// group/other write bit. `None` means root-owned and neither group- nor
+/// other-writable. The returned clause is the sentence fragment the warning (and
+/// only the warning) appends after the path.
 ///
 /// WO-258 note: a macOS extended ACL can also grant write with no mode bit set.
 /// libc does not expose the ACL API, so this catches the load-bearing
 /// Homebrew/linuxbrew and world-writable shapes (`owner != 0`, group/other
 /// write); an extended-ACL write grant is a documented residual.
-fn component_user_writable(_path: &Path, meta: &std::fs::Metadata) -> bool {
+fn writable_clause(meta: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     if meta.uid() != 0 {
-        return true;
+        return Some(format!("is writable by uid {}", meta.uid()));
     }
-    meta.mode() & 0o022 != 0
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Some(format!("has mode {mode:o} (group/other writable)"));
+    }
+    None
 }
 
 /// Walk the resolved executable and every ancestor directory up to `/`, returning
-/// the first component [`component_user_writable`] flags, or `None` when the whole
-/// chain is root-owned and neither group- nor other-writable.
-fn first_user_writable_component(exe: &Path) -> Option<PathBuf> {
+/// the first writable component and the clause that names why it is unsafe, or
+/// `None` when the whole chain is root-owned and neither group- nor other-writable.
+fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
     let mut cur = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
     loop {
         if let Ok(meta) = std::fs::metadata(&cur) {
-            if component_user_writable(&cur, &meta) {
-                return Some(cur);
+            if let Some(clause) = writable_clause(&meta) {
+                return Some((cur, clause));
             }
         }
         match cur.parent() {
@@ -994,30 +999,20 @@ fn first_user_writable_component(exe: &Path) -> Option<PathBuf> {
 /// WO-258@v1: refuse to proceed as uid 0 from a location a non-root uid can
 /// modify, so a trojaned binary (or a swapped symlink) cannot own the next
 /// privileged launch. Runs before any gate starts or any config is read. With
-/// `allow_user_writable_engine`, warns once and skips the refusal (dev/test only).
-fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
+/// `allow_user_writable_engine`, a genuine writable component is warned about
+/// once and the run proceeds; the returned bool is `true` only when a waiver was
+/// actually used — a clean root-owned engine makes the flag inert.
+fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Result<bool> {
     if unsafe { libc::geteuid() } != 0 {
-        return Ok(());
+        return Ok(false);
     }
     let exe = std::env::current_exe().context("cannot resolve the running executable")?;
 
-    if allow_user_writable_engine {
-        // One loud, named warning; the receipts summary still carries
-        // `engine_unverified` so the run cannot be mistaken for a verified one.
-        let resolved = exe.canonicalize().unwrap_or_else(|_| exe.clone());
-        let owner = std::fs::metadata(&resolved).map(|m| m.uid()).unwrap_or(0);
-        eprintln!(
-            "[bulwark] WARNING engine at {} is writable by uid {owner}; development and test use only",
-            resolved.display()
-        );
-        return Ok(());
-    }
-
     // The engine and, on macOS, the ES edge it spawns as a second root process
     // are the same boundary: root must not execute either from a user-writable
-    // path (WO-258 R258-2).
-    let mut offenders: Vec<PathBuf> = Vec::new();
+    // path (WO-258 R258-2). Compute offenders first so the waiver below never
+    // fires (or the summary never reads `engine_unverified`) on a clean engine.
+    let mut offenders: Vec<(PathBuf, String)> = Vec::new();
     if let Some(o) = first_user_writable_component(&exe) {
         offenders.push(o);
     }
@@ -1028,10 +1023,22 @@ fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Resu
         }
     }
 
-    if let Some(offender) = offenders.first() {
-        anyhow::bail!("{}", refusal_message(offender));
+    if offenders.is_empty() {
+        return Ok(false);
     }
-    Ok(())
+
+    let (path, clause) = &offenders[0];
+    if !allow_user_writable_engine {
+        anyhow::bail!("{}", refusal_message(path));
+    }
+
+    // One loud, named warning; the caller marks the summary `engine_unverified`.
+    eprintln!(
+        "[bulwark] WARNING engine component {} {}; development and test use only",
+        path.display(),
+        clause
+    );
+    Ok(true)
 }
 
 /// The refusal message, factored out so a non-root test can assert it names both
@@ -1083,7 +1090,7 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
     // Verify the DESTINATION chain, not just the self-image: installing under a
     // user-writable ancestor (e.g. an Intel Homebrew-owned /usr/local) would be a
     // root-owned file under a user-owned directory, which the gate must refuse.
-    if let Some(offender) = first_user_writable_component(&engine) {
+    if let Some((offender, _clause)) = first_user_writable_component(&engine) {
         anyhow::bail!(
             "install would land under a user-writable hierarchy: {} is writable by a \
              non-root uid; pick a root-owned --prefix",
@@ -3019,8 +3026,8 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // can modify — a trojaned binary owns the next root launch. Refuse before any
     // config is read or any gate process starts. The waiver warns once, marks the
     // run summary `engine_unverified`, and skips the refusal (dev/test only).
-    refuse_root_from_user_writable_path(args.allow_user_writable_engine)?;
-    receipt::set_engine_unverified(args.allow_user_writable_engine);
+    let waived = refuse_root_from_user_writable_path(args.allow_user_writable_engine)?;
+    receipt::set_engine_unverified(waived);
 
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
@@ -4391,7 +4398,7 @@ mod tests {
         let bin = nested.join("bulwark");
         std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
 
-        let offender =
+        let (offender, clause) =
             first_user_writable_component(&bin).expect("a user-owned path must be flagged");
         let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
         assert!(
@@ -4399,6 +4406,10 @@ mod tests {
             "offender {} should sit under the user-owned temp hierarchy {}",
             offender.display(),
             dir_canon.display()
+        );
+        assert!(
+            clause.contains("is writable by uid") || clause.contains("has mode"),
+            "the writable clause must name why ({clause})"
         );
 
         // The message the refusal emits names the offending path and the fix.

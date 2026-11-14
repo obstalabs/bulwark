@@ -475,3 +475,115 @@ fn privilege_drop_is_irreversible_to_setuid_exec() {
         "setuid-exec must NOT regain root after the drop (no_new_privs); got:\n{combined}"
     );
 }
+
+// WO-258@v1: the root-from-user-writable-path refusal must be fail-closed, and
+// the `--allow-user-writable-engine` waiver must be inert on a clean engine.
+// (a) no flag refuses before any work; (b) the flag warns once and marks the
+// summary `engine_unverified`; (c) a root-owned 0755 copy warns nothing.
+#[test]
+#[ignore = "requires Linux + root for fanotify"]
+fn engine_writable_refusal_and_waiver_are_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("wo258");
+    let secret = dir.join("secret");
+    fs::write(&secret, b"secret\n").unwrap();
+
+    // (a) no flag: refuse before any gate starts or config is read.
+    let rcpt_a = dir.join("a.jsonl");
+    let out = Command::new(bin())
+        .args(["run", "--protect"])
+        .arg(&secret)
+        .arg("--receipts")
+        .arg(&rcpt_a)
+        .arg("--")
+        .arg("/bin/true")
+        .output()
+        .expect("spawn run without waiver");
+    assert!(!out.status.success(), "run without the waiver must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing to run as root"),
+        "refusal must name the cause: {stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "the agent must not run: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !rcpt_a.exists(),
+        "no receipts file may be written on refusal"
+    );
+
+    // (b) waiver: warn exactly once and mark the summary.
+    let rcpt_b = dir.join("b.jsonl");
+    let out = Command::new(bin())
+        .args(["run", "--allow-user-writable-engine", "--protect"])
+        .arg(&secret)
+        .arg("--receipts")
+        .arg(&rcpt_b)
+        .arg("--state")
+        .arg(isolated_state("wo258b"))
+        .arg("--")
+        .arg("/bin/true")
+        .output()
+        .expect("spawn run with waiver");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "waived run must proceed: {stderr}");
+    assert_eq!(
+        stderr.matches("WARNING engine component").count(),
+        1,
+        "exactly one warning: {stderr}"
+    );
+    let body = fs::read_to_string(&rcpt_b).unwrap_or_default();
+    assert!(
+        body.contains(r#""engine_unverified":true"#),
+        "summary must carry engine_unverified: {body}"
+    );
+
+    // (c) root-owned 0755 copy: the flag is inert — no warning, no unverified.
+    let copy_dir = std::path::PathBuf::from(format!(
+        "/bulwark-wo258-root-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&copy_dir).unwrap();
+    let _ = Command::new("chmod").arg("0755").arg(&copy_dir).status();
+    let copy = copy_dir.join("bulwark");
+    fs::copy(bin(), &copy).unwrap();
+    let mut perms = fs::metadata(&copy).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&copy, perms).unwrap();
+
+    let rcpt_c = dir.join("c.jsonl");
+    let out = Command::new(&copy)
+        .args(["run", "--allow-user-writable-engine", "--protect"])
+        .arg(&secret)
+        .arg("--receipts")
+        .arg(&rcpt_c)
+        .arg("--state")
+        .arg(isolated_state("wo258c"))
+        .arg("--")
+        .arg("/bin/true")
+        .output()
+        .expect("spawn root-owned copy");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "clean engine must run: {stderr}");
+    assert!(
+        !stderr.contains("WARNING engine"),
+        "a clean engine must not warn: {stderr}"
+    );
+    let body = fs::read_to_string(&rcpt_c).unwrap_or_default();
+    assert!(
+        !body.contains("engine_unverified"),
+        "a clean engine must not be marked unverified: {body}"
+    );
+
+    let _ = fs::remove_file(&copy);
+    let _ = fs::remove_dir(&copy_dir);
+    let _ = fs::remove_dir_all(&dir);
+}

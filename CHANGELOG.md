@@ -9,9 +9,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 <!-- WO-258@v1: a deliberate, loud waiver for test and seal harnesses that build and run as root. -->
 - `run`/`watch`/`launch` gain `--allow-user-writable-engine` for harness runs of a freshly built
-  binary as root (warns, marks the summary `engine_unverified`, and skips the refusal); the
-  refusal now also covers the macOS Endpoint Security edge, and `install-root` refuses to
-  overwrite an existing engine unless `--force`.
+  binary as root: when a genuinely writable component exists it warns once (naming the component
+  and why) and marks the summary `engine_unverified`, and it skips the refusal; the refusal now
+  also covers the macOS Endpoint Security edge, and `install-root` refuses to overwrite an
+  existing engine unless `--force`.
 <!-- WO-253@v1: a release whose gate sources changed had no way to ship a rebuilt gate. -->
 - `macos-es-proof/package-release.sh stage` accepts a freshly built, notarized gate through
   `GATE_APP` (absolute path, checked before any download) when the gate sources changed since
