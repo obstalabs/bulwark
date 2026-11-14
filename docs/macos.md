@@ -48,6 +48,20 @@ still treats a process whose ancestry cannot be read as outside the supervised
 tree, so such a process is not held to the allow-list. Deny-list mode (the
 default, `--protect`) does not have this gap.
 
+## Startup ordering
+
+The command never runs before the kernel gate is live. The order is fixed:
+the command is forked **stopped**; the edge creates its Endpoint Security
+client; the edge mutes its own process; the edge **subscribes**; only then does
+it write its ready marker; the supervisor sees the marker and resumes the
+command. Readiness means *subscribed*: a marker on disk is the edge's statement
+that `AUTH_OPEN` events for the supervised tree are already being decided. If
+any step fails (no client, the self-mute fails, the subscription fails, the
+marker cannot be written) the edge exits without a marker, the supervisor
+refuses the run, and the stopped command is killed without ever executing.
+In 0.10.0 and earlier the marker was written before the subscription, so a
+command's first opens could run ungated.
+
 ## Crash posture (honest limitation)
 
 The macOS gate is **not crash-safe** the way Linux `--hardened` mode is. On Linux,

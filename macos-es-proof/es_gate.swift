@@ -987,21 +987,19 @@ let testFaultSkipSelfMute = ProcessInfo.processInfo.environment["BULWARK_TEST_FA
 #else
 let testFaultSkipSelfMute = false
 #endif
+// WO-207@v1: the self-mute is what lets the edge write its ready marker and
+// receipts AFTER subscribing. Without it the edge would adjudicate its own
+// opens, so an edge that is not self-muted refuses to go ready: no marker is
+// written and the supervisor never resumes the agent.
+let exitNotSelfMuted: Int32 = 69
+var selfMuted = false
 if kr == KERN_SUCCESS && !testFaultSkipSelfMute {
-    _ = es_mute_process(client, &selfToken)
-} else {
-    FileHandle.standardError.write("[bulwark-es] WARN could not obtain self audit token (kr=\(kr)); not self-muted\n".data(using: .utf8)!)
+    selfMuted = es_mute_process(client, &selfToken) == ES_RETURN_SUCCESS
 }
-
-// Write the ready marker BEFORE subscribing, so the write completes while the
-// gate is not yet live (belt-and-suspenders with the self-mute above). Plain
-// write, not atomically: (which does a temp-file + rename = extra opens).
-do {
-    try "ready\n".write(toFile: config.readyPath, atomically: false, encoding: .utf8)
-} catch {
-    FileHandle.standardError.write("[bulwark-es] cannot write ready marker: \(error)\n".data(using: .utf8)!)
+guard selfMuted else {
+    FileHandle.standardError.write("[bulwark-es] FATAL not self-muted (task_info kr=\(kr)); refusing to go ready\n".data(using: .utf8)!)
     es_delete_client(client)
-    exit(68)
+    exit(exitNotSelfMuted)
 }
 
 // WO-207@v1: test-only delay before es_subscribe (see the fault-injection note
@@ -1034,6 +1032,19 @@ guard sub == ES_RETURN_SUCCESS else {
     FileHandle.standardError.write("[bulwark-es] es_subscribe failed\n".data(using: .utf8)!)
     es_delete_client(client)
     exit(67)
+}
+
+// WO-207@v1: readiness means SUBSCRIBED. The supervisor resumes the agent as
+// soon as this marker exists, so it is written only after es_subscribe has
+// succeeded; written earlier, the agent's first opens ran ungated. The edge is
+// self-muted (checked above), so this write is not adjudicated by the gate.
+// Plain write, not atomically: (which does a temp-file + rename = extra opens).
+do {
+    try "ready\n".write(toFile: config.readyPath, atomically: false, encoding: .utf8)
+} catch {
+    FileHandle.standardError.write("[bulwark-es] cannot write ready marker: \(error)\n".data(using: .utf8)!)
+    es_delete_client(client)
+    exit(68)
 }
 
 FileHandle.standardError.write("[bulwark-es] AUTH_OPEN+CLONE+COPYFILE+EXCHANGEDATA gate live mode=\(config.mode.rawValue) root_pid=\(config.rootPid) protected=\(config.protected.count) allow_once=\(config.allowOnce.count) allow_inodes=\(config.allowed.count) allow_globs=\(config.allowGlobs.count) allow_roots=\(config.allowRoots.count)\n".data(using: .utf8)!)
