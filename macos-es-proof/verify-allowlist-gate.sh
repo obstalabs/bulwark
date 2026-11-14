@@ -243,7 +243,7 @@ echo
 echo "==> TEST 1/2/3/4a/5 (allow-list supervised tree): expect allow dir readable, sibling and symlink denied, granted-inode hardlink readable"
 SUP_OUT="$WORK/supervised.out"
 SUP_ERR="$WORK/supervised.err"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
   --receipts "$PWD/$EVENT_RECEIPTS" \
@@ -289,7 +289,7 @@ echo "==> TEST 4b (foreign file hardlinked into the granted folder AFTER launch,
 T4_OUT="$WORK/hardlink_in.out"
 T4_ERR="$WORK/hardlink_in.err"
 : > "$T4_OUT"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
   --receipts "$PWD/$EVENT_RECEIPTS" \
@@ -364,7 +364,7 @@ if [ "$CLONE_BUILD_OK" = 1 ]; then
   DENY_FILE_INO=$(stat -f %i "$DENY_FILE")
   ALLOW_DIR_INO=$(stat -f %i "$ALLOW_DIR")
   : > "$CLONE_RCPT"
-  sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+  sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
     --deny-all --allow "$ALLOW_DIR/**" --receipts "$CLONE_RCPT" \
     -- "$ALLOW_DIR/clone_probe" "$ALLOW_FILE" "$CLONE_IN_GRANT_DST" "$DENY_FILE" "$CLONE_SIBLING_DST" "$ALLOW_DIR" "$CLONE_DIR_DST" \
     > "$CLONE_OUT" 2> "$CLONE_ERR"
@@ -398,7 +398,7 @@ echo
 echo "==> TEST 6 (>=1000 opens under allow-list without a deadline miss): expect gate survives"
 LOAD_OUT="$WORK/load.out"
 LOAD_ERR="$WORK/load.err"
-sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run \
+sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
   --receipts "$PWD/$EVENT_RECEIPTS" \

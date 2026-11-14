@@ -42,7 +42,12 @@ fn scratch(tag: &str) -> PathBuf {
 // WO-13@v1: run one gate with a per-test state file so the taint lifecycle is observable.
 fn run_gate(secret: &Path, state: &Path, cmd: &[&str]) -> String {
     let out = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(secret)
         .arg("--state")
         .arg(state)
@@ -93,7 +98,12 @@ fn unclean_restart_taints_then_reset_clears() {
     // WO-178@v1: the SIGKILLed gate never removes its own cgroup scope.
     let mut child = common::HardKillScopeGuard::new(
         Command::new(bin())
-            .args(["run", "--allow-root", "--protect"])
+            .args([
+                "run",
+                "--allow-user-writable-engine",
+                "--allow-root",
+                "--protect",
+            ])
             .arg(&secret)
             .arg("--state")
             .arg(&state)
@@ -189,7 +199,12 @@ fn taint_receipt_is_recorded() {
     // WO-178@v1: the SIGKILLed gate never removes its own cgroup scope.
     let mut child = common::HardKillScopeGuard::new(
         Command::new(bin())
-            .args(["run", "--allow-root", "--protect"])
+            .args([
+                "run",
+                "--allow-user-writable-engine",
+                "--allow-root",
+                "--protect",
+            ])
             .arg(&secret)
             .arg("--state")
             .arg(&state)
@@ -206,7 +221,12 @@ fn taint_receipt_is_recorded() {
 
     // Next run writes a taint receipt to the receipts file.
     Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&secret)
         .arg("--state")
         .arg(&state)
@@ -250,7 +270,12 @@ fn in_tree_policy_rewrite_taints_next_run() {
     // the gate exits with the child's status and every child here succeeds.
     let run_policy = |cmd: &[&str]| -> String {
         let out = Command::new(bin())
-            .args(["run", "--allow-root", "--policy"])
+            .args([
+                "run",
+                "--allow-user-writable-engine",
+                "--allow-root",
+                "--policy",
+            ])
             .arg(&policy)
             .arg("--state")
             .arg(&state)

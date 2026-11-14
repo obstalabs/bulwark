@@ -93,6 +93,7 @@ fn remote_split_denies_then_caches_allow_session() {
     let status = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "remote",

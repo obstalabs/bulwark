@@ -66,7 +66,12 @@ fn bind_mount_alias_is_gated() {
     assert!(mount.success(), "bind mount setup failed");
 
     let out = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&secret)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -108,6 +113,7 @@ fn graceful_sigterm_denies_held_read() {
     let mut child = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -154,7 +160,12 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     // WO-149@v1: one integrity state for both runs of this test, never the host default.
     let state = isolated_state("regress");
     let denied = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&secret)
         // WO-149@v1: isolate this run's integrity state.
         .arg("--state")
@@ -170,7 +181,12 @@ fn defended_vectors_still_pass_after_filesystem_mark() {
     );
 
     let allowed = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&secret)
         // WO-149@v1: isolate this run's integrity state.
         .arg("--state")
@@ -199,7 +215,13 @@ fn worker_uid_drops_agent_and_gate_still_denies() {
 
     // The agent prints its uid, then tries to read the protected file.
     let out = Command::new(bin())
-        .args(["run", "--worker-uid", NOBODY, "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--worker-uid",
+            NOBODY,
+            "--protect",
+        ])
         .arg(&secret)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -252,7 +274,13 @@ fn worker_uid_agent_cannot_kill_the_root_supervisor() {
         secret.display()
     );
     let out = Command::new(bin())
-        .args(["run", "--worker-uid", NOBODY, "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--worker-uid",
+            NOBODY,
+            "--protect",
+        ])
         .arg(&secret)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -332,7 +360,12 @@ fn queue_overflow_fails_closed() {
     let out = Command::new("timeout")
         .arg("90")
         .arg(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&secret)
         .arg("--receipts")
         .arg(&receipts)
@@ -416,7 +449,7 @@ fn privilege_drop_is_irreversible_to_setuid_exec() {
         helper.display()
     );
     let out = Command::new(bin())
-        .args(["run", "--protect"])
+        .args(["run", "--allow-user-writable-engine", "--protect"])
         .arg(&secret)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")

@@ -49,6 +49,7 @@ fn run_hardened(grant: &str, cmd: &[&str]) -> String {
     let mut c = Command::new(bin());
     c.args([
         "run",
+        "--allow-user-writable-engine",
         "--state",
         state.to_str().unwrap(),
         "--hardened",
@@ -136,7 +137,12 @@ fn hardened_rejects_symlink_widening_grant() {
     std::os::unix::fs::symlink(&broad, &glink).unwrap();
 
     let out = Command::new(bin())
-        .args(["run", "--hardened", "--allow"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--hardened",
+            "--allow",
+        ])
         .arg(&glink)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -176,7 +182,7 @@ fn hardened_rejects_symlink_widening_grant() {
 fn hardened_rejects_relative_grant() {
     let out = Command::new(bin())
         // WO-149@v1: isolate this test's integrity state from the host default.
-        .args(["run", "--state"])
+        .args(["run", "--allow-user-writable-engine", "--state"])
         .arg(isolated_state("relative"))
         .args(["--hardened", "--allow", "tmp/**", "--", "true"])
         .output()
@@ -284,7 +290,12 @@ fn hardened_floor_grants_files_and_directories_alike() {
         g = g.display()
     );
     let out = Command::new(bin())
-        .args(["run", "--hardened", "--allow"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--hardened",
+            "--allow",
+        ])
         .arg(format!("{}/**", d.display()))
         .arg("--allow")
         .arg(&f)
@@ -392,7 +403,12 @@ fn hardened_floor_does_not_cover_other_processes_in_proc() {
          echo AGENT_RAN_TO_END; exit 0"
     );
     let out = Command::new(bin())
-        .args(["run", "--hardened", "--allow"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--hardened",
+            "--allow",
+        ])
         .arg(format!("{}/**", dir.display()))
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -454,7 +470,13 @@ fn run_hardened_as_root(
     cmd: &[&str],
 ) -> std::process::Output {
     let mut c = Command::new(bin());
-    c.args(["run", "--hardened", "--allow", grant]);
+    c.args([
+        "run",
+        "--allow-user-writable-engine",
+        "--hardened",
+        "--allow",
+        grant,
+    ]);
     c.args(extra);
     // WO-149@v1: each caller is one test, so each gets its own integrity state.
     c.arg("--state").arg(isolated_state("hardened-root"));
@@ -641,7 +663,12 @@ fn hardened_floor_grants_system_wide_proc_files_only() {
                   echo \"CMDLINE1: $(cat /proc/1/cmdline 2>&1 | tr '\\0' ' ')\"; \
                   echo AGENT_RAN_TO_END; exit 0";
     let out = Command::new(bin())
-        .args(["run", "--hardened", "--allow"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--hardened",
+            "--allow",
+        ])
         .arg(format!("{}/**", dir.display()))
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")

@@ -81,6 +81,7 @@ fn scenario(tag: &str, verdict: &str) -> (String, String) {
     let mut gate = Command::new(bin());
     gate.args([
         "run",
+        "--allow-user-writable-engine",
         "--allow-root",
         "--consent",
         "socket",
@@ -182,6 +183,7 @@ fn agent_cannot_answer_its_own_consent() {
     let status = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -286,6 +288,7 @@ int main(int c,char**v){int s=socket(AF_UNIX,SOCK_STREAM,0);
     let status = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -338,6 +341,7 @@ fn run_and_expect_refusal(sock: &std::path::Path) -> String {
     let out = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -445,7 +449,13 @@ fn node_is_0600_socket_owned_by_invoking_user() {
     // WO-178@v1: the killed gate never removes its own cgroup scope.
     let mut gate = common::HardKillScopeGuard::new(
         Command::new(bin())
-            .args(["run", "--consent", "socket", "--consent-socket"])
+            .args([
+                "run",
+                "--allow-user-writable-engine",
+                "--consent",
+                "socket",
+                "--consent-socket",
+            ])
             .arg(&sock)
             // WO-149@v1: isolate this test's integrity state from the host default.
             .arg("--state")
@@ -499,6 +509,7 @@ fn root_default_socket_ignores_xdg_runtime_dir() {
         Command::new(bin())
             .args([
                 "run",
+                "--allow-user-writable-engine",
                 "--state",
                 state.to_str().unwrap(),
                 "--consent",
@@ -613,6 +624,7 @@ fn non_root_client_connects_to_the_root_gate_default_without_socket() {
     let mut gate = Command::new(bin());
     gate.args([
         "run",
+        "--allow-user-writable-engine",
         "--allow-root",
         "--consent",
         "socket",
@@ -692,6 +704,7 @@ fn root_parent_is_0711_under_umask_077_and_invoking_user_connects() {
         Command::new(bin())
             .args([
                 "run",
+                "--allow-user-writable-engine",
                 "--state",
                 state.to_str().unwrap(),
                 "--allow-root",

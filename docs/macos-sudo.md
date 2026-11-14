@@ -22,6 +22,10 @@ the offending path. Install a root-owned copy once with `sudo bulwark install-ro
 (it copies the engine, and on macOS the gate bundle, to a root-owned 0755 location)
 and run root via the path it prints.
 
+(The check looks at the binary's owner and its group/other write bits, plus every
+ancestor directory. A macOS **extended ACL** granting write is not yet detected —
+that is a known gap.)
+
 ## Why **not** passwordless sudo (`NOPASSWD`) — the important part
 
 On macOS, `sudo bulwark run` drops a would-be-root agent to the invoking user

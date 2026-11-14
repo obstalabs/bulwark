@@ -80,7 +80,12 @@ fn stalled_log_reader_does_not_block_outside_opens() {
         allowed.display()
     );
     let gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -128,6 +133,7 @@ fn pending_consent_does_not_delay_outside_opens() {
     let gate = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -180,7 +186,7 @@ fn persistent_response_write_failure_tears_down_without_blocking() {
         let stderr = fs::File::create(&stderr_path).expect("create gate stderr");
         let stdout = fs::File::create(&stdout_path).expect("create agent stdout");
         let mut command = Command::new(bin());
-        command.args(["run", "--allow-root"]);
+        command.args(["run", "--allow-user-writable-engine", "--allow-root"]);
         if deny_all {
             command.arg("--deny-all");
         } else {
@@ -300,6 +306,7 @@ fn persistent_consent_response_failure_never_reuses_the_held_fd() {
         let gate = Command::new(bin())
             .args([
                 "run",
+                "--allow-user-writable-engine",
                 "--allow-root",
                 "--consent",
                 "socket",
@@ -379,7 +386,13 @@ fn agent_cannot_restore_the_gate_oom_score_after_the_uid_drop() {
         release.display()
     );
     let gate = Command::new(bin())
-        .args(["run", "--worker-uid", &WORKER_UID.to_string(), "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--worker-uid",
+            &WORKER_UID.to_string(),
+            "--protect",
+        ])
         .arg(&secret)
         .arg("--state")
         .arg(fs.path("state.toml"))
@@ -485,7 +498,7 @@ fn a_stalled_stderr_never_costs_the_receipts_file_a_line() {
     // would corrupt this test's exact per-sink accounting.
     let state = fs.path("state.toml");
     let mut gate = Command::new(bin())
-        .args(["run", "--state"])
+        .args(["run", "--allow-user-writable-engine", "--state"])
         .arg(&state)
         .args(["--allow-root", "--protect"])
         .arg(&protected)
@@ -573,7 +586,12 @@ fn the_supervised_tree_is_reaped_if_the_gate_is_killed() {
         leak.display()
     );
     let gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1162,7 +1180,7 @@ fn pdeathsig_kills_a_dropped_direct_child_without_the_cgroup_layer() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP", "1")
-        .args(["run", "--protect"])
+        .args(["run", "--allow-user-writable-engine", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1210,7 +1228,7 @@ fn a_run_does_not_make_the_agents_stderr_nonblocking() {
     fs::write(&allowed, "ok\n").unwrap();
 
     let out = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args(["run", "--allow-user-writable-engine", "--allow-root", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1253,7 +1271,7 @@ fn bounded_consent_queue_denies_beyond_the_cap_without_fd_growth() {
     // which would add a spurious +1 taint deny to this test's exact counts.
     let state = fs.path("state.toml");
     let mut gate = Command::new(bin())
-        .args(["run", "--state"])
+        .args(["run", "--allow-user-writable-engine", "--state"])
         .arg(&state)
         .args(["--allow-root", "--consent", "socket", "--consent-socket"])
         .arg(&sock)
@@ -1349,7 +1367,7 @@ fn graceful_shutdown_denies_all_deferred_consents() {
     // which would add a spurious +1 taint deny to this test's exact counts.
     let state = fs.path("state.toml");
     let mut gate = Command::new(bin())
-        .args(["run", "--state"])
+        .args(["run", "--allow-user-writable-engine", "--state"])
         .arg(&state)
         .args(["--allow-root", "--consent", "socket", "--consent-socket"])
         .arg(&sock)
@@ -1444,7 +1462,7 @@ fn the_cgroup_layer_reaps_a_reparented_grandchild() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
-        .args(["run", "--protect"])
+        .args(["run", "--allow-user-writable-engine", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1509,7 +1527,12 @@ fn default_build_ignores_the_reaping_switches() {
     let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP", "1")
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1576,7 +1599,7 @@ fn a_dead_gate_reaps_an_alive_direct_childs_reparented_grandchild() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_PDEATHSIG", "1")
-        .args(["run", "--protect"])
+        .args(["run", "--allow-user-writable-engine", "--protect"])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1655,7 +1678,12 @@ fn normal_exit_reaps_a_daemonized_grandchild() {
         pid = gcpid.display(),
     );
     let mut gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1734,7 +1762,12 @@ fn normal_exit_reaps_via_the_freeze_fallback_when_cgroup_kill_fails() {
     let mut gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP_KILL", "1")
         .env("BULWARK_TEST_NO_CGROUP", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1808,6 +1841,7 @@ fn a_second_protected_read_during_teardown_is_denied_not_released() {
     let mut gate = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--allow-root",
             "--consent",
             "socket",
@@ -1862,7 +1896,12 @@ fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
     // running, naming the reason and --hardened.
     let out = Command::new(bin())
         .env("BULWARK_TEST_NO_SCOPE", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1890,6 +1929,7 @@ fn default_mode_refuses_without_a_reapable_scope_and_hardened_runs() {
         .env("BULWARK_TEST_NO_SCOPE", "1")
         .args([
             "run",
+            "--allow-user-writable-engine",
             // WO-149@v1: isolate the integrity state for this run.
             "--state",
             state.to_str().unwrap(),
@@ -1927,7 +1967,12 @@ fn default_mode_refuses_when_the_status_files_are_unreadable() {
 
     let out = Command::new(bin())
         .env("BULWARK_TEST_NO_PROCS_EVENTS", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -1978,7 +2023,12 @@ fn the_crash_watcher_freeze_fallback_reaps_a_reparented_grandchild() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_NO_CGROUP_KILL", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2057,7 +2107,12 @@ fn the_watcher_fails_closed_when_the_kill_write_and_status_reads_fail() {
     let gate = Command::new(bin())
         .env("BULWARK_TEST_KILL_WRITE_FAIL", "1")
         .env("BULWARK_TEST_EVENTS_READ_FAILS", "5")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2137,7 +2192,12 @@ fn the_watcher_exits_when_its_scope_is_removed() {
         pid = gcpid.display(),
     );
     let gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2241,7 +2301,12 @@ fn uncooperative_child_is_escalated_after_the_shutdown_grace() {
         pid = gcpid.display(),
     );
     let mut gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2319,7 +2384,12 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
         pid = gcpid.display(),
     );
     let mut gate = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2412,7 +2482,12 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
     );
 
     let out = Command::new(bin())
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         .args(["--receipts"])
         .arg(&receipts)
@@ -2475,7 +2550,12 @@ fn a_successful_kill_still_waits_for_positive_proof_of_empty() {
     let gate = Command::new(bin())
         .env("BULWARK_TEST_EVENTS_READ_FAILS", "999999999")
         .env("BULWARK_TEST_PROCS_READ_FAILS", "999999999")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2566,7 +2646,12 @@ fn the_watcher_stays_alive_while_events_report_populated() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_EVENTS_READ_POPULATED_FOR", "100")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2646,7 +2731,12 @@ fn a_panicking_supervisor_leaves_a_reaping_watcher() {
     );
     let gate = Command::new(bin())
         .env("BULWARK_TEST_PANIC_AFTER_SPAWN", "1")
-        .args(["run", "--allow-root", "--protect"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--protect",
+        ])
         .arg(&protected)
         // WO-149@v1: isolate the integrity state for this run.
         .arg("--state")
@@ -2742,7 +2832,7 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
     );
     let mut gate = Command::new(bin())
         .env("BULWARK_TEST_LOG_WRITER_BLOCK", "1")
-        .args(["run", "--state"])
+        .args(["run", "--allow-user-writable-engine", "--state"])
         .arg(&state)
         .args(["--allow-root", "--protect"])
         .arg(&protected)
@@ -2818,7 +2908,7 @@ fn watch_allows_a_protected_read_and_flags_it_would_deny() {
     .unwrap();
 
     let out = Command::new(bin())
-        .args(["watch", "--allow-root", "--policy"])
+        .args(["watch", "--allow-user-writable-engine", "--allow-root", "--policy"])
         .arg(&policy)
         .arg("--receipts")
         .arg(&receipts)
@@ -2911,6 +3001,7 @@ fn watch_refuses_a_receipts_dir_the_agent_could_empty() {
     let out = Command::new(bin())
         .args([
             "watch",
+            "--allow-user-writable-engine",
             "--worker-uid",
             &WORKER_UID.to_string(),
             "--protect",

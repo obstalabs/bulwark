@@ -52,6 +52,7 @@ fn isolated_state(tag: &str) -> PathBuf {
 fn run_gate(protect: &[&Path], cmd: &[&str], receipts: &Path) -> (String, String, String) {
     let mut c = Command::new(bin());
     c.arg("run");
+    c.arg("--allow-user-writable-engine");
     for p in protect {
         c.arg("--protect").arg(p);
     }
@@ -97,6 +98,7 @@ fn tilde_refuses_when_sudo_uid_owns_no_enumerated_home() {
     let out = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--state",
             state.to_str().unwrap(),
             "--",
@@ -150,6 +152,7 @@ fn tilde_refuses_explicit_worker_uid_with_no_home() {
     let out = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--state",
             state.to_str().unwrap(),
             "--worker-uid",
@@ -203,6 +206,7 @@ fn tilde_explicit_worker_uid_with_no_home_refuses_without_an_auto_exemption() {
     let out = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--state",
             state.to_str().unwrap(),
             "--worker-uid",
@@ -265,6 +269,7 @@ fn root_agent_home_is_covered_without_a_different_user_message() {
     let out = Command::new(bin())
         .args([
             "run",
+            "--allow-user-writable-engine",
             "--state",
             state.to_str().unwrap(),
             "--allow-root",
@@ -477,7 +482,12 @@ fn policy_with_absent_protected_path_starts_and_names_the_skip() {
     .unwrap();
 
     let out = Command::new(bin())
-        .args(["run", "--allow-root", "--policy"])
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--allow-root",
+            "--policy",
+        ])
         .arg(&policy)
         // WO-149@v1: isolate this test's integrity state from the host default.
         .arg("--state")
@@ -562,11 +572,12 @@ fn tilde_protects_every_home_not_the_sudo_home() {
     // takes its command from the profile).
     let cmd = vec!["/bin/sh".to_string(), "-c".to_string(), script.clone()];
     let surfaces: [(&str, Vec<String>, Vec<String>); 3] = [
-        ("default profile", vec!["run".into()], cmd.clone()),
+        ("default profile", vec!["run".into(), "--allow-user-writable-engine".into()], cmd.clone()),
         (
             "--policy",
             vec![
                 "run".into(),
+                "--allow-user-writable-engine".into(),
                 "--policy".into(),
                 policy.display().to_string(),
             ],
@@ -576,6 +587,7 @@ fn tilde_protects_every_home_not_the_sudo_home() {
             "launch",
             vec![
                 "launch".into(),
+                "--allow-user-writable-engine".into(),
                 "a".into(),
                 "--policy".into(),
                 launch_policy.display().to_string(),

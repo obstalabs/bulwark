@@ -12,7 +12,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, sync_channel, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -715,6 +715,18 @@ fn stderr_warn(tx: &Option<SyncSender<String>>, counters: &SinkCounters, line: &
     }
 }
 
+/// WO-258@v1: whether the running engine was launched under `--allow-user-
+/// writable-engine` (a root process started from a user-writable path). Set once
+/// per process by `cmd_run` before the gate starts; the summary line records it
+/// so a receipts file cannot be mistaken for a sealed, verified engine.
+static ENGINE_UNVERIFIED: AtomicBool = AtomicBool::new(false);
+
+/// Set for the lifetime of this process whether the engine is unverified. Read
+/// when the summary line is formed.
+pub fn set_engine_unverified(unverified: bool) {
+    ENGINE_UNVERIFIED.store(unverified, Ordering::SeqCst);
+}
+
 /// Form the accounting summary line. Read by the file writer at the `Summary`
 /// message, after it has drained every record, so the file counters balance
 /// exactly. The stderr state is a snapshot: `finished` when it balances at this
@@ -736,9 +748,15 @@ fn summary_json(file_counters: &SinkCounters, stderr_counters: &SinkCounters) ->
     } else {
         "timed_out"
     };
+    let engine_unverified = if ENGINE_UNVERIFIED.load(Ordering::SeqCst) {
+        r#","engine_unverified":true"#
+    } else {
+        ""
+    };
     format!(
-        r#"{{"ts_ms":{},"kind":"summary","file":{{"state":"finished","submitted":{fs},"written":{fw},"dropped":{fd}}},"stderr":{{"state":"{}","submitted":{ss},"written":{sw},"dropped":{sd}}}}}"#,
+        r#"{{"ts_ms":{},"kind":"summary"{},"file":{{"state":"finished","submitted":{fs},"written":{fw},"dropped":{fd}}},"stderr":{{"state":"{}","submitted":{ss},"written":{sw},"dropped":{sd}}}}}"#,
         now_unix_millis(),
+        engine_unverified,
         stderr_state,
     )
 }

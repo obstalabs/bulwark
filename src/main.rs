@@ -334,6 +334,14 @@ enum Cmd {
         #[arg(long = "allow-root")]
         allow_root: bool,
 
+        // WO-258@v1: skip the root-from-user-writable-path refusal for development
+        // and test harnesses that run a freshly built (user-owned) binary as root.
+        /// Skip the refusal to run as root from a user-writable path (development
+        /// and test harnesses only). Prints a warning and marks the run summary
+        /// `engine_unverified`.
+        #[arg(long = "allow-user-writable-engine")]
+        allow_user_writable_engine: bool,
+
         // WO-13: integrity circuit-breaker state file.
         /// Path to the integrity state file (circuit-breaker). Defaults to
         /// `/var/lib/bulwark/state.toml`. Hidden — primarily for tests.
@@ -385,6 +393,12 @@ enum Cmd {
         /// Keep the watched agent at uid 0 (see `run --allow-root`).
         #[arg(long = "allow-root")]
         allow_root: bool,
+
+        // WO-258@v1: see `run --allow-user-writable-engine`.
+        /// Skip the refusal to run as root from a user-writable path (development
+        /// and test harnesses only).
+        #[arg(long = "allow-user-writable-engine")]
+        allow_user_writable_engine: bool,
 
         /// Command (and arguments) to run, after `--`.
         #[arg(last = true, required = true)]
@@ -441,6 +455,12 @@ enum Cmd {
         /// Path to the integrity state file. Hidden — primarily for tests.
         #[arg(long = "state", value_name = "FILE", hide = true)]
         state: Option<PathBuf>,
+
+        // WO-258@v1: see `run --allow-user-writable-engine`.
+        /// Skip the refusal to run as root from a user-writable path (development
+        /// and test harnesses only).
+        #[arg(long = "allow-user-writable-engine")]
+        allow_user_writable_engine: bool,
     },
 
     // WO-13: integrity circuit-breaker taint reset.
@@ -664,6 +684,13 @@ enum Cmd {
         /// already installed separately).
         #[arg(long = "no-gate")]
         no_gate: bool,
+
+        // WO-258@v1: an operator who thinks the installed copy is pinned should
+        // learn it changed, so a reinstall over the same version refuses by default.
+        /// Overwrite an existing engine at the same version path instead of
+        /// refusing (a changed engine is otherwise never silent).
+        #[arg(long = "force")]
+        force: bool,
     },
 
     /// Preflight: check that this host can actually enforce — kernel version,
@@ -713,6 +740,7 @@ fn main() -> Result<()> {
             worker_uid,
             worker_gid,
             allow_root,
+            allow_user_writable_engine,
             state,
             command,
         } => {
@@ -756,6 +784,7 @@ fn main() -> Result<()> {
                 worker_uid,
                 worker_gid,
                 allow_root,
+                allow_user_writable_engine,
                 state: state.as_deref(),
                 command: &command,
                 watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
@@ -773,6 +802,7 @@ fn main() -> Result<()> {
             worker_uid,
             worker_gid,
             allow_root,
+            allow_user_writable_engine,
             command,
         } => {
             let code = cmd_run(RunArgs {
@@ -802,6 +832,7 @@ fn main() -> Result<()> {
                 worker_uid,
                 worker_gid,
                 allow_root,
+                allow_user_writable_engine,
                 state: None,
                 command: &command,
                 watch: true,
@@ -823,6 +854,7 @@ fn main() -> Result<()> {
             consent_socket,
             consent_timeout,
             state,
+            allow_user_writable_engine,
         } => {
             let code = cmd_launch(
                 &agent,
@@ -832,6 +864,7 @@ fn main() -> Result<()> {
                 consent_socket,
                 consent_timeout,
                 state.as_deref(),
+                allow_user_writable_engine,
             )?;
             exit(code);
         }
@@ -856,7 +889,11 @@ fn main() -> Result<()> {
             let code = cmd_doctor(format);
             exit(code);
         }
-        Cmd::InstallRoot { prefix, no_gate } => cmd_install_root(&prefix, no_gate),
+        Cmd::InstallRoot {
+            prefix,
+            no_gate,
+            force,
+        } => cmd_install_root(&prefix, no_gate, force),
         Cmd::Consent { socket, verdict } => cmd_consent(socket, verdict.as_deref()),
         Cmd::BaseSet => {
             println!("# Bulwark runtime base set — read paths allowed in --deny-all mode");
@@ -956,14 +993,43 @@ fn first_user_writable_component(exe: &Path) -> Option<PathBuf> {
 
 /// WO-258@v1: refuse to proceed as uid 0 from a location a non-root uid can
 /// modify, so a trojaned binary (or a swapped symlink) cannot own the next
-/// privileged launch. Runs before any gate starts or any config is read.
-fn refuse_root_from_user_writable_path() -> Result<()> {
+/// privileged launch. Runs before any gate starts or any config is read. With
+/// `allow_user_writable_engine`, warns once and skips the refusal (dev/test only).
+fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
     if unsafe { libc::geteuid() } != 0 {
         return Ok(());
     }
     let exe = std::env::current_exe().context("cannot resolve the running executable")?;
-    if let Some(offender) = first_user_writable_component(&exe) {
-        anyhow::bail!("{}", refusal_message(&offender));
+
+    if allow_user_writable_engine {
+        // One loud, named warning; the receipts summary still carries
+        // `engine_unverified` so the run cannot be mistaken for a verified one.
+        let resolved = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+        let owner = std::fs::metadata(&resolved).map(|m| m.uid()).unwrap_or(0);
+        eprintln!(
+            "[bulwark] WARNING engine at {} is writable by uid {owner}; development and test use only",
+            resolved.display()
+        );
+        return Ok(());
+    }
+
+    // The engine and, on macOS, the ES edge it spawns as a second root process
+    // are the same boundary: root must not execute either from a user-writable
+    // path (WO-258 R258-2).
+    let mut offenders: Vec<PathBuf> = Vec::new();
+    if let Some(o) = first_user_writable_component(&exe) {
+        offenders.push(o);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(edge) = gate::resolve_edge_path() {
+        if let Some(o) = first_user_writable_component(&edge) {
+            offenders.push(o);
+        }
+    }
+
+    if let Some(offender) = offenders.first() {
+        anyhow::bail!("{}", refusal_message(offender));
     }
     Ok(())
 }
@@ -984,7 +1050,7 @@ fn refusal_message(offender: &Path) -> String {
 /// `bulwark install-root`: copy this engine (and on macOS the gate bundle) to a
 /// root-owned 0755 hierarchy, verify ownership and modes after the copy, and
 /// print the root invocation to use.
-fn cmd_install_root(prefix: &Path, no_gate: bool) -> Result<()> {
+fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("install-root must run as root (sudo bulwark install-root)");
     }
@@ -997,6 +1063,14 @@ fn cmd_install_root(prefix: &Path, no_gate: bool) -> Result<()> {
         .with_context(|| format!("create {}", target_dir.display()))?;
 
     let engine = target_dir.join("bulwark");
+    // WO-258@v1 (R258-3): refuse to silently replace an installed engine; the
+    // operator who thinks a pinned copy is immutable must be told it changed.
+    if engine.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to replace it (a changed engine is never silent)",
+            engine.display()
+        );
+    }
     std::fs::copy(&exe, &engine).with_context(|| format!("copy engine to {}", engine.display()))?;
     harden_path_root_0755(&engine)?;
     // The directories the engine sits in must be root-owned 0755 too, or a
@@ -2550,6 +2624,9 @@ struct RunArgs<'a> {
     /// Keep a would-be-root agent at uid 0 instead of auto-dropping it to the
     /// invoking user. Opt-out of the safe default; only for a trusted agent.
     allow_root: bool,
+    /// WO-258@v1: skip the root-from-user-writable-path refusal (dev/test only);
+    /// carried so `cmd_run` can warn, mark the summary, and skip the refusal.
+    allow_user_writable_engine: bool,
     state: Option<&'a Path>,
     command: &'a [String],
     // WO-240@v1: shadow mode reuses run's policy resolution but enforces nothing.
@@ -2614,6 +2691,7 @@ fn cmd_launch(
     consent_socket: Option<PathBuf>,
     consent_timeout: u64,
     state: Option<&Path>,
+    allow_user_writable_engine: bool,
 ) -> Result<i32> {
     if init {
         let target = policy_path
@@ -2625,7 +2703,7 @@ fn cmd_launch(
 
     // WO-258@v1: same root-from-user-writable-path refusal as cmd_run, but placed
     // here because launch reads policy in this function before delegating.
-    refuse_root_from_user_writable_path()?;
+    refuse_root_from_user_writable_path(allow_user_writable_engine)?;
 
     // WO-117 (R1): one open and one read; the plan and the integrity record
     // both come from this snapshot, and cmd_run receives it instead of re-reading.
@@ -2668,6 +2746,7 @@ fn cmd_launch(
         worker_uid: None,
         worker_gid: None,
         allow_root: false,
+        allow_user_writable_engine,
         state,
         command: &plan.command,
         watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
@@ -2938,8 +3017,10 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
 fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // WO-258@v1: root must never start the gate from a location a non-root uid
     // can modify — a trojaned binary owns the next root launch. Refuse before any
-    // config is read or any gate process starts.
-    refuse_root_from_user_writable_path()?;
+    // config is read or any gate process starts. The waiver warns once, marks the
+    // run summary `engine_unverified`, and skips the refusal (dev/test only).
+    refuse_root_from_user_writable_path(args.allow_user_writable_engine)?;
+    receipt::set_engine_unverified(args.allow_user_writable_engine);
 
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
