@@ -33,9 +33,18 @@ INFO="GateInfo.plist"
     exit 1
 }
 
+# WO-207@v1: BULWARK_TEST_FAULTS=1 compiles the edge's test-only fault injection
+# in. Such a bundle is signed for local hardware proofs and never notarized, so it
+# cannot pass the seal scripts or ship.
+SWIFT_DEFINES=()
+if [ "${BULWARK_TEST_FAULTS:-0}" = "1" ]; then
+    SWIFT_DEFINES=(-D BULWARK_TEST_FAULTS)
+    echo "!! BULWARK_TEST_FAULTS=1: building a TEST-FAULT gate; it will not be notarized"
+fi
+
 echo "==> compiling $SRC universal (arm64 + x86_64)"
-xcrun --sdk macosx swiftc -O -o "${BIN}_arm64" "$SRC" -lEndpointSecurity -lbsm -target arm64-apple-macos11.0
-xcrun --sdk macosx swiftc -O -o "${BIN}_x86_64" "$SRC" -lEndpointSecurity -lbsm -target x86_64-apple-macos11.0
+xcrun --sdk macosx swiftc -O ${SWIFT_DEFINES[@]+"${SWIFT_DEFINES[@]}"} -o "${BIN}_arm64" "$SRC" -lEndpointSecurity -lbsm -target arm64-apple-macos11.0
+xcrun --sdk macosx swiftc -O ${SWIFT_DEFINES[@]+"${SWIFT_DEFINES[@]}"} -o "${BIN}_x86_64" "$SRC" -lEndpointSecurity -lbsm -target x86_64-apple-macos11.0
 lipo -create -output "$BIN" "${BIN}_arm64" "${BIN}_x86_64"
 rm -f "${BIN}_arm64" "${BIN}_x86_64"
 
@@ -56,6 +65,13 @@ codesign --force --sign "$IDENTITY" \
 
 echo "==> verifying signature + entitlement"
 codesign -dv --entitlements - "$APP" 2>&1 | grep -E "TeamIdentifier|endpoint-security|Runtime" || true
+
+# WO-207@v1: a test-fault gate stops here, signed but never notarized or stapled.
+if [ "${BULWARK_TEST_FAULTS:-0}" = "1" ]; then
+    echo
+    echo "==> TEST-FAULT gate ready (signed, NOT notarized): $(pwd)/$APP/Contents/MacOS/$BIN"
+    exit 0
+fi
 
 # Notarize + staple (the WO-38 sealability requirement: WO-23's verification seal
 # runs against the production artifact, not a dev-only signed bundle). A locally
