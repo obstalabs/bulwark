@@ -977,7 +977,17 @@ let kr = withUnsafeMutablePointer(to: &selfToken) { tokenPtr in
         task_info(mach_task_self_, task_flavor_t(TASK_AUDIT_TOKEN), intPtr, &tokenCount)
     }
 }
-if kr == KERN_SUCCESS {
+// WO-207@v1: test-only fault injection. Compiled in only with
+// -D BULWARK_TEST_FAULTS, which build-gate-bundle.sh refuses to notarize, so a
+// release gate never honours these variables. They exist to prove the startup
+// ordering on hardware, not as product options.
+#if BULWARK_TEST_FAULTS
+FileHandle.standardError.write("[bulwark-es] TEST-FAULT BUILD: fault injection compiled in; not a release gate\n".data(using: .utf8)!)
+let testFaultSkipSelfMute = ProcessInfo.processInfo.environment["BULWARK_TEST_FAULT_SKIP_SELF_MUTE"] == "1"
+#else
+let testFaultSkipSelfMute = false
+#endif
+if kr == KERN_SUCCESS && !testFaultSkipSelfMute {
     _ = es_mute_process(client, &selfToken)
 } else {
     FileHandle.standardError.write("[bulwark-es] WARN could not obtain self audit token (kr=\(kr)); not self-muted\n".data(using: .utf8)!)
@@ -993,6 +1003,18 @@ do {
     es_delete_client(client)
     exit(68)
 }
+
+// WO-207@v1: test-only delay before es_subscribe (see the fault-injection note
+// above); widens the window between here and the subscription.
+#if BULWARK_TEST_FAULTS
+let testFaultDelayCapMs: UInt32 = 20_000
+if let raw = ProcessInfo.processInfo.environment["BULWARK_TEST_FAULT_DELAY_BEFORE_SUBSCRIBE_MS"],
+   let ms = UInt32(raw), ms > 0 {
+    let bounded = min(ms, testFaultDelayCapMs)
+    FileHandle.standardError.write("[bulwark-es] TEST-FAULT delaying es_subscribe by \(bounded) ms\n".data(using: .utf8)!)
+    usleep(bounded * 1000)
+}
+#endif
 
 var events: [es_event_type_t] = [
     ES_EVENT_TYPE_AUTH_OPEN,

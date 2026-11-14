@@ -22,6 +22,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GATE_APP` (absolute path, checked before any download) when the gate sources changed since
   the previous release; it still reuses the previous release's gate when they did not, and
   without `GATE_APP` the refusal names `build-gate-bundle.sh` and `GATE_APP`.
+<!-- WO-207@v1: the startup ordering has to be provable on hardware without shipping a fault switch. -->
+- `macos-es-proof/build-gate-bundle.sh` builds a test-fault gate when `BULWARK_TEST_FAULTS=1`
+  is set: the edge's startup fault injection is compiled in, the bundle is signed for local
+  hardware proofs and never notarized, so it cannot be sealed or released. A normal build
+  contains none of it.
 
 ### Fixed
 <!-- WO-255@v1: the sign phase failed every correctly signed binary. -->
