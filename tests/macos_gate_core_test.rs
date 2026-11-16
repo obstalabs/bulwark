@@ -49,7 +49,8 @@ fn swift_edge_decides_by_inode_and_tracks_supervised_tree() {
         "allowOnce",
         "operator allowed once",
         "es_respond_flags_result(clientPtr, message, 0, false)",
-        "es_respond_flags_result(clientPtr, message, UInt32.max, cacheKernelAllow)",
+        // WO-249@v1: the flags responder now takes decideFile's `d.cacheKernelAllow`.
+        "es_respond_flags_result(clientPtr, message, UInt32.max, d.cacheKernelAllow)",
         "ES_RESPOND_RESULT_SUCCESS",
     ] {
         assert!(source.contains(needle), "es_gate.swift missing {needle}");
@@ -125,18 +126,20 @@ fn swift_edge_sign_extends_dev_and_flushes_receipts_before_exit() {
         denylist.contains(".unknown"),
         "deny-list branch must test .unknown"
     );
-    assert!(denylist.contains(r#"source = "edge-error""#));
-    let unknown_branch = between(denylist, ".unknown", "} else if");
+    // WO-249@v1: decideFile returns a tuple, so the deny-list branch sets `source:`/`allow:` fields, not assignments.
+    assert!(denylist.contains(r#"source: "edge-error""#));
+    let unknown_branch = between(denylist, ".unknown", "if !treeHit {");
     assert!(
-        unknown_branch.contains("allow = false"),
+        unknown_branch.contains("allow: false"),
         "unknown ancestry must DENY"
     );
     // A failed kernel response is receipted and the edge exits non-zero, which
     // the supervisor treats as abnormal.
+    // WO-249@v1: the response-failure block now receipts inline; bound it by the next event case.
     let respond_failure = between(
         &source,
         "if rr != ES_RESPOND_RESULT_SUCCESS",
-        "let path = pathForReceipt",
+        "case ES_EVENT_TYPE_AUTH_CLONE:",
     );
     assert!(respond_failure.contains("kernel response failed"));
     assert!(respond_failure.contains(r#"source: "edge-error""#));
