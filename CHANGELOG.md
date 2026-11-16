@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-16
+
 ### Changed
 <!-- WO-258@v1: a deliberate, loud waiver for test and seal harnesses that build and run as root. -->
 - `run`/`watch`/`launch` gain `--allow-user-writable-engine` for harness runs of a freshly built
