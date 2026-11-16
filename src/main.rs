@@ -1002,10 +1002,8 @@ fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
                 return Some((cur, clause));
             }
         }
-        match cur.parent() {
-            Some(parent) => cur = parent.to_path_buf(),
-            None => return None,
-        }
+        let parent = cur.parent()?;
+        cur = parent.to_path_buf();
     }
 }
 
@@ -2744,6 +2742,8 @@ fn launch_policy_source(
 }
 
 // WO-117@v1: enforce and digest one immutable snapshot of a launch policy.
+// WO-258@v1: cmd_launch gained an eighth flag for the engine waiver; keep the arg list intact.
+#[allow(clippy::too_many_arguments)]
 fn cmd_launch(
     agent: &str,
     policy_path: Option<&Path>,
