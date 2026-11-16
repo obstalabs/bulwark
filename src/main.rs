@@ -993,6 +993,7 @@ fn writable_clause(meta: &std::fs::Metadata) -> Option<String> {
 /// Walk the resolved executable and every ancestor directory up to `/`, returning
 /// the first writable component and the clause that names why it is unsafe, or
 /// `None` when the whole chain is root-owned and neither group- nor other-writable.
+// WO-258@v1: find the first exe-or-ancestor component writable by a non-root uid.
 fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
     let mut cur = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
     loop {
@@ -1055,6 +1056,7 @@ fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Resu
 
 /// The refusal message, factored out so a non-root test can assert it names both
 /// the offending path and the fix.
+// WO-258@v1: factor the refusal text so a non-root test can assert the path and fix.
 fn refusal_message(offender: &Path) -> String {
     format!(
         "refusing to run as root: {} is writable by a non-root uid, so the binary \
@@ -1069,6 +1071,7 @@ fn refusal_message(offender: &Path) -> String {
 /// `bulwark install-root`: copy this engine (and on macOS the gate bundle) to a
 /// root-owned 0755 hierarchy, verify ownership and modes after the copy, and
 /// print the root invocation to use.
+// WO-258@v1: copy the engine (and the macOS gate) to a root-owned 0755 hierarchy.
 fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("install-root must run as root (sudo bulwark install-root)");
@@ -1082,8 +1085,8 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
         .with_context(|| format!("create {}", target_dir.display()))?;
 
     let engine = target_dir.join("bulwark");
-    // WO-258@v1 (R258-3): refuse to silently replace an installed engine; the
-    // operator who thinks a pinned copy is immutable must be told it changed.
+    // WO-258@v1: refuse to silently replace an installed engine; an operator who
+    // thinks a pinned copy is immutable must be told it changed.
     if engine.exists() && !force {
         anyhow::bail!(
             "{} already exists; pass --force to replace it (a changed engine is never silent)",
@@ -1128,6 +1131,7 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
 }
 
 /// chown a path to root:root, chmod 0755, then verify both took effect.
+// WO-258@v1: chown root:root and chmod 0755, then verify both took effect.
 fn harden_path_root_0755(path: &Path) -> Result<()> {
     use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
     chown(path, Some(0), Some(0)).with_context(|| format!("chown root:root {}", path.display()))?;
@@ -1146,6 +1150,7 @@ fn harden_path_root_0755(path: &Path) -> Result<()> {
 /// Locate the `.app` bundle that contains the ES edge binary, by walking up until
 /// the path name ends in `.app`.
 #[cfg(target_os = "macos")]
+// WO-258@v1: walk up to the .app bundle that holds the ES edge binary.
 fn find_app_bundle(edge: &Path) -> Option<PathBuf> {
     let mut cur = edge.to_path_buf();
     loop {
@@ -1159,6 +1164,7 @@ fn find_app_bundle(edge: &Path) -> Option<PathBuf> {
 /// Copy the ES gate bundle next to the installed engine, preserving the signed
 /// bundle's internal modes and ownership (codesign cares about those bytes).
 #[cfg(target_os = "macos")]
+// WO-258@v1: copy the signed ES gate bundle beside the installed engine.
 fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
     let edge = gate::resolve_edge_path().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1177,6 +1183,7 @@ fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
 /// Recursive copy that preserves file bytes and permission bits (used for the
 /// signed gate bundle, whose internal modes must not be rewritten).
 #[cfg(target_os = "macos")]
+// WO-258@v1: recursive copy that preserves modes, for the signed gate bundle.
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     if src.is_dir() {
         std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
@@ -1366,6 +1373,7 @@ fn build_gate_script(
     state: Option<&Path>,
     worker_uid: Option<u32>,
     agent: &str,
+    // WO-258@v1: opt-in waiver for a remote dev-lane engine at a user-writable path.
     allow_user_writable_engine: bool,
 ) -> String {
     // WO-49: emit `--worker-uid <uid> ` on the remote sudo line when requested.
@@ -1388,9 +1396,8 @@ fn build_gate_script(
     let state = remote_state_arg(state);
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
-    // WO-258@v1 (R258-4): the waiver is opt-in and absent by default; the default
-    // script is therefore byte-identical to the pre-waiver form. When set, it is
-    // a single `--allow-user-writable-engine` token on the remote `run`.
+    // WO-258@v1: the waiver is opt-in and absent by default, so the default script
+    // is byte-identical to the pre-waiver form; when set it emits one token.
     let waiver = if allow_user_writable_engine {
         " --allow-user-writable-engine"
     } else {
@@ -1466,12 +1473,13 @@ fn build_hardened_gate_script(
     deploy_cleanup_dir: Option<&str>,
     run_args: &str,
     agent: &str,
+    // WO-258@v1: opt-in waiver for a remote dev-lane engine at a user-writable path.
     allow_user_writable_engine: bool,
 ) -> String {
     let deploy_prelude = deploy_prelude.map(|s| format!("{s}\n")).unwrap_or_default();
     let cleanup_targets = cleanup_targets(remote_dir, deploy_cleanup_dir);
-    // WO-258@v1 (R258-4): opt-in waiver token on the remote `run`; absent by
-    // default so the hardened script bytes stay unchanged.
+    // WO-258@v1: emit the waiver token only when requested, so the default script
+    // stays unchanged.
     let waiver = if allow_user_writable_engine {
         " --allow-user-writable-engine"
     } else {
@@ -1495,6 +1503,7 @@ mkdir -p {dir}
         invoke = remote_invocation,
         args = run_args,
         agent = agent,
+        // WO-258@v1: the {waiver} token above and this matching arg join the opt-in waiver into the run line.
         waiver = waiver,
     )
 }
@@ -5021,8 +5030,8 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(!without.contains("--no-base-set"), "off => flag absent");
     }
 
-    // WO-258@v1 (R258-4): the remote engine waiver is opt-in and absent by
-    // default; when set, each builder emits the token exactly once.
+    // WO-258@v1: the remote engine waiver is opt-in and absent by default; when
+    // set, each builder emits the token exactly once.
     #[test]
     fn remote_scripts_emit_the_waiver_only_when_requested() {
         let consent = build_gate_script(

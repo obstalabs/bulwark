@@ -432,7 +432,7 @@ fn stopped_prompt_reader_never_blocks_remote_decisions() {
     );
 }
 
-// WO-258@v1 (R258-4): without the waiver, the remote gate must refuse, and the
+// WO-258@v1: without the waiver, the remote gate must refuse, and the
 // refusal must surface locally as a non-zero exit + stderr — never a silent
 // timeout that a stuck prompt reader would hide.
 #[test]

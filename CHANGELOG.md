@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.11.0] - 2026-11-16
 
 ### Changed
+<!-- WO-258@v1: record the governing source citations for the 0.11.0 changes; no runtime behavior change. -->
+- Added governing source citations to the 0.11.0 changes (no runtime behavior change).
 <!-- WO-258@v1: a deliberate, loud waiver for test and seal harnesses that build and run as root. -->
 - `run`/`watch`/`launch` gain `--allow-user-writable-engine` for harness runs of a freshly built
   binary as root: when a genuinely writable component exists it warns once (naming the component

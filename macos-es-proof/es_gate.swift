@@ -609,7 +609,7 @@ func decideFile(
         // must decide immediately for every AUTH_OPEN event in-tree.
         let allowedByPolicy = allowlistAllows(key, path: path, config: config)
         if !treeHit {
-            // WO-128@v2: measurement instrument, decision unchanged. An outside
+            // WO-128@v3: measurement instrument, decision unchanged. An outside
             // open whose ancestry walk failed or hit maxDepth is named in the
             // receipt; the rule is chosen from that count.
             let reason: String
