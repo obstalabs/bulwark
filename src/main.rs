@@ -5456,6 +5456,7 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             None,
             None,
             "'/bin/true'",
+            false,
         );
         let cleanup_start = script.find("cleanup() {").expect("cleanup definition");
         let trap_line = "trap cleanup EXIT INT TERM HUP";

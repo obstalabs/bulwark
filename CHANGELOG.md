@@ -37,6 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses with "cannot read gate CDHash" for the same reason, `upload` can expand the `.pkg` it
   checks, and `pkg` keeps the sealed Developer ID signature instead of re-signing the CLI with
   new bytes.
+<!-- WO-258@v1: a Linux-only unit test still used the old argument count after the remote gate builder gained the waiver parameter. -->
+- Linux: `cargo test --bin bulwark` compiles again; a Linux-only unit test now passes the
+  engine-waiver argument to the remote gate builder.
 
 ### Security
 <!-- WO-249@v1: clonefile/copyfile/exchangedata copy an inode without opening it, so the gate never saw the read. -->
