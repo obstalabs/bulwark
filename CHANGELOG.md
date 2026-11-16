@@ -34,6 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fault-injection marker, whatever flags built it.
 
 ### Fixed
+<!-- WO-258@v1: satisfy clippy so the release build is green; no runtime behavior change. -->
+- The release build passes `cargo clippy --all-targets -- -D warnings` again (an internal
+  lint fix; no runtime behavior change).
 <!-- WO-255@v1: the sign phase failed every correctly signed binary. -->
 - `macos-es-proof/package-release.sh sign` no longer fails with "cannot read signing authority"
   on a correctly signed binary: the reader now consumes all of `codesign -dvvv`'s output
