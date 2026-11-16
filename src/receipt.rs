@@ -723,6 +723,7 @@ static ENGINE_UNVERIFIED: AtomicBool = AtomicBool::new(false);
 
 /// Set for the lifetime of this process whether the engine is unverified. Read
 /// when the summary line is formed.
+// WO-258@v1: set whether the running engine was launched under --allow-user-writable-engine.
 pub fn set_engine_unverified(unverified: bool) {
     ENGINE_UNVERIFIED.store(unverified, Ordering::SeqCst);
 }

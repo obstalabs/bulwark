@@ -1,10 +1,10 @@
 import Foundation
 
-// WO-39: deterministic source checks for AUTH callback deadline-safety invariants,
-// plus WO-249 source-shape checks on the production ES gate.
+// WO-39@v1: deterministic source checks for the AUTH deadline-safety invariants.
 let testPath = URL(fileURLWithPath: #filePath)
 let dir = testPath.deletingLastPathComponent()
 let proofSource = try String(contentsOf: dir.appendingPathComponent("es_proof.swift"), encoding: .utf8)
+// WO-249@v1: source-shape checks on the production ES gate (clonefile/copyfile/exchangedata).
 let gateSource = try String(contentsOf: dir.appendingPathComponent("es_gate.swift"), encoding: .utf8)
 
 // WO-39@v1: stop the deadline-safety source check with a named failure.
