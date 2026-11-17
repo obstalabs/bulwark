@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+<!-- WO-270@v1: the root-path check and the edge spawn resolved the edge path separately. -->
+- macOS: the Endpoint Security edge path is resolved once, to its canonical form, and that
+  exact path is both checked and executed. Before, the check followed symlinks in
+  `BULWARK_MACOS_ES_GATE` while the spawn re-used the original path, so a symlink in a
+  user-writable directory could be retargeted after the check and run a different program
+  as root. A symlink on the edge path whose directory a non-root user can write is now
+  refused by name.
+
 ### Added
 <!-- WO-260@v1: the only public word on Windows was one roadmap line. -->
 - `docs/windows.md`: Bulwark on Windows, stated plainly. No native gate and why; how to run

@@ -1007,6 +1007,38 @@ fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
     }
 }
 
+/// Walk the raw (un-canonicalized) path component by component and return the first
+/// symlink whose containing directory is writable by a non-root uid: such a link can
+/// be retargeted at will, so the path it names is not root's to trust. The returned
+/// path is the RAW symlink, so the operator sees the component they configured.
+// WO-270@v1: name a user-retargetable symlink on the edge path, not just its target.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn first_user_writable_symlink(raw: &Path) -> Option<(PathBuf, String)> {
+    let mut prefix = PathBuf::new();
+    for comp in raw.components() {
+        prefix.push(comp);
+        let Ok(meta) = std::fs::symlink_metadata(&prefix) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let Some(dir) = prefix.parent() else {
+            continue;
+        };
+        if let Some((holder, clause)) = first_user_writable_component(dir) {
+            return Some((
+                prefix.clone(),
+                format!(
+                    "is a symlink in {}, which {clause}, so it can be retargeted",
+                    holder.display()
+                ),
+            ));
+        }
+    }
+    None
+}
+
 /// WO-258@v1: refuse to proceed as uid 0 from a location a non-root uid can
 /// modify, so a trojaned binary (or a swapped symlink) cannot own the next
 /// privileged launch. Runs before any gate starts or any config is read. With
@@ -1027,9 +1059,14 @@ fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Resu
     if let Some(o) = first_user_writable_component(&exe) {
         offenders.push(o);
     }
+    // WO-270@v1: check the pinned edge — the exact canonical path the gate will
+    // spawn — and name any symlink on the raw path that a non-root uid could retarget.
     #[cfg(target_os = "macos")]
-    if let Some(edge) = gate::resolve_edge_path() {
-        if let Some(o) = first_user_writable_component(&edge) {
+    if let Some(edge) = gate::pinned_edge() {
+        if let Some(o) = first_user_writable_symlink(&edge.raw) {
+            offenders.push(o);
+        }
+        if let Some(o) = first_user_writable_component(&edge.canonical) {
             offenders.push(o);
         }
     }
@@ -1040,7 +1077,8 @@ fn refuse_root_from_user_writable_path(allow_user_writable_engine: bool) -> Resu
 
     let (path, clause) = &offenders[0];
     if !allow_user_writable_engine {
-        anyhow::bail!("{}", refusal_message(path));
+        // WO-270@v1: carry the clause so a symlink offender says why it is unsafe.
+        anyhow::bail!("{} ({})", refusal_message(path), clause);
     }
 
     // One loud, named warning; the caller marks the summary `engine_unverified`.
@@ -4473,6 +4511,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // WO-270@v1: a symlink in a user-owned directory pointing at a root-owned binary
+    // passes the canonical-path check (that is the 0.11.0 hole) but is caught by the
+    // raw-path symlink check, which names the RAW link, not its target.
+    #[test]
+    fn user_owned_symlink_to_a_root_owned_target_is_flagged_by_its_raw_path() {
+        let target = Path::new("/usr/bin/true");
+        assert!(
+            first_user_writable_component(target).is_none(),
+            "precondition: {} must be root-owned and not group/other-writable",
+            target.display()
+        );
+        let dir = test_scratch_dir("wo270-link");
+        let link = dir.join("edge");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+
+        // The canonical check alone sees only the root-owned target.
+        assert!(first_user_writable_component(&link).is_none());
+
+        let (offender, clause) =
+            first_user_writable_symlink(&link).expect("a retargetable link must be flagged");
+        assert_eq!(offender, link, "the RAW symlink must be named");
+        assert!(clause.contains("is a symlink in"), "{clause}");
+        assert!(first_user_writable_symlink(target).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     // WO-117 (R1): one open, one read: the parsed policy and the recorded digest
     // come from the same bytes, and the identity from the same handle.
     #[test]
