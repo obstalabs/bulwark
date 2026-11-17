@@ -23,6 +23,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not protect; and the cases where Bulwark adds something a plain VM does not. README Known
   limitations and Roadmap point at the page.
 
+### Fixed
+<!-- WO-271@v1: install-root left the copied gate bundle owned by the invoking user. -->
+- macOS: `bulwark install-root` now makes every file in the installed gate bundle
+  root-owned and verifies the whole bundle, failing with the offending path otherwise.
+  Before, the bundle's files kept the invoking user as owner, so the installed engine
+  refused to start its own gate and only ran with `--allow-user-writable-engine`. Run
+  `sudo bulwark install-root --force` once to repair an existing 0.11.0 install.
+
 ## [0.11.0] - 2026-11-16
 
 ### Changed
