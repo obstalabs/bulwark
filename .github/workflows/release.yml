@@ -19,7 +19,8 @@ env:
 jobs:
   build-linux:
     name: build linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    # WO-265@v1: pinned so the released glibc build keeps the floor it had in 0.10.0.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         include:
@@ -160,7 +161,8 @@ jobs:
     needs:
       - build-linux
       - build-macos
-    runs-on: ubuntu-latest
+    # WO-265@v1: pinned with the build job; the image moves only on purpose.
+    runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4

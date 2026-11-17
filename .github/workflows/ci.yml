@@ -16,7 +16,8 @@ jobs:
     # self-hosted box is exposed to PR authors. fanotify/Landlock are kernel
     # features; the hosted runner's kernel supports the permission-event gate and
     # passwordless sudo for the root integration steps below.
-    runs-on: ubuntu-latest
+    # WO-265@v1: pinned; on ubuntu-26.04 sudo ignores -E and the root steps lose the toolchain.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
