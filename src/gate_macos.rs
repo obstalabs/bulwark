@@ -285,9 +285,55 @@ pub fn resolve_edge_path() -> Option<PathBuf> {
     discover_edge()
 }
 
+/// The edge path as resolved once for this process: `raw` is the absolute form of
+/// what the env override or discovery named (symlinks intact, for reporting), and
+/// `canonical` is the fully resolved path that is both checked and executed.
+// WO-270@v1: one resolution shared by the root-path refusal and the spawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedEdge {
+    pub raw: PathBuf,
+    pub canonical: PathBuf,
+}
+
+// WO-270@v1: the refusal check and the spawn read this one value, so a symlink
+// retargeted after the check cannot change which file root executes.
+static PINNED_EDGE: std::sync::OnceLock<Option<PinnedEdge>> = std::sync::OnceLock::new();
+
+/// Absolutize (against the cwd) and canonicalize an edge path. A path that cannot
+/// be canonicalized (missing) keeps its absolute form; the spawn then fails closed.
+// WO-270@v1: the canonical path is the only form that is checked and executed.
+pub fn pin_edge(raw: PathBuf) -> PinnedEdge {
+    let raw = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&raw))
+            .unwrap_or(raw)
+    };
+    let canonical = raw.canonicalize().unwrap_or_else(|_| raw.clone());
+    PinnedEdge { raw, canonical }
+}
+
+/// The edge for this process, resolved on first use and never re-read.
+// WO-270@v1: single choke point for the edge path (check and spawn).
+pub fn pinned_edge() -> Option<&'static PinnedEdge> {
+    pinned_in(&PINNED_EDGE, resolve_edge_path)
+}
+
+/// Resolve into `cell` once; later calls return the first result whatever the
+/// resolver would say now. Split out so a test can prove it on a private cell.
+// WO-270@v1: once-only resolution; the value checked is the value spawned.
+fn pinned_in(
+    cell: &std::sync::OnceLock<Option<PinnedEdge>>,
+    resolve: impl FnOnce() -> Option<PathBuf>,
+) -> Option<&PinnedEdge> {
+    cell.get_or_init(|| resolve().map(pin_edge)).as_ref()
+}
+
 // WO-163@v2: a missing gate is an error that names the packaged location and the override.
+// WO-270@v1: spawn the pinned canonical path, the same one the refusal checked.
 fn edge_path() -> Result<PathBuf> {
-    resolve_edge_path().ok_or_else(|| {
+    pinned_edge().map(|p| p.canonical.clone()).ok_or_else(|| {
         anyhow!(
             "could not locate the Endpoint Security edge. It ships beside the CLI in a \
              packaged install; set {ES_EDGE_ENV} to override \
@@ -916,5 +962,52 @@ mod supervise_tests {
             !command_ran,
             "the command ran although the edge never went ready"
         );
+    }
+}
+
+// WO-270@v1: the edge path is resolved once; the checked path is the spawned path.
+#[cfg(test)]
+mod pinned_edge_tests {
+    use super::*;
+
+    // WO-270@v1: a symlink retargeted after the first resolution does not change
+    // the pinned canonical path, and that path is the link's ORIGINAL target.
+    #[test]
+    fn retargeting_the_link_after_pinning_does_not_change_the_spawn_path() {
+        let dir = crate::test_scratch_dir("wo270-pin");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let link = dir.join("edge");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+
+        let cell = std::sync::OnceLock::new();
+        let checked = pinned_in(&cell, || Some(link.clone())).unwrap().clone();
+        assert_eq!(checked.canonical, first.canonicalize().unwrap());
+        assert_eq!(
+            checked.raw, link,
+            "raw keeps the configured symlink for reporting"
+        );
+
+        // The user retargets the link between the check and the spawn.
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+
+        let spawned = pinned_in(&cell, || Some(link.clone())).unwrap();
+        assert_eq!(
+            spawned, &checked,
+            "the spawn must use the path the refusal checked, not a re-resolution"
+        );
+        assert_ne!(spawned.canonical, link.canonicalize().unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // WO-270@v1: a relative override is absolutized against the cwd before pinning.
+    #[test]
+    fn relative_override_is_pinned_absolute() {
+        let p = pin_edge(PathBuf::from("no-such-dir-wo270/bulwark_es_gate"));
+        assert!(p.raw.is_absolute(), "{}", p.raw.display());
+        assert!(p.canonical.is_absolute(), "{}", p.canonical.display());
     }
 }
