@@ -1212,14 +1212,50 @@ fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cannot find the gate app bundle for {}", edge.display()))?;
     let app_name = app.file_name().expect("app bundle name").to_owned();
     let dst = target_dir.join(app_name);
-    copy_tree(&app, &dst).context("copy gate bundle")?;
+    // WO-271@v1: re-running install-root from the installed engine discovers the
+    // installed bundle as its own source; never delete or copy onto itself — just
+    // take ownership in place and verify.
+    let same = match (app.canonicalize(), dst.canonicalize()) {
+        (Ok(a), Ok(d)) => a == d,
+        _ => false,
+    };
+    if same {
+        chown_tree_root(&dst)?;
+    } else {
+        // WO-271@v1: a --force reinstall starts from an empty bundle, so no stale
+        // entry from an earlier (user-owned) copy survives the ownership pass.
+        if std::fs::symlink_metadata(&dst).is_ok() {
+            std::fs::remove_dir_all(&dst)
+                .with_context(|| format!("remove previous gate bundle {}", dst.display()))?;
+        }
+        copy_tree(&app, &dst).context("copy gate bundle")?;
+    }
+    verify_tree_root_owned(&dst)?;
+    Ok(())
+}
+
+/// lchown every entry under `root` (and `root`) to root:wheel, not following symlinks.
+#[cfg(target_os = "macos")]
+// WO-271@v1: repair ownership of an already-installed bundle in place.
+fn chown_tree_root(root: &Path) -> Result<()> {
+    std::os::unix::fs::lchown(root, Some(0), Some(0))
+        .with_context(|| format!("chown root:wheel {}", root.display()))?;
+    if std::fs::symlink_metadata(root)?.is_dir() {
+        for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+            chown_tree_root(&entry?.path())?;
+        }
+    }
     Ok(())
 }
 
 /// Recursive copy that preserves file bytes and permission bits (used for the
-/// signed gate bundle, whose internal modes must not be rewritten).
+/// signed gate bundle, whose internal modes must not be rewritten), then makes
+/// every copied entry root:wheel. `std::fs::copy` clones on APFS, and a clone made
+/// by root keeps the SOURCE owner, so without the chown a Homebrew-owned bundle
+/// lands user-owned inside the root-owned install (WO-271).
 #[cfg(target_os = "macos")]
 // WO-258@v1: recursive copy that preserves modes, for the signed gate bundle.
+// WO-271@v1: chown each copied entry to root:wheel without following symlinks.
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     if src.is_dir() {
         std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
@@ -1234,6 +1270,31 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         }
         std::fs::copy(src, dst)
             .with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+    }
+    std::os::unix::fs::lchown(dst, Some(0), Some(0))
+        .with_context(|| format!("chown root:wheel {}", dst.display()))?;
+    Ok(())
+}
+
+/// Verify every entry under `root` (and `root` itself), without following
+/// symlinks, with the same rule the root-path refusal applies: root-owned and not
+/// group/other-writable. Fails naming the first offending path.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// WO-271@v1: install-root proves the WHOLE installed bundle, not just the engine.
+fn verify_tree_root_owned(root: &Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(root).with_context(|| format!("stat {}", root.display()))?;
+    if let Some(clause) = writable_clause(&meta) {
+        anyhow::bail!(
+            "installed gate bundle entry {} {clause}; install-root refuses to leave a \
+             non-root-writable file in a root-owned install",
+            root.display()
+        );
+    }
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+            verify_tree_root_owned(&entry?.path())?;
+        }
     }
     Ok(())
 }
@@ -4536,6 +4597,29 @@ mod tests {
         assert!(first_user_writable_symlink(target).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // WO-271@v1: the installed-bundle verification fails on any entry a non-root
+    // uid can write, naming that entry (a non-root test's files are all such).
+    #[test]
+    fn bundle_verification_names_a_non_root_entry() {
+        let dir = test_scratch_dir("wo271-bundle");
+        let exe = dir
+            .join("x.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("edge");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"x").unwrap();
+        let err = verify_tree_root_owned(&dir.join("x.app"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("installed gate bundle entry"), "{err}");
+        assert!(err.contains("x.app"), "{err}");
+        // A fully root-owned system tree verifies clean.
+        verify_tree_root_owned(Path::new("/usr/bin/true")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // WO-117 (R1): one open, one read: the parsed policy and the recorded digest
     // come from the same bytes, and the identity from the same handle.
     #[test]
