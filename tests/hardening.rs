@@ -661,3 +661,61 @@ fn engine_writable_refusal_and_waiver_are_fail_closed() {
     let _ = fs::remove_dir(&copy_dir);
     let _ = fs::remove_dir_all(&dir);
 }
+
+// WO-269@v1: count real warnings on a launch that reaches cmd_run as root.
+// WO-269: also verify the unwaived launch refuses before opening its policy.
+#[test]
+#[ignore = "requires root for the engine path check"]
+fn launch_warns_once_for_a_user_writable_engine() {
+    use std::os::unix::fs::PermissionsExt;
+
+    assert_eq!(unsafe { libc::geteuid() }, 0, "run this test as root");
+    // WO-269: keep the group-writable engine copy inside a private directory.
+    let dir = scratch("wo269");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    // WO-269: flag a writable component even when the build tree is root-owned.
+    let engine = dir.join("bulwark");
+    fs::copy(bin(), &engine).unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o775)).unwrap();
+
+    // WO-269: use an explicit path that stays absent for the unwaived launch.
+    let policy = dir.join("Bulwark.toml");
+    // WO-269: share the same engine and policy path for both launch attempts.
+    let launch = |waiver: Option<&str>| {
+        Command::new(&engine)
+            .current_dir(&dir)
+            .args(["launch", "agent", "--policy"])
+            .arg(&policy)
+            .arg("--state")
+            .arg(dir.join("state.toml"))
+            .args(waiver)
+            .output()
+            .expect("spawn launch")
+    };
+
+    // WO-269: refusal must take precedence over reading the missing policy.
+    let refused = launch(None);
+    // WO-269: resolve the profile in launch, then stop in cmd_run before starting the gate.
+    fs::write(
+        &policy,
+        "[agents.agent]\ncommand = [\"/bin/true\"]\nprotect = [\"relative\"]\ndecision = \"deny\"\n",
+    )
+    .unwrap();
+    // WO-269: capture stderr after the waived launch delegates to cmd_run.
+    let waived = launch(Some("--allow-user-writable-engine"));
+    fs::remove_dir_all(&dir).unwrap();
+
+    // WO-269: check that the engine refusal takes precedence over the missing policy.
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success());
+    assert!(refusal.contains("refusing to run as root"), "{refusal}");
+    // WO-269: relative path validation proves cmd_run received the waived launch.
+    let stderr = String::from_utf8_lossy(&waived.stderr);
+    assert!(!waived.status.success());
+    assert!(stderr.contains("is relative: a protect entry"), "{stderr}");
+    assert_eq!(
+        stderr.matches("WARNING engine component").count(),
+        1,
+        "{stderr}"
+    );
+}

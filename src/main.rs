@@ -848,7 +848,9 @@ fn main() -> Result<()> {
                 // WO-224: apply these values only when the run drops its worker.
                 worker_env,
                 allow_root,
-                allow_user_writable_engine,
+                // WO-269@v1: keep direct run's engine check in cmd_run.
+                // WO-269: pass the requested waiver until the engine is checked.
+                engine_check: EngineCheck::Pending(allow_user_writable_engine),
                 state: state.as_deref(),
                 command: &command,
                 watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
@@ -902,7 +904,9 @@ fn main() -> Result<()> {
                 // WO-224: retain operator session assignments for the watched child.
                 worker_env,
                 allow_root,
-                allow_user_writable_engine,
+                // WO-269@v1: keep watch's engine check in cmd_run.
+                // WO-269: watch supplies the waiver flag to the shared check.
+                engine_check: EngineCheck::Pending(allow_user_writable_engine),
                 state: None,
                 command: &command,
                 watch: true,
@@ -2847,6 +2851,28 @@ fn real_mount_points() -> Vec<PathBuf> {
     plan.paths
 }
 
+// WO-269@v1: launch checks the engine before reading its policy.
+// WO-269: distinguish the CLI waiver flag from the completed check result.
+enum EngineCheck {
+    // WO-258@v1: allow an opt-in waiver for a user-writable engine (dev/test only).
+    // WO-269: run and watch supply the flag for the pending check.
+    Pending(bool),
+    // WO-269: launch supplies whether the check actually used a waiver.
+    Checked(bool),
+}
+
+// WO-269: resolve either input when entering cmd_run.
+impl EngineCheck {
+    // WO-269@v1: reuse the pre-policy engine check on the launch path.
+    // WO-269: invoke the checker only for pending checks.
+    fn resolve(&self, check: impl FnOnce(bool) -> Result<bool>) -> Result<bool> {
+        match self {
+            Self::Pending(allow_waiver) => check(*allow_waiver),
+            Self::Checked(waived) => Ok(*waived),
+        }
+    }
+}
+
 // WO-8@v1: carry consent and policy inputs into one supervised run.
 /// Arguments for a `run` invocation.
 struct RunArgs<'a> {
@@ -2886,9 +2912,9 @@ struct RunArgs<'a> {
     /// Keep a would-be-root agent at uid 0 instead of auto-dropping it to the
     /// invoking user. Opt-out of the safe default; only for a trusted agent.
     allow_root: bool,
-    /// WO-258@v1: skip the root-from-user-writable-path refusal (dev/test only);
-    /// carried so `cmd_run` can warn, mark the summary, and skip the refusal.
-    allow_user_writable_engine: bool,
+    // WO-269@v1: use one engine check result to mark the run summary.
+    // WO-269: carry launch's completed check or the flag for run and watch.
+    engine_check: EngineCheck,
     state: Option<&'a Path>,
     command: &'a [String],
     // WO-240@v1: shadow mode reuses run's policy resolution but enforces nothing.
@@ -2972,7 +2998,9 @@ fn cmd_launch(
 
     // WO-258@v1: same root-from-user-writable-path refusal as cmd_run, but placed
     // here because launch reads policy in this function before delegating.
-    refuse_root_from_user_writable_path(allow_user_writable_engine)?;
+    // WO-269@v1: retain the result of the pre-policy refusal check.
+    // WO-269: forward whether a waiver was used so cmd_run can reuse it.
+    let waived = refuse_root_from_user_writable_path(allow_user_writable_engine)?;
 
     // WO-117 (R1): one open and one read; the plan and the integrity record
     // both come from this snapshot, and cmd_run receives it instead of re-reading.
@@ -3018,7 +3046,9 @@ fn cmd_launch(
         // WO-224: forward the same override fields that direct run supplies.
         worker_env,
         allow_root: false,
-        allow_user_writable_engine,
+        // WO-269@v1: the launch path already performed the check and any warning.
+        // WO-269: supply the result for the shared summary marking.
+        engine_check: EngineCheck::Checked(waived),
         state,
         command: &plan.command,
         watch: false, // WO-240@v1: only `bulwark watch` sets shadow mode.
@@ -3528,7 +3558,11 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // can modify — a trojaned binary owns the next root launch. Refuse before any
     // config is read or any gate process starts. The waiver warns once, marks the
     // run summary `engine_unverified`, and skips the refusal (dev/test only).
-    let waived = refuse_root_from_user_writable_path(args.allow_user_writable_engine)?;
+    // WO-269@v1: a launch carries its completed check into the shared run path.
+    // WO-269: use either check result for the same receipt marking below.
+    let waived = args
+        .engine_check
+        .resolve(refuse_root_from_user_writable_path)?;
     receipt::set_engine_unverified(waived);
 
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
@@ -4925,6 +4959,21 @@ pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // WO-269@v1: exercise launch's completed check in a non-root unit test.
+    // WO-269: reuse the stored result for both clean and waived engines.
+    #[test]
+    fn launch_reuses_the_engine_check_result() {
+        // WO-269: a clean engine's false result also counts as a completed check.
+        for waived in [false, true] {
+            assert_eq!(
+                EngineCheck::Checked(waived)
+                    .resolve(|_| panic!("launch already checked the engine"))
+                    .unwrap(),
+                waived
+            );
+        }
+    }
 
     // WO-277@v1: exercise the in-place reinstall decision without running as root.
     // WO-277: inode identity distinguishes an alias from a copy with the same bytes.

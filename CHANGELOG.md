@@ -29,6 +29,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-279: record the short scratch path used by the umask test. -->
 - The consent socket umask test binds under `/tmp`, so a long `TMPDIR` no longer
   pushes its socket paths past the platform limit.
+<!-- WO-269@v1: launch reuses the engine check it performs before reading the policy. -->
+<!-- WO-269: record the fix to the duplicate engine waiver warning. -->
+- `launch` prints the engine waiver warning once when `--allow-user-writable-engine`
+  is used for a user-writable engine.
 
 ## [0.11.1] - 2026-11-18
 
