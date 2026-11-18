@@ -5027,8 +5027,11 @@ mod tests {
             .to_string();
         assert!(err.contains("installed gate bundle entry"), "{err}");
         assert!(err.contains("x.app"), "{err}");
-        // A fully root-owned system tree verifies clean.
-        verify_tree_root_owned(Path::new("/usr/bin/true")).unwrap();
+        // A fully root-owned system file verifies clean.
+        // WO-278@v1: resolve first; on ubuntu-26.04 /usr/bin/true is a symlink, and the
+        // check reads a symlink's own mode bits (always 0777 on Linux).
+        let system_file = std::fs::canonicalize("/usr/bin/true").unwrap();
+        verify_tree_root_owned(&system_file).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

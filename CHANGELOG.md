@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-278: record the runner bump alongside the privileged test fix. -->
 - Linux CI moves to `ubuntu-26.04` and passes the Rust toolchain environment explicitly
   to the root integration tests because the image's `sudo` ignores `-E`.
+  A unit test that assumed `/usr/bin/true` is a regular file now checks the resolved file
+  (it is a symlink on that image).
 
 ### Fixed
 <!-- WO-224@v1: a dropped worker used to inherit root's home and login names. -->
