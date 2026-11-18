@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+<!-- WO-260@v1: the only public word on Windows was one roadmap line. -->
+- `docs/windows.md`: Bulwark on Windows, stated plainly. No native gate and why; how to run
+  agents on a Windows machine today (a Hyper-V Linux guest first, a dedicated WSL2
+  distribution as a convenience profile) with the steps as measured; what each profile does
+  not protect; and the cases where Bulwark adds something a plain VM does not. README Known
+  limitations and Roadmap point at the page.
+
 ## [0.11.0] - 2026-11-16
 
 ### Changed

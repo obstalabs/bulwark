@@ -12,6 +12,7 @@ and a ten-second demo; come here for depth.
 - **[Hardened mode](hardened-mode.md)** — the crash-safe Landlock floor (Linux).
 - **[Off-band consent](offband-consent.md)** — answering protected opens over a socket.
 - **[Policy & receipts](policy-receipts.md)** — the policy model and the decision log.
+- **[Windows](windows.md)** — no native gate; how to run agents on a Windows machine today (a Hyper-V Linux guest first, a WSL2 distribution as a convenience profile), what each does not protect, and when Bulwark adds something a plain VM does not.
 
 ## macOS
 

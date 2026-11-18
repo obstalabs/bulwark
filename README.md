@@ -282,11 +282,12 @@ as plainly as the ones it does — see **Known limitations** below and
   unprotected tree under a supervised agent fails with a receipt.
 - Requires root (`CAP_SYS_ADMIN` for fanotify; Endpoint Security privilege on
   macOS; Landlock for `--hardened`).
+- **No native Windows.** Bulwark runs inside a Linux guest on a Windows host (a Hyper-V VM first, a dedicated WSL2 distribution as a convenience profile); an agent started natively on Windows is not gated. See [docs/windows.md](docs/windows.md).
 
 ## Roadmap
 
 <!-- WO-190@v1: no paid tier or fleet control plane is planned; only research items remain. -->
-- Windows support (minifilter gate) — under research.
+- Windows: no native gate. One would be a signed kernel driver with Microsoft's signing program behind it, which is research, not a port; what to do on a Windows machine today is in [docs/windows.md](docs/windows.md).
 - Linux BPF LSM enforcement core (deny decisions held in the kernel, so they survive
   the gate process dying) — under research.
 
