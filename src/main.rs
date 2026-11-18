@@ -1195,7 +1195,12 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
             engine.display()
         );
     }
-    std::fs::copy(&exe, &engine).with_context(|| format!("copy engine to {}", engine.display()))?;
+    // WO-277@v1: a forced reinstall can repair the running engine in place.
+    // WO-277: copying an engine onto its own inode risks truncating it.
+    if !same_file(&exe, &engine) {
+        std::fs::copy(&exe, &engine)
+            .with_context(|| format!("copy engine to {}", engine.display()))?;
+    }
     harden_path_root_0755(&engine)?;
     // The directories the engine sits in must be root-owned 0755 too, or a
     // non-root uid could swap the engine out from underneath root later.
@@ -1230,6 +1235,18 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
         engine.display()
     );
     Ok(())
+}
+
+// WO-277@v1: recognize a self-copy even when the paths are spelled differently.
+// WO-277: compare the file that each path opens, including hard links and symlinks.
+fn same_file(src: &Path, dst: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // WO-277@v1: decide identity by device and inode so aliases match.
+    // WO-277: a missing destination takes the regular copy path.
+    match (std::fs::metadata(src), std::fs::metadata(dst)) {
+        (Ok(src), Ok(dst)) => (src.dev(), src.ino()) == (dst.dev(), dst.ino()),
+        _ => false,
+    }
 }
 
 /// chown a path to root:root, chmod 0755, then verify both took effect.
@@ -4908,6 +4925,30 @@ pub(crate) fn test_scratch_dir(tag: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // WO-277@v1: exercise the in-place reinstall decision without running as root.
+    // WO-277: inode identity distinguishes an alias from a copy with the same bytes.
+    #[test]
+    fn install_root_detects_same_engine_file() {
+        // WO-277: create all file identities on one filesystem.
+        let dir = test_scratch_dir("wo277-engine");
+        // WO-277: this fixture stands in for the running executable.
+        let exe = dir.join("bulwark");
+        std::fs::write(&exe, b"engine").unwrap();
+        assert!(same_file(&exe, &exe));
+
+        // WO-277: a fresh or separately copied destination needs the ordinary copy path.
+        let other = dir.join("other");
+        assert!(!same_file(&exe, &other));
+        std::fs::copy(&exe, &other).unwrap();
+        assert!(!same_file(&exe, &other));
+
+        // WO-277: a hard link must trigger the in-place path even with a different name.
+        let link = dir.join("link");
+        std::fs::hard_link(&exe, &link).unwrap();
+        assert!(same_file(&exe, &link));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // WO-258@v1: a copy of the binary placed under a user-owned temp hierarchy is
     // flagged, and the flagged path sits under that hierarchy (the ancestor chain

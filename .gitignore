@@ -3,3 +3,10 @@
 *.jsonl
 ._*
 .DS_Store
+# WO-277@v1: ignore local allow-list seal evidence like the deny-list receipt.
+# WO-277: scope the generated receipt and captured output to the seal directory.
+/macos-es-proof/allowlist-gate-receipt.txt
+/macos-es-proof/allowlist-load.out
+/macos-es-proof/allowlist-load.err
+/macos-es-proof/allowlist-supervised.out
+/macos-es-proof/allowlist-supervised.err

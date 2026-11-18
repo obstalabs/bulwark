@@ -18,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account, so agents started under `sudo` can find their settings. Anonymous workers
   use the `bulwark-worker` identity. `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
   are passed to a dropped worker only when set with `--worker-env`.
+<!-- WO-277@v1: correct the 0.11.1 root-install upgrade instructions. -->
+<!-- WO-277: install-root targets the version of the engine that invokes it. -->
+- After upgrading to 0.11.1 on macOS, run `sudo bulwark install-root` with the
+  0.11.1 binary and use the path it prints. This installs into a separate
+  `0.11.1` directory, preserving the existing `0.11.0` install.
 
 ## [0.11.1] - 2026-11-18
 
