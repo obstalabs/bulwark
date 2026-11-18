@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-18
+
 ### Security
 <!-- WO-270@v1: the root-path check and the edge spawn resolved the edge path separately. -->
 - macOS: the Endpoint Security edge path is resolved once, to its canonical form, and that
