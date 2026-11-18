@@ -16,8 +16,9 @@ jobs:
     # self-hosted box is exposed to PR authors. fanotify/Landlock are kernel
     # features; the hosted runner's kernel supports the permission-event gate and
     # passwordless sudo for the root integration steps below.
-    # WO-265@v1: pinned; on ubuntu-26.04 sudo ignores -E and the root steps lose the toolchain.
-    runs-on: ubuntu-24.04
+    # WO-278@v1: the explicit Rust environment lets the root suites find Cargo on ubuntu-26.04.
+    # WO-278: pin the target image so PRs verify its sudo behavior.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -137,17 +138,18 @@ jobs:
           grep -qF 'test result: ok. 1 passed;' <<<"$output"
 
       # WO-36: the integration tests need root (fanotify CAP_SYS_ADMIN, Landlock).
-      # Resolve a root-runner prefix once: empty when already root, else `sudo -E`.
-      # This works on both a passwordless-sudo runner and a runner that runs as
-      # root (no sudo binary), instead of hard-coding `sudo` and failing with
-      # "sudo: command not found".
+      # WO-278: keep the prefix empty on an already-root runner so it needs no sudo binary.
       - name: Resolve privileged runner
         id: priv
         run: |
           if [ "$(id -u)" -eq 0 ]; then
             echo "run=" >> "$GITHUB_OUTPUT"
           elif command -v sudo >/dev/null 2>&1; then
-            echo "run=sudo -E" >> "$GITHUB_OUTPUT"
+            # WO-278@v1: sudo ignores -E on ubuntu-26.04, so pass the Rust environment explicitly.
+            # WO-278: shell-quote the resolved paths for insertion into later run scripts.
+            printf 'run=sudo env PATH=%q HOME=%q CARGO_HOME=%q RUSTUP_HOME=%q\n' \
+              "$PATH" "$HOME" "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}" \
+              >> "$GITHUB_OUTPUT"
           else
             echo "::error::integration tests need root but this runner is non-root and has no sudo"
             exit 1
