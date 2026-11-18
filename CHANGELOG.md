@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+<!-- WO-278: record the runner bump alongside the privileged test fix. -->
+- Linux CI moves to `ubuntu-26.04` and passes the Rust toolchain environment explicitly
+  to the root integration tests because the image's `sudo` ignores `-E`.
+
 ## [0.11.1] - 2026-11-18
 
 ### Security
