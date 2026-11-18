@@ -20,8 +20,10 @@
 #
 # Prereqs on this Mac:
 #   - bulwark binary built for macOS (cargo build) at ./bulwark or on PATH
-#   - the signed+notarized+stapled gate bundle bulwark_es_gate.app present
-#   - BULWARK_MACOS_ES_GATE exported to the edge binary inside the bundle
+# WO-277@v1: document the staged app as the fallback for the optional override.
+# WO-277: the override names the executable inside the selected bundle.
+#   - a signed+notarized+stapled bulwark_es_gate.app beside this script, or
+#     BULWARK_MACOS_ES_GATE set to the edge executable in such a bundle
 #   - the calling terminal has Full Disk Access
 set -uo pipefail
 
@@ -124,6 +126,13 @@ if [ -n "${VERIFY_GATE_LIB_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 # WO-127@v4: refuse a bad REPS before any test runs, so a typo cannot seal nothing.
 validate_reps "$REPS" || fail "REPS must be a positive integer no greater than $MAX_REPS (got '$REPS')"
 
+# WO-277@v1: select the staged edge when the operator leaves the override unset.
+# WO-277: choose the edge before cd so relative overrides use the caller's directory.
+GATE_EDGE="${BULWARK_MACOS_ES_GATE-$(dirname "$0")/bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate}"
+# WO-277@v1: launch and seal the same resolved executable.
+# WO-277: keep the input path for the diagnostic if resolution fails.
+GATE_PATH=$(resolve_executable "$GATE_EDGE") || GATE_PATH=""
+
 cd "$(dirname "$0")" || fail "cannot enter the harness directory"
 
 # WO-140@v1: record whether the exact binary was explicit or the harness default.
@@ -133,13 +142,16 @@ else
   BULWARK_SOURCE=default
   BULWARK=./bulwark
 fi
-GATE_APP="bulwark_es_gate.app"
-GATE_EDGE="$GATE_APP/Contents/MacOS/bulwark_es_gate"
+# WO-277@v1: check the app that encloses the resolved edge.
+# WO-277: an override can select a bundle outside the staging directory.
+GATE_APP="${GATE_PATH%/Contents/MacOS/*}"
 GATE_BUNDLE_ID="dev.obstalabs.bulwark.es-gate"
 RECEIPT="gate-receipt.txt"
 
 [ -x "$BULWARK" ] || fail "bulwark binary not found at $BULWARK (cargo build for macOS first)"
-[ -x "$GATE_EDGE" ] || fail "gate edge not found at $GATE_EDGE — run ./build-gate-bundle.sh and copy the whole $GATE_APP here"
+# WO-277@v1: refuse a missing or unresolvable executable before any gate runs.
+# WO-277: also reject an empty override, which resolves to the caller's directory.
+[[ -f "$GATE_PATH" && -x "$GATE_PATH" ]] || fail "gate edge not found at $GATE_EDGE — set BULWARK_MACOS_ES_GATE or run ./build-gate-bundle.sh and copy the whole bulwark_es_gate.app here"
 
 # WO-140@v1: collect immutable receipt identity before any hardware test runs.
 BULWARK_PATH=$(resolve_executable "$BULWARK") || fail "cannot resolve bulwark binary $BULWARK"
@@ -159,16 +171,25 @@ echo "==> bulwark binary: $BULWARK_PATH (source=$BULWARK_SOURCE)"
 #     stapled production bundle is closure proof. ---
 echo "==> validating sealable gate bundle"
 SIGNED_ID=$(codesign -dv "$GATE_APP" 2>&1 | awk -F= '/Identifier=/{print $2; exit}')
-GATE_CDHASH=$(codesign -dvvv "$GATE_APP" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
+# WO-277@v1: read the CDHash from the executable the gate will run.
+# WO-277: consume all codesign output so pipefail preserves valid signatures.
+GATE_CDHASH=$(codesign -dvvv "$GATE_PATH" 2>&1 | awk -F= '/^CDHash=/ && !found {print $2; found = 1}') || GATE_CDHASH=""
 [ -n "$GATE_CDHASH" ] && CDHASH_OK=1 || CDHASH_OK=0
 [ "$SIGNED_ID" = "$GATE_BUNDLE_ID" ] && BUNDLE_ID_OK=1 || BUNDLE_ID_OK=0
-codesign -d --entitlements - "$GATE_APP" 2>/dev/null | grep -q endpoint-security && ENT_OK=1 || ENT_OK=0
-xcrun stapler validate "$GATE_APP" >/dev/null 2>&1 && STAPLE_OK=1 || STAPLE_OK=0
+# WO-277@v1: check the entitlement on the selected executable.
+# WO-277: the enclosing app's main executable may be a different file.
+codesign -d --entitlements - "$GATE_PATH" 2>/dev/null | grep -q endpoint-security && ENT_OK=1 || ENT_OK=0
+# WO-277@v1: require a staple from the app enclosing the selected executable.
+# WO-277: a standalone edge can be tested but cannot produce a seal.
+[[ "$GATE_APP" != "$GATE_PATH" && "$GATE_APP" == *.app ]] && \
+  xcrun stapler validate "$GATE_APP" >/dev/null 2>&1 && STAPLE_OK=1 || STAPLE_OK=0
 spctl -a -vv "$GATE_APP" >/dev/null 2>&1 && SPCTL_OK=1 || SPCTL_OK=0
 echo "   bundle_id=$SIGNED_ID id_ok=$BUNDLE_ID_OK entitlement=$ENT_OK staple=$STAPLE_OK spctl=$SPCTL_OK"
 [ "$BUNDLE_ID_OK" = 1 ] && [ "$ENT_OK" = 1 ] && [ "$STAPLE_OK" = 1 ] && [ "$SPCTL_OK" = 1 ] && BUNDLE_VALID=1 || BUNDLE_VALID=0
 
-export BULWARK_MACOS_ES_GATE="$PWD/$GATE_EDGE"
+# WO-277@v1: pass the resolved executable through to every gate invocation.
+# WO-277: sudo receives the same absolute path used for the signature checks.
+export BULWARK_MACOS_ES_GATE="$GATE_PATH"
 
 # Scratch files. The PROTECTED target + a symlink + a hardlink to it.
 WORK="$(mktemp -d /tmp/bulwark-gate-verify.XXXXXX)"
@@ -365,6 +386,9 @@ echo
   echo "bulwark_source:  $BULWARK_SOURCE"
   echo "bulwark_version: $BULWARK_VERSION"
   echo "bulwark_sha256:  $BULWARK_SHA256"
+  # WO-277@v1: record which executable supplied the CDHash.
+  # WO-277: the receipt must identify the edge even when it was staged elsewhere.
+  echo "gate_path:       $GATE_PATH"
   echo "gate_cdhash:     ${GATE_CDHASH:-UNKNOWN}"
   echo "head_sha:        ${HEAD_SHA:-UNKNOWN}"
   echo "gate_bundle_id:  ${SIGNED_ID:-MISSING} (expected $GATE_BUNDLE_ID)"

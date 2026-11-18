@@ -35,3 +35,10 @@ contains 'spctl:'
 contains 'notary:'
 contains '[ "${BUNDLE_VALID:-0}" = 1 ]'
 contains 'verdict:        SEALED'
+
+# WO-277@v1: both seal scripts must select the operator's edge override.
+# WO-277: match the input expansion so a header or export cannot satisfy the check.
+for verifier in verify-gate.sh verify-allowlist-gate.sh; do
+    grep -Fq 'GATE_EDGE="${BULWARK_MACOS_ES_GATE-' "$verifier" \
+        || fail "$verifier must read BULWARK_MACOS_ES_GATE"
+done
