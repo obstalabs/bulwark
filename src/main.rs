@@ -590,9 +590,12 @@ enum Cmd {
         // dist, or an uninstalled binary under --deploy never) runs only with this;
         // production remotes run `sudo bulwark install-root` on the host and
         // --deploy never, so the default stays refuse.
-        /// Allow the REMOTE engine to run from a user-writable path, marking the
-        /// remote receipts `engine_unverified`. Development lanes only; a
-        /// production remote installs with `sudo bulwark install-root`.
+        // WO-272@v1: the remote invocation omits --receipts.
+        // WO-272: describe where users see the waiver warning.
+        /// Allow the REMOTE engine to run from a user-writable path. When the
+        /// waiver is used, the engine warns once on stderr, which SSH relays.
+        /// `bulwark ssh` writes no receipts. Development lanes only. A production
+        /// remote installs with `sudo bulwark install-root`.
         #[arg(long = "allow-user-writable-engine")]
         allow_user_writable_engine: bool,
 
