@@ -118,6 +118,13 @@ export BULWARK_MACOS_ES_GATE="$PWD/bulwark_es_gate.app/Contents/MacOS/bulwark_es
 The edge bundle must carry `com.apple.developer.endpoint-security.client`, be
 signed, notarized, stapled, and launched from a terminal with Full Disk Access.
 
+<!-- WO-275@v1: document the signature required for a root install. -->
+<!-- WO-275: explain which identity is checked and what happens on rejection. -->
+When installing a gate bundle, `bulwark install-root` checks the installed copy's
+ownership and modes, then strictly verifies its signature against Apple signing
+team `NX2ATXN74T` and bundle identifier `dev.obstalabs.bulwark.es-gate`. If signature
+verification fails, it removes the installed bundle and reports the error.
+
 <!-- WO-140@v1: make hardware-seal evidence a release requirement, not an optional ritual. -->
 A macOS release is publishable only when both hardware-seal receipts identify the
 exact Bulwark binary, source commit, and signed gate used, and the shared upload
