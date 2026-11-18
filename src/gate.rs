@@ -1636,12 +1636,20 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
     Ok(())
 }
 
+// WO-273@v1: the fallback closes only valid descriptor numbers below the soft limit.
+// WO-273: bound the inclusive endpoint without truncation or underflow.
+fn last_fd_to_close(soft_limit: libc::rlim_t) -> RawFd {
+    soft_limit.saturating_sub(1).min(RawFd::MAX as libc::rlim_t) as RawFd
+}
+
 /// Fork and exec the command, returning the child pid. When `worker` is `Some`,
 /// the child drops to those credentials before exec (the supervisor parent stays
 /// root). A failed drop exits the child 126 — never execs the agent half-dropped.
 // WO-59@v1: place the child in its inherited membership scope before exec.
 // WO-224@v1: install the prepared worker environment after dropping credentials.
 // WO-224: defer environment installation to the child immediately before exec.
+// WO-273@v1: close inherited descriptors before the supervised command runs.
+// WO-273: keep the descriptor cleanup confined to the agent child.
 fn spawn(
     command: &[String],
     // WO-224@v1: the child inherits the worker's prebuilt exec storage across fork.
@@ -1669,6 +1677,21 @@ fn spawn(
     let no_pdeathsig = test_layer_disabled(SWITCH_NO_PDEATHSIG);
     #[cfg(not(feature = "fault-injection"))]
     let no_pdeathsig = false;
+
+    // WO-273@v1: snapshot the descriptor limit in the parent for the close loop.
+    // WO-273: prepare the fallback bound before entering the post-fork path.
+    let mut nofile = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // WO-273@v1: refuse the launch if the fallback bound is unavailable.
+    // WO-273: report the limit query error while still in the parent.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("getrlimit(RLIMIT_NOFILE)");
+    }
+    // WO-273@v1: finish computing the close range before fork.
+    // WO-273: pass a descriptor-sized endpoint into the child.
+    let last_fd = last_fd_to_close(nofile.rlim_cur);
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -1715,6 +1738,15 @@ fn spawn(
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 if libc::getppid() != supervisor_pid {
                     libc::_exit(125);
+                }
+            }
+            // WO-273@v1: close the inherited table above stderr with one syscall where available.
+            // WO-273: use the raw syscall to keep compatibility with older libc versions.
+            if libc::syscall(libc::SYS_close_range, 3u32, libc::c_uint::MAX, 0u32) != 0 {
+                // WO-273@v1: older kernels and blocked syscalls use the precomputed bound.
+                // WO-273: sweep the descriptor numbers using only close after fork.
+                for fd in 3..=last_fd {
+                    libc::close(fd);
                 }
             }
             // WO-224@v1: exec with the worker environment after the credential drop.
@@ -2167,6 +2199,17 @@ fn try_wait(child: libc::pid_t) -> Result<Option<i32>> {
 // WO-70@v1: pin fail-closed handling for unresolved in-tree event inodes.
 mod tests {
     use super::*;
+
+    #[test]
+    // WO-273@v1: cover the exclusive limit and the largest representable descriptor.
+    // WO-273: prevent wraparound or an off-by-one in the Linux fallback bound.
+    fn last_fd_to_close_respects_descriptor_bounds() {
+        assert_eq!(last_fd_to_close(0), 0);
+        assert_eq!(last_fd_to_close(3), 2);
+        assert_eq!(last_fd_to_close(4), 3);
+        assert_eq!(last_fd_to_close(1024), 1023);
+        assert_eq!(last_fd_to_close(libc::RLIM_INFINITY), RawFd::MAX);
+    }
 
     // WO-188@v1: the encoder can emit only a complete ALLOW or DENY response
     // carrying the event fd the kernel supplied.
