@@ -1369,7 +1369,9 @@ mod tests {
     #[test]
     fn bind_does_not_change_the_process_umask() {
         use std::io::ErrorKind;
-        use std::os::unix::fs::PermissionsExt;
+        // WO-279@v1: set owner-only permissions when creating the scratch directory.
+        // WO-279: keep the bind parent private even with a permissive umask.
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -1377,7 +1379,18 @@ mod tests {
         let bad = Arc::new(AtomicUsize::new(0));
         let attempted = Arc::new(AtomicUsize::new(0));
         let succeeded = Arc::new(AtomicUsize::new(0));
-        let temp = std::env::temp_dir();
+        // WO-279@v1: keep the stress-test socket paths below sun_path regardless of TMPDIR.
+        // WO-279: give concurrent test runs separate scratch directories.
+        let mut suffix = [0; 8];
+        getrandom::getrandom(&mut suffix).expect("generate umask test directory name");
+        // WO-279: use a fixed-length name under /tmp for both stress-test threads.
+        let temp = PathBuf::from(format!("/tmp/bwu-{:016x}", u64::from_ne_bytes(suffix)));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&temp)
+            .expect("create umask test scratch directory");
+        // WO-279: remove the shared scratch directory after the test.
+        let _cleanup = TestPathCleanup::directory(&temp);
 
         let binder = {
             let stop = Arc::clone(&stop);

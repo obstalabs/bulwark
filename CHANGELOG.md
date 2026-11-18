@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - After upgrading to 0.11.1 on macOS, run `sudo bulwark install-root` with the
   0.11.1 binary and use the path it prints. This installs into a separate
   `0.11.1` directory, preserving the existing `0.11.0` install.
+<!-- WO-279@v1: a long TMPDIR could push stress-test socket paths past sun_path. -->
+<!-- WO-279: record the short scratch path used by the umask test. -->
+- The consent socket umask test binds under `/tmp`, so a long `TMPDIR` no longer
+  pushes its socket paths past the platform limit.
 
 ## [0.11.1] - 2026-11-18
 
