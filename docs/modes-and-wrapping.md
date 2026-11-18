@@ -87,6 +87,13 @@ Guidelines:
   *agent-specific*: deny the secrets and the *other* tools' config dirs, but leave the
   wrapped agent's own dir readable. (Denying tool B's dir while running tool A is free
   confinement — A never needs it.)
+  <!-- WO-224@v1: describe the home and session environment the dropped worker sees. -->
+  <!-- WO-224: document the explicit session opt-in and the remaining bus access issue. -->
+  A dropped worker gets `HOME` from its passwd entry (the working directory for an
+  anonymous local UID) and receives `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS` only
+  when you supply that value on the Bulwark command line with `--worker-env NAME=VALUE`.
+  The agent can still name the user's service-manager bus itself, which is a separate
+  open issue.
 - **Bulwark needs privilege** (root / `CAP_SYS_ADMIN` on Linux; root + Full Disk
   Access on macOS — see [docs/macos-permissions.md](macos-permissions.md)). A launcher
   that wraps with Bulwark must be able to elevate for the gate while the agent itself

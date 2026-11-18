@@ -11,6 +11,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linux CI moves to `ubuntu-26.04` and passes the Rust toolchain environment explicitly
   to the root integration tests because the image's `sudo` ignores `-E`.
 
+### Fixed
+<!-- WO-224@v1: a dropped worker used to inherit root's home and login names. -->
+<!-- WO-224: record the worker identity fix and explicit session opt-in. -->
+- Dropped workers on Linux and macOS get `HOME`, `USER`, and `LOGNAME` from their own
+  account, so agents started under `sudo` can find their settings. Anonymous workers
+  use the `bulwark-worker` identity. `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+  are passed to a dropped worker only when set with `--worker-env`.
+
 ## [0.11.1] - 2026-11-18
 
 ### Security

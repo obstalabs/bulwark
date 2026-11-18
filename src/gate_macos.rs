@@ -162,6 +162,8 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
 }
 
 // WO-23@v1: supervise the agent behind an armed Endpoint Security edge.
+// WO-224@v1: provide the stopped child with its prepared worker environment.
+// WO-224: keep the Endpoint Security edge's own environment separate from the worker's.
 pub fn run(
     mode: GateMode,
     mut consent: Option<Box<dyn ConsentDecider + Send>>,
@@ -169,7 +171,9 @@ pub fn run(
     _mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
-    worker: Option<WorkerCreds>,
+    // WO-224@v1: carry the environment with the credentials through stopped spawn.
+    // WO-224: keep the child's exec storage owned for the duration of the launch.
+    worker: Option<crate::Worker>,
 ) -> Result<RunOutcome> {
     if command.is_empty() {
         bail!("no command given");
@@ -177,8 +181,10 @@ pub fn run(
     if unsafe { libc::geteuid() } != 0 {
         bail!("macOS Endpoint Security gate must run as root");
     }
-    if let Some(w) = worker {
-        if w.uid == 0 {
+    // WO-224@v1: validate the drop UID on the worker that will exec.
+    // WO-224: retain the prepared environment for spawn after checking credentials.
+    if let Some(w) = &worker {
+        if w.creds.uid == 0 {
             bail!("worker uid 0 is not a privilege drop");
         }
     }
@@ -214,7 +220,9 @@ pub fn run(
     ensure_executable(&edge)?;
 
     let temp = GateTemp::new()?;
-    let child = spawn_stopped(command, worker)?;
+    // WO-224@v1: hand the prebuilt environment to the child before it stops.
+    // WO-224: keep environment lookups and allocation in the parent.
+    let child = spawn_stopped(command, worker.as_ref())?;
     let child_pid = child.pid;
     wait_until_stopped(child_pid).with_context(|| {
         let _ = kill_pid(child_pid, libc::SIGKILL);
@@ -237,10 +245,12 @@ pub fn run(
     refuse_unless_ready(&temp.ready, &mut edge_child, child_pid)?;
 
     match worker {
+        // WO-224@v1: report the credentials paired with the environment used at exec.
+        // WO-224: keep the existing UID and GID in the gate's startup line.
         Some(w) => eprintln!(
             "[bulwark] macOS ES gate live: supervising pid {child_pid} (uid={} gid={}): {}",
-            w.uid,
-            w.gid,
+            w.creds.uid,
+            w.creds.gid,
             command.join(" ")
         ),
         None => eprintln!(
@@ -513,7 +523,9 @@ struct StoppedChild {
 }
 
 // WO-49@v1: arm the edge before resuming and dropping the supervised child.
-fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<StoppedChild> {
+// WO-224@v1: exec the resumed, dropped child with its prepared environment.
+// WO-224: preserve stopped launch ordering and leave the parent environment intact.
+fn spawn_stopped(command: &[String], worker: Option<&crate::Worker>) -> Result<StoppedChild> {
     let prog = CString::new(command[0].as_bytes())?;
     let argv: Vec<CString> = command
         .iter()
@@ -534,12 +546,16 @@ fn spawn_stopped(command: &[String], worker: Option<WorkerCreds>) -> Result<Stop
             // after the edge is attributing this PID, before exec — so the agent
             // runs unprivileged and cannot kill the root edge. A failed drop must
             // never exec the agent half-dropped.
-            if let Some(creds) = worker {
-                if drop_to(creds).is_err() {
+            // WO-224@v1: use the credentials that the worker environment was built for.
+            // WO-224: retain the same worker for exec after a successful drop.
+            if let Some(worker) = worker {
+                if drop_to(worker.creds).is_err() {
                     libc::_exit(126);
                 }
             }
-            libc::execvp(prog.as_ptr(), argv_ptr.as_ptr());
+            // WO-224@v1: apply the environment after the edge is ready and the UID has dropped.
+            // WO-224: use the shared exec path for both platforms' worker environments.
+            crate::exec_worker(&prog, &argv_ptr, worker);
             libc::_exit(127);
         }
     }

@@ -250,6 +250,80 @@ fn worker_uid_drops_agent_and_gate_still_denies() {
     );
 }
 
+// WO-224@v1: check the environment seen by the worker after a real UID drop.
+// WO-224: exercise passwd identity and session scrubbing through the shipped binary.
+#[test]
+#[ignore = "requires Linux + root for fanotify + a 'nobody' account"]
+fn worker_uid_gets_its_passwd_environment() {
+    // WO-224@v1: use the same unprivileged account as the other drop checks.
+    // WO-224: read its account data from the test host instead of assuming its home.
+    const NOBODY: &str = "65534";
+    // WO-224@v1: obtain the host's expected passwd fields independently of Bulwark.
+    // WO-224: allow distributions to supply different homes for the nobody account.
+    let account = Command::new("getent")
+        .args(["passwd", NOBODY])
+        .output()
+        .expect("getent passwd");
+    assert!(
+        account.status.success(),
+        "uid {NOBODY} must have a passwd entry"
+    );
+    // WO-224@v1: retain the passwd fields until the worker's output is checked.
+    // WO-224: parse the login name and home from the same account record.
+    let passwd = std::str::from_utf8(&account.stdout).unwrap();
+    // WO-224@v1: the passwd record has separate name and directory fields.
+    // WO-224: assert both login variables and HOME against those fields.
+    let fields: Vec<_> = passwd.trim_end().splitn(7, ':').collect();
+
+    // WO-224@v1: keep the protected inode and integrity state within a test directory.
+    // WO-224: provide a private fixture so the probe exercises the normal deny-list gate.
+    let dir = scratch("worker-env");
+    // WO-224@v1: supply a guard path that always exists for this run.
+    // WO-224: avoid relying on host-specific default protected paths.
+    let secret = dir.join("secret.env");
+    fs::write(&secret, "secret\n").unwrap();
+
+    // WO-224@v1: simulate sudo's root environment and verify the child's values after exec.
+    // WO-224: seed all five variables so the probe detects accidental inheritance.
+    let out = Command::new(bin())
+        .args([
+            "run",
+            "--allow-user-writable-engine",
+            "--worker-uid",
+            NOBODY,
+            "--protect",
+        ])
+        .arg(&secret)
+        // WO-224@v1: use this test's state file instead of the host's integrity state.
+        // WO-224: keep the test's state alongside the protected fixture.
+        .arg("--state")
+        .arg(dir.join("state.toml"))
+        .args([
+            "--",
+            "sh",
+            "-c",
+            r#"echo "$HOME $USER"; printf '%s\n' "$LOGNAME" "${XDG_RUNTIME_DIR-unset}" "${DBUS_SESSION_BUS_ADDRESS-unset}""#,
+        ])
+        .env("HOME", "/root")
+        .env("USER", "root")
+        .env("LOGNAME", "root")
+        .env("XDG_RUNTIME_DIR", "/run/user/0")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+        .output()
+        .expect("spawn bulwark");
+    fs::remove_dir_all(dir).unwrap();
+
+    assert!(
+        out.status.success(),
+        "worker must run successfully: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{} {}\n{}\nunset\nunset\n", fields[5], fields[0], fields[0])
+    );
+}
+
 // WO-49@v1: a dropped worker cannot kill the root supervisor to force a fail-open.
 /// WO-49 headline: an unprivileged dropped agent CANNOT `SIGKILL` the root
 /// supervisor, so it cannot force the fanotify fail-open. The agent reads its own

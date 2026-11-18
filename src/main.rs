@@ -81,6 +81,9 @@ mod socket;
 #[path = "socket_stub.rs"]
 mod socket;
 
+// WO-224@v1: keep passwd and environment strings lossless through Unix exec.
+// WO-224: preserve non-UTF-8 account paths and inherited environment values.
+use std::ffi::{CStr, CString, OsString};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Duration;
@@ -217,6 +220,34 @@ struct Cli {
     cmd: Cmd,
 }
 
+// WO-224@v1: accept session values only when the operator names them in argv.
+// WO-224: share the same worker environment option across local launch commands.
+#[derive(clap::Args)]
+struct WorkerEnvArgs {
+    // WO-224@v1: allow independent opt-in for the two session variables.
+    // WO-224: parse explicit values separately from the supervisor environment.
+    /// Set XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS for the dropped worker. Repeatable.
+    #[arg(long = "worker-env", value_name = "NAME=VALUE", value_parser = parse_worker_env)]
+    overrides: Vec<(String, String)>,
+}
+
+// WO-224@v1: scrub the same keys that the CLI can explicitly supply.
+// WO-224: keep worker session variables distinct from the passwd-derived identity.
+const WORKER_SESSION_VARS: [&str; 2] = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
+
+// WO-224@v1: only the two scrubbed session variables accept explicit values.
+// WO-224: keep HOME, USER and LOGNAME under the selected worker identity.
+fn parse_worker_env(value: &str) -> std::result::Result<(String, String), String> {
+    // WO-224@v1: preserve any additional equals signs in a bus address.
+    // WO-224: require a value in argv even when that value is empty.
+    match value.split_once('=') {
+        Some((name, value)) if WORKER_SESSION_VARS.contains(&name) => {
+            Ok((name.to_owned(), value.to_owned()))
+        }
+        _ => Err("expected XDG_RUNTIME_DIR=DIR or DBUS_SESSION_BUS_ADDRESS=ADDRESS".into()),
+    }
+}
+
 // WO-3@v1: dispatch the CLI operations that configure and run the gate.
 #[derive(Subcommand)]
 enum Cmd {
@@ -311,8 +342,10 @@ enum Cmd {
         /// drop the supervised agent to this unprivileged uid before it
         /// runs. The supervisor (the gate) stays root and keeps the fanotify fd,
         /// so an unprivileged agent cannot `SIGKILL` it and force the kernel's
-        /// fail-open-on-death residual. The account must already exist. Refused
-        /// for uid 0 and when not run as root. WO-144@v1: with `--hardened` the
+        // WO-224@v1: an anonymous numeric uid can also receive a worker environment.
+        // WO-224: describe the supported passwd fallback for unnamed UIDs.
+        /// fail-open-on-death residual. A uid without a passwd entry uses a synthetic
+        /// identity. Refused for uid 0 and when not run as root. WO-144@v1: with `--hardened` the
         /// drop happens in-process, after the Landlock floor and before the exec.
         #[arg(long = "worker-uid", value_name = "UID")]
         worker_uid: Option<u32>,
@@ -322,6 +355,11 @@ enum Cmd {
         /// `--worker-uid`.
         #[arg(long = "worker-gid", value_name = "GID")]
         worker_gid: Option<u32>,
+
+        // WO-224@v1: let a direct run opt into session variables for its worker.
+        // WO-224: capture session assignments before the worker command separator.
+        #[command(flatten)]
+        worker_env: WorkerEnvArgs,
 
         /// Keep the supervised agent running as root (uid 0). A root agent with
         /// `CAP_SYS_ADMIN` can migrate out of the cgroup scope (remount cgroupfs)
@@ -390,6 +428,11 @@ enum Cmd {
         #[arg(long = "worker-gid", value_name = "GID")]
         worker_gid: Option<u32>,
 
+        // WO-224@v1: watch uses the same worker drop as run.
+        // WO-224: provide the same session override syntax for watched workers.
+        #[command(flatten)]
+        worker_env: WorkerEnvArgs,
+
         /// Keep the watched agent at uid 0 (see `run --allow-root`).
         #[arg(long = "allow-root")]
         allow_root: bool,
@@ -455,6 +498,11 @@ enum Cmd {
         /// Path to the integrity state file. Hidden — primarily for tests.
         #[arg(long = "state", value_name = "FILE", hide = true)]
         state: Option<PathBuf>,
+
+        // WO-224@v1: launch can name session values alongside the profile name.
+        // WO-224: let the operator supply worker session variables at invocation time.
+        #[command(flatten)]
+        worker_env: WorkerEnvArgs,
 
         // WO-258@v1: see `run --allow-user-writable-engine`.
         /// Skip the refusal to run as root from a user-writable path (development
@@ -749,6 +797,9 @@ fn main() -> Result<()> {
             hardened,
             worker_uid,
             worker_gid,
+            // WO-224@v1: take explicit session values from the run arguments.
+            // WO-224: keep parsed overrides separate from inherited variables.
+            worker_env,
             allow_root,
             allow_user_writable_engine,
             state,
@@ -793,6 +844,9 @@ fn main() -> Result<()> {
                 hardened,
                 worker_uid,
                 worker_gid,
+                // WO-224@v1: carry session assignments to the exec preparation.
+                // WO-224: apply these values only when the run drops its worker.
+                worker_env,
                 allow_root,
                 allow_user_writable_engine,
                 state: state.as_deref(),
@@ -811,6 +865,9 @@ fn main() -> Result<()> {
             format,
             worker_uid,
             worker_gid,
+            // WO-224@v1: extract the watch command's explicit session values.
+            // WO-224: match the run command's source of environment overrides.
+            worker_env,
             allow_root,
             allow_user_writable_engine,
             command,
@@ -841,6 +898,9 @@ fn main() -> Result<()> {
                 hardened: false,
                 worker_uid,
                 worker_gid,
+                // WO-224@v1: prepare watched workers with the run environment rules.
+                // WO-224: retain operator session assignments for the watched child.
+                worker_env,
                 allow_root,
                 allow_user_writable_engine,
                 state: None,
@@ -864,6 +924,9 @@ fn main() -> Result<()> {
             consent_socket,
             consent_timeout,
             state,
+            // WO-224@v1: use session overrides from launch argv.
+            // WO-224: only the invocation supplies these session values.
+            worker_env,
             allow_user_writable_engine,
         } => {
             let code = cmd_launch(
@@ -874,6 +937,9 @@ fn main() -> Result<()> {
                 consent_socket,
                 consent_timeout,
                 state.as_deref(),
+                // WO-224@v1: forward CLI overrides into the profile launch.
+                // WO-224: pass these values on to the profile's dropped worker.
+                worker_env,
                 allow_user_writable_engine,
             )?;
             exit(code);
@@ -1480,13 +1546,21 @@ fn build_gate_script(
         Some(uid) => format!("--worker-uid {uid} "),
         None => String::new(),
     };
-    // WO-50: when the agent is dropped to a (possibly anonymous) uid, give it an
-    // env identity so tools that call getpwuid()/expanduser prefer the env over a
-    // passwd lookup that may have no entry. `sudo env VAR=...` survives sudo's env
-    // reset; the vars survive the setuid drop into the agent. Empty when no worker
-    // uid, so the no-worker path stays byte-identical.
+    // WO-50: `sudo env VAR=...` supplies an identity even to remote engines
+    // that pass their inherited environment directly through setuid.
+    // WO-224@v1: keep old remote engines working with the shared synthetic identity.
+    // WO-224: use the same run-directory and login-name rule for anonymous workers.
     let env_prefix = match worker_uid {
-        Some(_) => format!("env HOME={remote_dir} USER=bulwark-worker LOGNAME=bulwark-worker "),
+        Some(_) => {
+            // WO-224@v1: keep the remote run directory as the synthetic home.
+            // WO-224: expand one shared name for both login environment variables.
+            let WorkerIdentity { home, name } = anonymous_worker_identity(remote_dir.into());
+            format!(
+                "env HOME={} USER={name} LOGNAME={name} ",
+                home.display(),
+                name = name.to_string_lossy()
+            )
+        }
         None => String::new(),
     };
     let remote_invocation = invocation_with_worker_env(remote_invocation, &env_prefix);
@@ -2592,10 +2666,14 @@ fn cmd_internal_memfd_exec(_command: &[String]) -> Result<()> {
 /// kernel-enforced restriction for its whole life — crash-safe, no supervisor.
 /// Only returns on error (a successful `execvp` never returns).
 // WO-144@v1: drop to the resolved worker identity before hardened exec.
+// WO-224@v1: keep the worker environment across the in-process credential drop.
+// WO-224: use the prepared environment for Landlock launches as well as forks.
 fn run_hardened(
     allow_globs: &[String],
     command: &[String],
-    worker: Option<gate::WorkerCreds>,
+    // WO-224@v1: the passwd lookup must finish before Landlock restricts reads.
+    // WO-224: receive the prepared environment with the drop credentials.
+    worker: Option<Worker>,
 ) -> Result<i32> {
     if command.is_empty() {
         anyhow::bail!("no command given");
@@ -2607,25 +2685,31 @@ fn run_hardened(
     // floor confined reads by path, and root still owned every surface the
     // floor let through. A failed drop never execs. Linux only, like the floor
     // itself: off Linux `apply_read_floor` has already refused above.
+    // WO-224@v1: retain the worker environment through the in-process drop.
+    // WO-224: borrow the prepared worker so exec can use it after setuid.
     #[cfg(target_os = "linux")]
-    if let Some(w) = worker {
-        hardened::drop_to_worker(w.uid, w.gid)?;
+    if let Some(w) = &worker {
+        hardened::drop_to_worker(w.creds.uid, w.creds.gid)?;
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = worker;
 
-    let prog = std::ffi::CString::new(command[0].as_bytes())?;
-    let argv: Vec<std::ffi::CString> = command
+    // WO-224@v1: pass the executable name to the shared exec helper as a C string.
+    // WO-224: use the same C string type for the hardened launcher and forked workers.
+    let prog = CString::new(command[0].as_bytes())?;
+    // WO-224@v1: keep argument storage in scope across the shared exec helper.
+    // WO-224: pass the hardened command through the same exec ABI as the gates.
+    let argv: Vec<CString> = command
         .iter()
-        .map(|a| std::ffi::CString::new(a.as_bytes()))
+        .map(|a| CString::new(a.as_bytes()))
         .collect::<std::result::Result<_, _>>()?;
     let mut argv_ptr: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     argv_ptr.push(std::ptr::null());
 
     // SAFETY: standard execvp; on success the image is replaced and this never
     // returns. On failure we fall through to report the error.
+    // WO-224@v1: install the worker environment for exec in the single-threaded launcher.
+    // WO-224: keep the existing executable lookup with or without a drop.
     unsafe {
-        libc::execvp(prog.as_ptr(), argv_ptr.as_ptr());
+        exec_worker(&prog, &argv_ptr, worker.as_ref());
     }
     Err(anyhow::anyhow!(std::io::Error::last_os_error()))
         .with_context(|| format!("cannot exec {}", command[0]))
@@ -2779,6 +2863,9 @@ struct RunArgs<'a> {
     /// behavior). The paired gid, if not given explicitly, defaults to the uid.
     worker_uid: Option<u32>,
     worker_gid: Option<u32>,
+    // WO-224@v1: keep explicit session assignments with the worker request.
+    // WO-224: every entry point carries the argv values to the shared run path.
+    worker_env: WorkerEnvArgs,
     /// Keep a would-be-root agent at uid 0 instead of auto-dropping it to the
     /// invoking user. Opt-out of the safe default; only for a trusted agent.
     allow_root: bool,
@@ -2842,6 +2929,8 @@ fn launch_policy_source(
 
 // WO-117@v1: enforce and digest one immutable snapshot of a launch policy.
 // WO-258@v1: cmd_launch gained an eighth flag for the engine waiver; keep the arg list intact.
+// WO-224@v1: pass the operator's session assignments through a named launch.
+// WO-224: launch uses the same worker environment preparation as run.
 #[allow(clippy::too_many_arguments)]
 fn cmd_launch(
     agent: &str,
@@ -2851,6 +2940,9 @@ fn cmd_launch(
     consent_socket: Option<PathBuf>,
     consent_timeout: u64,
     state: Option<&Path>,
+    // WO-224@v1: launch argv is the source of explicit session overrides.
+    // WO-224: carry the parsed values without consulting inherited session variables.
+    worker_env: WorkerEnvArgs,
     allow_user_writable_engine: bool,
 ) -> Result<i32> {
     if init {
@@ -2905,6 +2997,9 @@ fn cmd_launch(
         hardened: false,
         worker_uid: None,
         worker_gid: None,
+        // WO-224@v1: use launch argv for the automatically dropped worker.
+        // WO-224: forward the same override fields that direct run supplies.
+        worker_env,
         allow_root: false,
         allow_user_writable_engine,
         state,
@@ -3110,6 +3205,241 @@ fn resolve_worker_creds(
     Ok(Some(gate::WorkerCreds { uid, gid }))
 }
 
+// WO-224@v1: represent the values shared by the local exec and remote bootstrap.
+// WO-224: keep the home and login name together as one worker identity.
+struct WorkerIdentity {
+    // WO-224@v1: a worker home can be a non-UTF-8 passwd path.
+    // WO-224: preserve the directory bytes for HOME.
+    home: PathBuf,
+    // WO-224@v1: use the same account name for USER and LOGNAME.
+    // WO-224: preserve the passwd login name as an OS string.
+    name: OsString,
+}
+
+// WO-224@v1: share the run-directory and synthetic login identity with SSH.
+// WO-224: use the dispatch directory as HOME when a numeric UID has no account.
+fn anonymous_worker_identity(home: PathBuf) -> WorkerIdentity {
+    WorkerIdentity {
+        home,
+        name: "bulwark-worker".into(),
+    }
+}
+
+// WO-224@v1: look up the target UID before forking or applying Landlock.
+// WO-224: distinguish an anonymous UID from an account lookup failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn passwd_worker_identity(uid: u32) -> Result<Option<WorkerIdentity>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    // WO-224@v1: use caller-owned NSS storage so no static passwd record escapes.
+    // WO-224: grow the buffer when a directory-service record needs more room.
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        // WO-224@v1: libc initializes the record only on a successful lookup.
+        // WO-224: read the passwd record only when NSS returns a result.
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        // WO-224@v1: an unset result pointer distinguishes an anonymous UID.
+        // WO-224: check NSS's result pointer alongside its return code.
+        let mut found = std::ptr::null_mut();
+        // WO-224@v1: use the reentrant passwd lookup on both supported platforms.
+        // WO-224: pass the full storage length so NSS can detect insufficient space.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        // WO-224@v1: only a successful lookup with no entry uses the synthetic identity.
+        // WO-224: report lookup failures before launching under the wrong environment.
+        match status {
+            libc::ERANGE => buffer.resize(buffer.len() * 2, 0),
+            0 if found.is_null() => return Ok(None),
+            0 => {
+                // WO-224@v1: copy the fields while the NSS buffer is still live.
+                // WO-224: keep both identity strings independent of the passwd record.
+                let entry = unsafe { entry.assume_init() };
+                anyhow::ensure!(
+                    !entry.pw_dir.is_null() && !entry.pw_name.is_null(),
+                    "passwd entry for worker uid {uid} is missing its home or name"
+                );
+                return Ok(Some(unsafe {
+                    WorkerIdentity {
+                        home: OsString::from_vec(CStr::from_ptr(entry.pw_dir).to_bytes().to_vec())
+                            .into(),
+                        name: OsString::from_vec(CStr::from_ptr(entry.pw_name).to_bytes().to_vec()),
+                    }
+                }));
+            }
+            error => {
+                return Err(std::io::Error::from_raw_os_error(error))
+                    .with_context(|| format!("cannot look up passwd entry for worker uid {uid}"));
+            }
+        }
+    }
+}
+
+// WO-224@v1: build the worker env from supplied inputs without changing the supervisor's.
+// WO-224: inject passwd lookup and run-directory selection for non-root tests.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_worker_environment(
+    uid: u32,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    explicit: &WorkerEnvArgs,
+    lookup: impl FnOnce(u32) -> Result<Option<WorkerIdentity>>,
+    run_dir: impl FnOnce() -> Result<PathBuf>,
+) -> Result<std::collections::BTreeMap<OsString, OsString>> {
+    // WO-224@v1: the effective worker UID selects the account and home.
+    // WO-224: resolve the run directory only for a passwd-less worker.
+    let identity = match lookup(uid)? {
+        Some(identity) => identity,
+        None => anonymous_worker_identity(run_dir()?),
+    };
+    // WO-224@v1: preserve unrelated inherited environment keys.
+    // WO-224: edit a child-only snapshot of the supervisor environment.
+    let mut env = inherited
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // WO-224@v1: strip the supervisor's session endpoints unless set in argv.
+    // WO-224: replace inherited session addresses with only the named overrides.
+    for key in WORKER_SESSION_VARS {
+        env.remove(std::ffi::OsStr::new(key));
+    }
+    // WO-224@v1: the CLI can put back only the session values it named.
+    // WO-224: retain the exact values supplied in the worker environment arguments.
+    env.extend(
+        explicit
+            .overrides
+            .iter()
+            .map(|(key, value)| (key.into(), value.into())),
+    );
+    // WO-224@v1: both login names follow the account or shared synthetic identity.
+    // WO-224: replace all three supervisor identity variables in the child environment.
+    env.extend([
+        ("HOME".into(), identity.home.into_os_string()),
+        ("USER".into(), identity.name.clone()),
+        ("LOGNAME".into(), identity.name),
+    ]);
+    Ok(env)
+}
+
+// WO-224@v1: carry the credential drop and its prebuilt environment to exec.
+// WO-224: keep the backing C strings alive through fork and exec.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct Worker {
+    // WO-224@v1: use the same UID for identity lookup and credential drop.
+    // WO-224: pair the existing credentials with their environment.
+    creds: gate::WorkerCreds,
+    // WO-224@v1: own the storage that envp's entries point into.
+    // WO-224: retain the C strings while the child can use their pointers.
+    _entries: Vec<CString>,
+    // WO-224@v1: assemble the null-terminated environment pointer array before fork.
+    // WO-224: keep environment allocation out of the forked child.
+    envp: Vec<*mut libc::c_char>,
+}
+
+// WO-224@v1: the unsupported gate never starts a worker.
+// WO-224: keep its credential-only interface and fail-closed behavior.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+type Worker = gate::WorkerCreds;
+
+// WO-224@v1: prepare a worker environment only when there will be a UID drop.
+// WO-224: perform NSS lookup, environment reads and allocation before the gate starts.
+fn prepare_worker(
+    creds: Option<gate::WorkerCreds>,
+    explicit: &WorkerEnvArgs,
+    remote_run_dir: Option<&Path>,
+) -> Result<Option<Worker>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        // WO-224@v1: a launch without a drop keeps exec's inherited environment.
+        // WO-224: skip NSS and environment preparation when credentials are unchanged.
+        let Some(creds) = creds else {
+            return Ok(None);
+        };
+        // WO-224@v1: reuse the dispatch directory for SSH and the working directory locally.
+        // WO-224: choose an anonymous home from the run context without inheriting HOME.
+        let env = build_worker_environment(
+            creds.uid,
+            std::env::vars_os(),
+            explicit,
+            passwd_worker_identity,
+            || match remote_run_dir {
+                Some(dir) => Ok(dir.to_path_buf()),
+                None => std::env::current_dir().context("cannot resolve anonymous worker HOME"),
+            },
+        )?;
+        // WO-224@v1: encode each final environment assignment before fork.
+        // WO-224: keep arbitrary OS-string bytes in the exec environment.
+        let entries = env
+            .into_iter()
+            .map(|(mut name, value)| {
+                name.push("=");
+                name.push(value);
+                CString::new(name.as_encoded_bytes())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // WO-224@v1: terminate envp as required by the exec ABI.
+        // WO-224: store pointers only after all environment strings are built.
+        let envp = entries
+            .iter()
+            .map(|entry| entry.as_ptr().cast_mut())
+            .chain(std::iter::once(std::ptr::null_mut()))
+            .collect();
+        Ok(Some(Worker {
+            creds,
+            _entries: entries,
+            envp,
+        }))
+    }
+    // WO-224@v1: the unsupported gate never uses a prepared environment.
+    // WO-224: let the stub keep its original credential argument.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (&explicit.overrides, remote_run_dir);
+        Ok(creds)
+    }
+}
+
+/// SAFETY: call only in a forked child or the single-threaded Landlock launcher.
+/// `argv` must contain a null-terminated array of pointers to live C strings.
+// WO-224@v1: install the child-only environment without allocating after fork.
+// WO-224: preserve execvp's PATH lookup and restore environ if exec fails.
+unsafe fn exec_worker(prog: &CStr, argv: &[*const libc::c_char], worker: Option<&Worker>) {
+    // WO-224@v1: the Linux libc environ slot holds the execvp environment.
+    // WO-224: use the process's environment slot so execvp keeps its usual lookup.
+    #[cfg(target_os = "linux")]
+    extern "C" {
+        // WO-224@v1: bind the libc slot for the null-terminated environment array.
+        // WO-224: replace the array only across exec in the single-threaded process.
+        static mut environ: *mut *mut libc::c_char;
+    }
+    // WO-224@v1: replace environ only after a credential drop.
+    // WO-224: leave the process environment untouched when there is no worker.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(worker) = worker {
+        // WO-224@v1: use the libc environment slot directly on Linux.
+        // WO-224: avoid forming a Rust reference to the mutable libc static.
+        #[cfg(target_os = "linux")]
+        let slot = std::ptr::addr_of_mut!(environ);
+        // WO-224@v1: macOS exposes its environment slot through a libc accessor.
+        // WO-224: target the same slot macOS execvp reads.
+        #[cfg(target_os = "macos")]
+        let slot = libc::_NSGetEnviron();
+        // WO-224@v1: the prepared strings outlive execvp and any failure return.
+        // WO-224: restore the previous slot on failure before the worker storage drops.
+        let previous = slot.replace(worker.envp.as_ptr().cast_mut());
+        libc::execvp(prog.as_ptr(), argv.as_ptr());
+        slot.write(previous);
+        return;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = worker;
+    libc::execvp(prog.as_ptr(), argv.as_ptr());
+}
+
 /// Build the gate mode + mark paths for a `run` and dispatch.
 /// Refuse operator `--hardened --allow` grants that Landlock cannot enforce
 /// faithfully. Hardened mode maps each grant to a `path_beneath` rule keyed on
@@ -3174,6 +3504,8 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
 
 // WO-73@v1: refuse hardened grants that Landlock would enforce more broadly.
 // WO-117@v1: enforce and measure the same file-backed policy snapshot.
+// WO-224@v1: prepare the environment once for whichever worker identity will exec.
+// WO-224: keep passwd lookup before any gate or Landlock restriction is installed.
 fn cmd_run(mut args: RunArgs) -> Result<i32> {
     // WO-258@v1: root must never start the gate from a location a non-root uid
     // can modify — a trojaned binary owns the next root launch. Refuse before any
@@ -3200,6 +3532,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         // `sudo bulwark run --hardened` ran the agent as root. Resolve the
         // worker the way the forking paths do and drop in-process instead.
         let worker = hardened_worker_creds(args.worker_uid, args.worker_gid, args.allow_root)?;
+        // WO-224@v1: resolve the worker environment while passwd is still readable.
+        // WO-224: prepare Landlock exec with the same identity and session rules.
+        let worker = prepare_worker(worker, &args.worker_env, None)?;
         return run_hardened(&al.allowed_globs(), args.command, worker);
     }
 
@@ -3224,6 +3559,20 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         worker = root_default_worker()?;
     }
     let _ = args.allow_root; // consumed only on unix; keep the field live elsewhere
+
+    // WO-224@v1: an anonymous remote worker keeps its dispatch directory as HOME.
+    // WO-224: take the run directory from the remote lane path, not ambient HOME.
+    let remote_run_dir = if matches!(args.consent, ConsentMode::Remote) {
+        args.prompt_out
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|dir| dir.is_absolute())
+    } else {
+        None
+    };
+    // WO-224@v1: build the environment in the supervisor before starting the gate.
+    // WO-224: bind the prepared environment to the credentials used by each backend.
+    let prepared_worker = prepare_worker(worker, &args.worker_env, remote_run_dir)?;
 
     // Allow-list (CI) mode: default-deny, allow only the grants + runtime base.
     // Non-interactive — there is no consent provider. Mark every mounted
@@ -3256,7 +3605,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             &mark_paths,
             args.receipts,
             args.command,
-            worker,
+            // WO-224@v1: allow-list runs execute with the same prepared environment.
+            // WO-224: pass the worker environment through the allow-list entry point.
+            prepared_worker,
         )
         .map(|o| o.exit_code);
     }
@@ -3433,7 +3784,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             &protected,
             args.receipts,
             args.command,
-            worker,
+            // WO-224@v1: watched workers use the prepared environment at exec.
+            // WO-224: apply the same worker identity under record-only enforcement.
+            prepared_worker,
             args.watch_json,
         );
     }
@@ -3504,7 +3857,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                 &mark_paths,
                 args.receipts,
                 args.command,
-                worker,
+                // WO-224@v1: use the prepared environment with static consent.
+                // WO-224: keep the static gate's worker on the shared exec path.
+                prepared_worker,
             )
             .map(|o| o.exit_code)
         }
@@ -3540,7 +3895,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
                     &mark_paths,
                     args.receipts,
                     args.command,
-                    worker,
+                    // WO-224@v1: use the prepared worker after binding the consent socket.
+                    // WO-224: keep the consent provider and the child's environment independent.
+                    prepared_worker,
                 )?
             };
             // Persist any deny-forever decisions as protected globs so they
@@ -3548,7 +3905,9 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
             persist_deny_forever(&out.deny_forever_paths, args.policy_path);
             Ok(out.exit_code)
         }
-        ConsentMode::Remote => cmd_run_remote(&protected, &mark_paths, &args, worker),
+        // WO-224@v1: pass the prepared worker through remote consent setup.
+        // WO-224: preserve the dispatch-directory fallback at remote worker exec.
+        ConsentMode::Remote => cmd_run_remote(&protected, &mark_paths, &args, prepared_worker),
     };
 
     // Reaching here means the supervisor exited normally (child exited or a
@@ -3607,6 +3966,8 @@ fn default_watch_receipts() -> Result<PathBuf> {
 }
 
 // WO-240@v1: run the tree under the record-only gate, then print the report.
+// WO-224@v1: watch forwards the prepared environment whenever it drops a worker.
+// WO-224: keep watched and enforced launches on the same exec path.
 /// `bulwark watch`: every open by the tree is allowed and recorded on every real
 /// mount; protected inodes are flagged `would_deny`. The report goes to stdout
 /// after the agent exits; the agent's exit code is returned unchanged.
@@ -3615,7 +3976,9 @@ fn cmd_watch(
     protected: &ProtectedSet,
     receipts: Option<&Path>,
     command: &[String],
-    worker: Option<gate::WorkerCreds>,
+    // WO-224@v1: pass worker credentials and the prepared environment together.
+    // WO-224: reuse the enforcing gate's child exec for watched workers.
+    worker: Option<Worker>,
     json: bool,
 ) -> Result<i32> {
     // WO-240@v1: a supplied --receipts path gets the default directory's check on
@@ -3652,12 +4015,16 @@ fn cmd_watch(
 }
 
 // WO-240@v1: macOS needs an Endpoint Security edge change first; refuse before any spawn.
+// WO-224@v1: match the watch dispatcher that now carries prepared workers.
+// WO-224: keep the unsupported watch route refusing execution.
 #[cfg(not(target_os = "linux"))]
 fn cmd_watch(
     _protected: &ProtectedSet,
     _receipts: Option<&Path>,
     _command: &[String],
-    _worker: Option<gate::WorkerCreds>,
+    // WO-224@v1: share the worker input type with the Linux watch path.
+    // WO-224: the unsupported route uses neither credentials nor environment.
+    _worker: Option<Worker>,
     _json: bool,
 ) -> Result<i32> {
     anyhow::bail!(
@@ -3835,11 +4202,15 @@ fn open_remote_control_lanes(
 /// reads operator allow-session replies from the verdict lane and updates the
 /// cache so the next open passes. The kernel deadline is always met.
 // WO-154@v1: keep remote consent decisions off the fanotify event loop.
+// WO-224@v1: pass through the environment prepared for the remote worker's UID.
+// WO-224: use the dispatch directory for a passwd-less remote worker.
 fn cmd_run_remote(
     protected: &ProtectedSet,
     mark_paths: &[PathBuf],
     args: &RunArgs,
-    worker: Option<gate::WorkerCreds>,
+    // WO-224@v1: share the worker exec environment with local supervised runs.
+    // WO-224: keep the prepared values through remote consent setup.
+    worker: Option<Worker>,
 ) -> Result<i32> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -5277,6 +5648,97 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
     #[test]
     fn resolve_worker_creds_rejects_gid_without_uid() {
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
+    }
+
+    // WO-224@v1: verify passwd and anonymous worker environments without a UID drop.
+    // WO-224: exercise argv overrides and scrub inherited session values without NSS or root.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn worker_environment_uses_passwd_or_anonymous_identity_and_only_explicit_sessions() {
+        use std::collections::BTreeMap;
+
+        // WO-224@v1: model a sudo supervisor with root identity and stale session endpoints.
+        // WO-224: include PATH so the test checks that unrelated variables survive.
+        let inherited = [
+            ("HOME", "/root"),
+            ("USER", "root"),
+            ("LOGNAME", "root"),
+            ("XDG_RUNTIME_DIR", "/run/user/0"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus"),
+            ("PATH", "/usr/bin"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        // WO-224@v1: a passwd entry takes precedence over the launcher and anonymous home.
+        // WO-224: inject a lookup that checks which UID the environment is built for.
+        let passwd_env = build_worker_environment(
+            1000,
+            inherited.clone(),
+            &WorkerEnvArgs { overrides: vec![] },
+            |uid| {
+                assert_eq!(uid, 1000);
+                Ok(Some(WorkerIdentity {
+                    home: "/home/alice".into(),
+                    name: "alice".into(),
+                }))
+            },
+            || panic!("a named worker does not need a run directory"),
+        )
+        .unwrap();
+        assert_eq!(
+            passwd_env,
+            BTreeMap::from(
+                [
+                    ("HOME", "/home/alice"),
+                    ("USER", "alice"),
+                    ("LOGNAME", "alice"),
+                    ("PATH", "/usr/bin"),
+                ]
+                .map(|(key, value)| (key.into(), value.into()))
+            )
+        );
+
+        // WO-224@v1: verify that explicit values come from the parsed run command.
+        // WO-224: include an address containing an equals sign to test its preservation.
+        let cli = Cli::try_parse_from([
+            "bulwark",
+            "run",
+            "--worker-env",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "--worker-env=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+            "--",
+            "true",
+        ])
+        .unwrap();
+        // WO-224@v1: use the actual CLI output as the environment builder input.
+        // WO-224: verify parsing and environment selection together without spawning a gate.
+        let Cmd::Run { worker_env, .. } = cli.cmd else {
+            panic!("expected run command");
+        };
+        // WO-224@v1: a missing passwd entry uses the run directory and synthetic name.
+        // WO-224: assert explicit session values replace the inherited values.
+        let anonymous_env = build_worker_environment(
+            60000,
+            inherited,
+            &worker_env,
+            |_| Ok(None),
+            || Ok("/tmp/worker-run".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            anonymous_env,
+            BTreeMap::from(
+                [
+                    ("HOME", "/tmp/worker-run"),
+                    ("USER", "bulwark-worker"),
+                    ("LOGNAME", "bulwark-worker"),
+                    ("PATH", "/usr/bin"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+                ]
+                .map(|(key, value)| (key.into(), value.into()))
+            )
+        );
+        assert!(prepare_worker(None, &worker_env, None).unwrap().is_none());
     }
 
     // WO-145@v2: the home-ownership predicate drives the refuse/pass call;
