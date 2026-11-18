@@ -33,6 +33,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- WO-269: record the fix to the duplicate engine waiver warning. -->
 - `launch` prints the engine waiver warning once when `--allow-user-writable-engine`
   is used for a user-writable engine.
+<!-- WO-272@v1: correct the 0.11.0 claim about remote receipts. -->
+<!-- WO-272: SSH relays the waiver warning and writes no receipt file. -->
+- The 0.11.0 notes incorrectly said that `bulwark ssh --allow-user-writable-engine`
+  records the waiver in receipts. The engine warns once on stderr when the waiver
+  is used, and SSH relays the warning. `bulwark ssh` writes no receipts.
 
 ## [0.11.1] - 2026-11-18
 

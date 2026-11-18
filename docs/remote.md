@@ -238,11 +238,15 @@ In short:
 The `--deploy` modes place the gate binary differently, and that difference is a
 trust boundary. `memfd` (the default) runs the gate from memory; `shm`, `scp` and
 `dist` place it at a user-writable path; `never` uses an existing remote binary —
-which is user-writable until you install it. Root must not execute a user-writable
-engine, so those development lanes run only with `--allow-user-writable-engine`, and
-the remote receipts then carry `engine_unverified`. The production lane is
-`sudo bulwark install-root` on the remote host followed by `--deploy never`: the
-installed engine is root-owned and needs no waiver.
+which is user-writable until you install it.
+
+<!-- WO-272@v1: the SSH invocation omits `--receipts`. -->
+<!-- WO-272: tell development-lane users where the waiver warning appears. -->
+Root must not execute a user-writable engine, so those development lanes run only
+with `--allow-user-writable-engine`. The engine warns once on stderr when the
+waiver is used, and SSH relays the warning. `bulwark ssh` writes no receipts.
+The production lane is `sudo bulwark install-root` on the remote host followed by
+`--deploy never`: the installed engine is root-owned and needs no waiver.
 
 This is a deliberate boundary: Bulwark is a read-gate for a process tree, not a
 payload-delivery mechanism. An agent binary or installer you place on the host is a
