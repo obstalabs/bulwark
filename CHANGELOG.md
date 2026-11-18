@@ -40,6 +40,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is used, and SSH relays the warning. `bulwark ssh` writes no receipts.
 
 ### Security
+<!-- WO-275@v1: an unsigned gate could be installed into a root-owned location. -->
+<!-- WO-275: record signature rejection and cleanup during fresh and forced installs. -->
+- macOS: `bulwark install-root` now verifies that the installed Endpoint Security gate
+  bundle is signed by the release team with the expected bundle identifier. It removes
+  the bundle and reports the signature verification error if the check fails, including
+  on a forced reinstall.
 <!-- WO-273@v1: inherited open files could reach the agent without an open for the gate to decide. -->
 <!-- WO-273: record the descriptor cleanup in both supervised launch paths. -->
 - Linux and macOS supervised launches close inherited file descriptors above standard

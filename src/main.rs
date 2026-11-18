@@ -116,6 +116,11 @@ const DEFAULT_CONSENT_TIMEOUT_SECS: u64 = 90;
 #[cfg(target_os = "macos")]
 const MACOS_ES_GATE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 
+#[cfg(target_os = "macos")]
+// WO-275@v1: pin install-root to the release signing identity.
+// WO-275: use the release Developer ID team and the bundle ID from GateInfo.plist.
+const MACOS_GATE_REQUIREMENT: &str = r#"=anchor apple generic and certificate leaf[subject.OU] = "NX2ATXN74T" and identifier "dev.obstalabs.bulwark.es-gate""#;
+
 /// WO-24: the bundled ES gate is built for macOS 11.0 or newer.
 #[cfg(target_os = "macos")]
 const MACOS_MIN_MAJOR: u64 = 11;
@@ -1287,10 +1292,12 @@ fn find_app_bundle(edge: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Copy the ES gate bundle next to the installed engine, preserving the signed
-/// bundle's internal modes and ownership (codesign cares about those bytes).
+/// Copy the ES gate bundle next to the installed engine and verify the installed
+/// bundle's ownership, modes and signature.
 #[cfg(target_os = "macos")]
 // WO-258@v1: copy the signed ES gate bundle beside the installed engine.
+// WO-275@v1: verify the release signature on the installed bundle.
+// WO-275: apply the signature check to both fresh copies and in-place repairs.
 fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
     let edge = gate::resolve_edge_path().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1321,6 +1328,35 @@ fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
         copy_tree(&app, &dst).context("copy gate bundle")?;
     }
     verify_tree_root_owned(&dst)?;
+    // WO-275@v1: authenticate the destination after the ownership pass.
+    // WO-275: discard a rejected bundle even when it replaces an earlier install.
+    if let Err(error) = verify_gate_bundle_signature(&dst) {
+        // WO-275: retain the signature diagnosis if removing the bundle also fails.
+        std::fs::remove_dir_all(&dst)
+            .with_context(|| format!("{error:#}\nremove rejected gate bundle {}", dst.display()))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+// WO-275@v1: enforce the release requirement during strict signature verification.
+// WO-275: return the bundle path and the system verifier's diagnostic on failure.
+fn verify_gate_bundle_signature(bundle: &Path) -> Result<()> {
+    // WO-275: capture the result from the system verifier at its absolute path.
+    let output = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R", MACOS_GATE_REQUIREMENT, "--"])
+        .arg(bundle)
+        .output()
+        .with_context(|| format!("run /usr/bin/codesign for gate bundle {}", bundle.display()))?;
+    // WO-275: include the verifier status even when it provides no stderr.
+    anyhow::ensure!(
+        output.status.success(),
+        "codesign verification failed for gate bundle {} ({}): {}",
+        bundle.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(())
 }
 
@@ -5085,6 +5121,38 @@ mod tests {
         let system_file = std::fs::canonicalize("/usr/bin/true").unwrap();
         verify_tree_root_owned(&system_file).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    // WO-275@v1: exercise strict signature verification without root privileges.
+    // WO-275: an unsigned gate executable must be rejected with its bundle named.
+    #[test]
+    fn gate_signature_verification_names_an_unsigned_bundle() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // WO-275: isolate the unsigned fixture from any installed gate.
+        let dir = test_scratch_dir("wo275-unsigned");
+        // WO-275: use the same bundle layout as the released ES gate.
+        let bundle = dir.join("bulwark_es_gate.app");
+        // WO-275: put the unsigned script at the declared gate executable path.
+        let executable = bundle.join("Contents/MacOS/bulwark_es_gate");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // WO-275: use the shipped metadata so the fixture is recognized as a bundle.
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            include_bytes!("../macos-es-proof/GateInfo.plist"),
+        )
+        .unwrap();
+
+        // WO-275: check that the verifier's rejection names the exact bundle.
+        let error = verify_gate_bundle_signature(&bundle)
+            .expect_err("unsigned gate bundle must fail signature verification")
+            .to_string();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(error.contains("codesign verification failed"), "{error}");
+        assert!(error.contains(bundle.to_string_lossy().as_ref()), "{error}");
     }
 
     // WO-117 (R1): one open, one read: the parsed policy and the recorded digest
