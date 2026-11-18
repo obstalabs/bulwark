@@ -522,9 +522,19 @@ struct StoppedChild {
     pid: libc::pid_t,
 }
 
+// WO-273@v1: the close loop covers valid descriptor numbers below the soft limit.
+// WO-273: bound the inclusive endpoint without truncation or underflow.
+fn last_fd_to_close(soft_limit: libc::rlim_t) -> libc::c_int {
+    soft_limit
+        .saturating_sub(1)
+        .min(libc::c_int::MAX as libc::rlim_t) as libc::c_int
+}
+
 // WO-49@v1: arm the edge before resuming and dropping the supervised child.
 // WO-224@v1: exec the resumed, dropped child with its prepared environment.
 // WO-224: preserve stopped launch ordering and leave the parent environment intact.
+// WO-273@v1: close inherited descriptors when the resumed child is ready to exec.
+// WO-273: keep the descriptor cleanup confined to the agent child.
 fn spawn_stopped(command: &[String], worker: Option<&crate::Worker>) -> Result<StoppedChild> {
     let prog = CString::new(command[0].as_bytes())?;
     let argv: Vec<CString> = command
@@ -533,6 +543,21 @@ fn spawn_stopped(command: &[String], worker: Option<&crate::Worker>) -> Result<S
         .collect::<std::result::Result<_, _>>()?;
     let mut argv_ptr: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     argv_ptr.push(std::ptr::null());
+
+    // WO-273@v1: snapshot the descriptor limit before forking the stopped child.
+    // WO-273: prepare the close loop bound while still in the parent.
+    let mut nofile = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // WO-273@v1: refuse the launch if the close loop bound is unavailable.
+    // WO-273: report the limit query error before forking the child.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("getrlimit(RLIMIT_NOFILE)");
+    }
+    // WO-273@v1: finish computing the close range before fork.
+    // WO-273: pass a descriptor-sized endpoint into the child.
+    let last_fd = last_fd_to_close(nofile.rlim_cur);
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -552,6 +577,11 @@ fn spawn_stopped(command: &[String], worker: Option<&crate::Worker>) -> Result<S
                 if drop_to(worker.creds).is_err() {
                     libc::_exit(126);
                 }
+            }
+            // WO-273@v1: close the descriptors above stderr just before exec.
+            // WO-273: sweep the descriptor numbers using only close after fork.
+            for fd in 3..=last_fd {
+                libc::close(fd);
             }
             // WO-224@v1: apply the environment after the edge is ready and the UID has dropped.
             // WO-224: use the shared exec path for both platforms' worker environments.
@@ -812,6 +842,17 @@ mod allowlist_edge_tests {
 mod supervise_tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    // WO-273@v1: cover the exclusive limit and the largest representable descriptor.
+    // WO-273: prevent wraparound or an off-by-one in the macOS close loop bound.
+    fn last_fd_to_close_respects_descriptor_bounds() {
+        assert_eq!(last_fd_to_close(0), 0);
+        assert_eq!(last_fd_to_close(3), 2);
+        assert_eq!(last_fd_to_close(4), 3);
+        assert_eq!(last_fd_to_close(1024), 1023);
+        assert_eq!(last_fd_to_close(libc::RLIM_INFINITY), libc::c_int::MAX);
+    }
 
     // WO-132@v1: collision-free scratch dir (pid + nanos + counter, never reused).
     fn scratch(tag: &str) -> PathBuf {

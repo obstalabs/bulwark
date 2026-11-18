@@ -39,6 +39,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   records the waiver in receipts. The engine warns once on stderr when the waiver
   is used, and SSH relays the warning. `bulwark ssh` writes no receipts.
 
+### Security
+<!-- WO-273@v1: inherited open files could reach the agent without an open for the gate to decide. -->
+<!-- WO-273: record the descriptor cleanup in both supervised launch paths. -->
+- Linux and macOS supervised launches close inherited file descriptors above standard
+  input, output and error before the agent runs. A protected file already open in the
+  launcher could previously be read without an `open()` for the gate to decide.
+
 ## [0.11.1] - 2026-11-18
 
 ### Security

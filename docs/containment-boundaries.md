@@ -225,10 +225,19 @@ migrate.
 ## Reads that never call `open()` — a passed-in file descriptor
 
 Bulwark gates the `open()`. A read that never opens the file in the supervised tree has no
-event to gate. The realistic instance is a **descriptor passed in from outside**: a process
-Bulwark did **not** launch opens the protected file (it has its own access to it) and hands
-the live fd to the supervised tree over a Unix socket (`SCM_RIGHTS`); the agent then reads
-the bytes with `read`/`pread`/`mmap`/`splice` without ever calling `open()` itself.
+event to gate.
+
+<!-- WO-273@v1: launch-time inheritance was another way to read without an open. -->
+<!-- WO-273: distinguish inherited descriptors from descriptors received after launch. -->
+To prevent launch-time inheritance, the Linux fanotify and macOS Endpoint Security launchers
+close inherited descriptors above standard input, output and error in the child before the
+agent runs. The `close()` sweep on macOS and on Linux when `close_range` fails is bounded by
+the soft `RLIMIT_NOFILE` recorded before the fork.
+
+A **descriptor passed in from outside after launch** can still be read. A process Bulwark
+did **not** launch opens the protected file (it has its own access to it) and hands the live
+fd to the supervised tree over a Unix socket (`SCM_RIGHTS`). The agent can then read the
+bytes with `read`/`pread`/`mmap`/`splice` without ever calling `open()` itself.
 
 This is the same boundary as the container/unwrapped-process case, seen from the fd angle:
 it requires a **cooperating process outside the tree that already has the secret**. The
