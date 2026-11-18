@@ -280,6 +280,8 @@ pub trait ConsentDecider {
 /// policy profile — keeping the gate agnostic to policy. Returns the child's
 /// exit code.
 // WO-155@v1: keep enforcement active until every supervised process is reaped.
+// WO-224@v1: receive the worker's environment before setting up the Linux gate.
+// WO-224: carry the prepared environment with the credentials through spawn.
 pub fn run(
     mode: GateMode,
     consent: Option<Box<dyn ConsentDecider + Send>>,
@@ -287,7 +289,9 @@ pub fn run(
     mark_paths: &[PathBuf],
     receipts: Option<&Path>,
     command: &[String],
-    worker: Option<WorkerCreds>,
+    // WO-224@v1: consume the prepared worker for this run.
+    // WO-224: keep its exec storage live in the parent across fork.
+    worker: Option<crate::Worker>,
 ) -> Result<RunOutcome> {
     if command.is_empty() {
         bail!("no command given");
@@ -470,15 +474,19 @@ pub fn run(
     // Fork + exec the supervised command. The supervisor (this process) stays
     // root and holds the fanotify fd; `worker` drops only the agent child. The
     // child joins the cgroup scope (if any) before exec, while still root.
-    let child = spawn(command, worker, scope.as_ref())?;
+    // WO-224@v1: pass the prebuilt environment to the child without changing the parent.
+    // WO-224: borrow the worker for spawn so its UID and GID remain available for logging.
+    let child = spawn(command, worker.as_ref(), scope.as_ref())?;
     // The effective uid is shown inline on the supervising line (no separate
     // drop banner) — so the auto-drop success path adds no extra noise, while the
     // uid in effect stays visible for every run.
     match worker {
+        // WO-224@v1: log credentials from the same worker passed to spawn.
+        // WO-224: keep the startup line focused on UID and GID.
         Some(w) => log.note(&format!(
             "supervising pid {child} (uid={} gid={}): {}",
-            w.uid,
-            w.gid,
+            w.creds.uid,
+            w.creds.gid,
             command.join(" ")
         )),
         None => log.note(&format!("supervising pid {child}: {}", command.join(" "))),
@@ -1632,9 +1640,13 @@ unsafe fn drop_to(creds: WorkerCreds) -> std::result::Result<(), i32> {
 /// the child drops to those credentials before exec (the supervisor parent stays
 /// root). A failed drop exits the child 126 — never execs the agent half-dropped.
 // WO-59@v1: place the child in its inherited membership scope before exec.
+// WO-224@v1: install the prepared worker environment after dropping credentials.
+// WO-224: defer environment installation to the child immediately before exec.
 fn spawn(
     command: &[String],
-    worker: Option<WorkerCreds>,
+    // WO-224@v1: the child inherits the worker's prebuilt exec storage across fork.
+    // WO-224: keep environment preparation outside the post-fork path.
+    worker: Option<&crate::Worker>,
     scope: Option<&crate::cgroup::CgroupScope>,
 ) -> Result<libc::pid_t> {
     let prog = CString::new(command[0].as_bytes())?;
@@ -1686,8 +1698,10 @@ fn spawn(
             if crate::cgroup::reset_agent_oom_score().is_err() {
                 libc::_exit(125);
             }
-            if let Some(creds) = worker {
-                if drop_to(creds).is_err() {
+            // WO-224@v1: take the drop credentials from the prepared worker.
+            // WO-224: keep the environment paired with the UID used at exec.
+            if let Some(worker) = worker {
+                if drop_to(worker.creds).is_err() {
                     // Fail closed: a botched/partial drop must never run the agent.
                     libc::_exit(126);
                 }
@@ -1703,7 +1717,9 @@ fn spawn(
                     libc::_exit(125);
                 }
             }
-            libc::execvp(prog.as_ptr(), argv_ptr.as_ptr());
+            // WO-224@v1: exec with the worker environment after the credential drop.
+            // WO-224: preserve normal PATH resolution while switching the child's environment.
+            crate::exec_worker(&prog, &argv_ptr, worker);
             // Only reached if execvp failed (command not found).
             libc::_exit(127);
         }
