@@ -116,11 +116,6 @@ const DEFAULT_CONSENT_TIMEOUT_SECS: u64 = 90;
 #[cfg(target_os = "macos")]
 const MACOS_ES_GATE_ENV: &str = "BULWARK_MACOS_ES_GATE";
 
-#[cfg(target_os = "macos")]
-// WO-275@v1: pin install-root to the release signing identity.
-// WO-275: use the release Developer ID team and the bundle ID from GateInfo.plist.
-const MACOS_GATE_REQUIREMENT: &str = r#"=anchor apple generic and certificate leaf[subject.OU] = "NX2ATXN74T" and identifier "dev.obstalabs.bulwark.es-gate""#;
-
 /// WO-24: the bundled ES gate is built for macOS 11.0 or newer.
 #[cfg(target_os = "macos")]
 const MACOS_MIN_MAJOR: u64 = 11;
@@ -1498,26 +1493,13 @@ fn harden_path_root_0755(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Locate the `.app` bundle that contains the ES edge binary, by walking up until
-/// the path name ends in `.app`.
-#[cfg(target_os = "macos")]
-// WO-258@v1: walk up to the .app bundle that holds the ES edge binary.
-fn find_app_bundle(edge: &Path) -> Option<PathBuf> {
-    let mut cur = edge.to_path_buf();
-    loop {
-        if cur.file_name()?.to_str()?.ends_with(".app") {
-            return Some(cur);
-        }
-        cur = cur.parent()?.to_path_buf();
-    }
-}
-
 /// Copy the ES gate bundle next to the installed engine and verify the installed
 /// bundle's ownership, modes and signature.
 #[cfg(target_os = "macos")]
 // WO-258@v1: copy the signed ES gate bundle beside the installed engine.
 // WO-275@v1: verify the release signature on the installed bundle.
 // WO-275: apply the signature check to both fresh copies and in-place repairs.
+// WO-284@v1: use the macOS gate module's bundle lookup and signature verifier.
 fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
     let edge = gate::resolve_edge_path().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1525,8 +1507,8 @@ fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
              BULWARK_MACOS_ES_GATE"
         )
     })?;
-    let app = find_app_bundle(&edge)
-        .ok_or_else(|| anyhow::anyhow!("cannot find the gate app bundle for {}", edge.display()))?;
+    // WO-284: resolve the source bundle with the same ancestor lookup used at launch.
+    let app = gate::find_app_bundle(&edge)?;
     let app_name = app.file_name().expect("app bundle name").to_owned();
     let dst = target_dir.join(app_name);
     // WO-271@v1: re-running install-root from the installed engine discovers the
@@ -1545,38 +1527,20 @@ fn copy_gate_bundle(target_dir: &Path) -> Result<()> {
             std::fs::remove_dir_all(&dst)
                 .with_context(|| format!("remove previous gate bundle {}", dst.display()))?;
         }
-        copy_tree(&app, &dst).context("copy gate bundle")?;
+        // WO-284: copy from the bundle path borrowed from the resolved edge.
+        copy_tree(app, &dst).context("copy gate bundle")?;
     }
     verify_tree_root_owned(&dst)?;
     // WO-275@v1: authenticate the destination after the ownership pass.
     // WO-275: discard a rejected bundle even when it replaces an earlier install.
-    if let Err(error) = verify_gate_bundle_signature(&dst) {
+    // WO-284@v1: keep rejecting failed signatures during an install or repair.
+    // WO-284: enforce the same signature requirement at installation and launch.
+    if let Err(error) = gate::verify_gate_bundle_signature(&dst) {
         // WO-275: retain the signature diagnosis if removing the bundle also fails.
         std::fs::remove_dir_all(&dst)
             .with_context(|| format!("{error:#}\nremove rejected gate bundle {}", dst.display()))?;
         return Err(error);
     }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-// WO-275@v1: enforce the release requirement during strict signature verification.
-// WO-275: return the bundle path and the system verifier's diagnostic on failure.
-fn verify_gate_bundle_signature(bundle: &Path) -> Result<()> {
-    // WO-275: capture the result from the system verifier at its absolute path.
-    let output = std::process::Command::new("/usr/bin/codesign")
-        .args(["--verify", "--strict", "-R", MACOS_GATE_REQUIREMENT, "--"])
-        .arg(bundle)
-        .output()
-        .with_context(|| format!("run /usr/bin/codesign for gate bundle {}", bundle.display()))?;
-    // WO-275: include the verifier status even when it provides no stderr.
-    anyhow::ensure!(
-        output.status.success(),
-        "codesign verification failed for gate bundle {} ({}): {}",
-        bundle.display(),
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
     Ok(())
 }
 
@@ -5609,6 +5573,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     // WO-275@v1: exercise strict signature verification without root privileges.
     // WO-275: an unsigned gate executable must be rejected with its bundle named.
+    // WO-284@v1: reuse the unsigned fixture for the verifier now called at launch.
     #[test]
     fn gate_signature_verification_names_an_unsigned_bundle() {
         use std::os::unix::fs::PermissionsExt;
@@ -5630,7 +5595,8 @@ mod tests {
         .unwrap();
 
         // WO-275: check that the verifier's rejection names the exact bundle.
-        let error = verify_gate_bundle_signature(&bundle)
+        // WO-284: exercise the verifier shared by install-root and launch.
+        let error = gate::verify_gate_bundle_signature(&bundle)
             .expect_err("unsigned gate bundle must fail signature verification")
             .to_string();
         std::fs::remove_dir_all(&dir).unwrap();

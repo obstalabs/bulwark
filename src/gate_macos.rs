@@ -26,6 +26,10 @@ use crate::receipt::{Decision, Receipt, ReceiptLog};
 // WO-23@v1: the operator can point the CLI at a specific signed edge binary.
 // WO-163@v2: when set, this override wins over auto-discovery.
 const ES_EDGE_ENV: &str = "BULWARK_MACOS_ES_GATE";
+// WO-275@v1: pin install-root to the release signing identity.
+// WO-275: use the release Developer ID team and the bundle ID from GateInfo.plist.
+// WO-284: enforce one signing requirement for installation and launch.
+const MACOS_GATE_REQUIREMENT: &str = r#"=anchor apple generic and certificate leaf[subject.OU] = "NX2ATXN74T" and identifier "dev.obstalabs.bulwark.es-gate""#;
 const EDGE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const EDGE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 // WO-207@v1: the edge exits with this code, without writing its ready marker,
@@ -218,6 +222,18 @@ pub fn run(
 
     let edge = edge_path()?;
     ensure_executable(&edge)?;
+    // WO-284@v1: authenticate the pinned gate before either child process starts.
+    // WO-284: the check applies regardless of the ownership waiver.
+    let bundle = find_app_bundle(&edge)?;
+    verify_gate_bundle_signature(bundle)?;
+    // WO-284@v1: the bundle's signing requirement authenticates its main executable.
+    // WO-284: an override must select that executable, even inside a verified bundle.
+    anyhow::ensure!(
+        edge == bundle.join(ES_EDGE_REL),
+        "ES edge {} must be {ES_EDGE_REL} in gate bundle {}",
+        edge.display(),
+        bundle.display()
+    );
 
     let temp = GateTemp::new()?;
     // WO-224@v1: hand the prebuilt environment to the child before it stops.
@@ -269,10 +285,10 @@ pub fn run(
     })
 }
 
-/// Path inside the gate bundle to the edge executable, relative to a directory that
-/// contains `bulwark_es_gate.app`.
+/// Path to the edge executable relative to the root of the gate bundle.
 // WO-163@v2: the bundle-relative path discovery probes under libexec and beside the binary.
-const ES_EDGE_REL: &str = "bulwark_es_gate.app/Contents/MacOS/bulwark_es_gate";
+// WO-284: discovery and signature enforcement use the same executable location.
+const ES_EDGE_REL: &str = "Contents/MacOS/bulwark_es_gate";
 
 /// Resolve the ES edge binary. Order:
 ///
@@ -352,20 +368,57 @@ fn edge_path() -> Result<PathBuf> {
     })
 }
 
+// WO-258@v1: walk up to the .app bundle that holds the ES edge binary.
+// WO-284@v1: share the enclosing bundle lookup with install-root.
+// WO-284: start at the edge's parent and name the edge if no bundle encloses it.
+pub(super) fn find_app_bundle(edge: &Path) -> Result<&Path> {
+    edge.ancestors()
+        .skip(1)
+        .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+        .with_context(|| format!("cannot find the gate app bundle for {}", edge.display()))
+}
+
+// WO-275@v1: enforce the release requirement during strict signature verification.
+// WO-275: return the bundle path and the system verifier's diagnostic on failure.
+// WO-284@v1: use the same strict verifier for install-root and gate startup.
+// WO-284: expose the verifier to the installer from the macOS gate module.
+pub(super) fn verify_gate_bundle_signature(bundle: &Path) -> Result<()> {
+    // WO-275: capture the result from the system verifier at its absolute path.
+    let output = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R", MACOS_GATE_REQUIREMENT, "--"])
+        .arg(bundle)
+        .output()
+        .with_context(|| format!("run /usr/bin/codesign for gate bundle {}", bundle.display()))?;
+    // WO-275: include the verifier status even when it provides no stderr.
+    anyhow::ensure!(
+        output.status.success(),
+        "codesign verification failed for gate bundle {} ({}): {}",
+        bundle.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
 /// Look for the gate bundle relative to the current executable. Returns the first
 /// candidate that exists; `None` if discovery comes up empty (caller errors).
 // WO-163@v2: probe ../libexec (Homebrew), then beside the binary, so a packaged install needs no setup.
+// WO-284@v1: discover exactly the entry point that launch can authenticate.
 fn discover_edge() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Canonicalize to resolve a Homebrew bin symlink to the real Cellar path.
     let exe = exe.canonicalize().unwrap_or(exe);
     let bin_dir = exe.parent()?;
+    // WO-284: keep the probe order while sharing the bundle-relative executable path.
     let candidates = [
-        bin_dir.join("..").join("libexec").join(ES_EDGE_REL),
-        bin_dir.join("..").join(ES_EDGE_REL),
-        bin_dir.join(ES_EDGE_REL),
+        bin_dir.join("..").join("libexec"),
+        bin_dir.join(".."),
+        bin_dir.to_path_buf(),
     ];
-    candidates.into_iter().find(|p| p.exists())
+    candidates
+        .into_iter()
+        .map(|dir| dir.join("bulwark_es_gate.app").join(ES_EDGE_REL))
+        .find(|p| p.exists())
 }
 
 // WO-23@v1: enforce protected inode decisions through the macOS ES edge.
@@ -1026,6 +1079,16 @@ mod supervise_tests {
 #[cfg(test)]
 mod pinned_edge_tests {
     use super::*;
+
+    // WO-284@v1: locate the app that contains the pinned edge.
+    // WO-284: cover nested apps and an override with no enclosing bundle.
+    #[test]
+    fn finds_the_enclosing_app_bundle() {
+        // WO-284: the innermost app is the one whose signature must be verified.
+        let bundle = Path::new("/opt/Outer.app/Contents/Helpers/bulwark_es_gate.app");
+        assert_eq!(find_app_bundle(&bundle.join(ES_EDGE_REL)).unwrap(), bundle);
+        assert!(find_app_bundle(Path::new("/opt/bulwark_es_gate")).is_err());
+    }
 
     // WO-270@v1: a symlink retargeted after the first resolution does not change
     // the pinned canonical path, and that path is the link's ORIGINAL target.

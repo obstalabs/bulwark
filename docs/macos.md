@@ -131,6 +131,11 @@ ownership and modes, then strictly verifies its signature against Apple signing
 team `NX2ATXN74T` and bundle identifier `dev.obstalabs.bulwark.es-gate`. If signature
 verification fails, it removes the installed bundle and reports the error.
 
+<!-- WO-284: document the startup signature check and the ownership waiver's scope. -->
+Before starting the gate, `bulwark run` and `bulwark launch` apply the same strict
+signature check to the app bundle containing the resolved gate executable.
+`--allow-user-writable-engine` waives only the ownership and writability checks.
+
 <!-- WO-140@v1: make hardware-seal evidence a release requirement, not an optional ritual. -->
 A macOS release is publishable only when both hardware-seal receipts identify the
 exact Bulwark binary, source commit, and signed gate used, and the shared upload
