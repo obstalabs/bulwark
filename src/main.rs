@@ -6297,6 +6297,65 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
         assert!(resolve_worker_creds(None, Some(1000)).is_err());
     }
 
+    // WO-281@v2: keep the worker environment parser limited to valid session assignments.
+    #[test]
+    fn parse_worker_env_rejects_unsupported_or_malformed_assignments() {
+        // WO-281@v2: reject an identity override, an unknown name, and a missing equals sign.
+        for assignment in ["HOME=/evil", "UNKNOWN=value", "XDG_RUNTIME_DIR"] {
+            assert!(
+                parse_worker_env(assignment).is_err(),
+                "accepted invalid worker environment assignment {assignment:?}"
+            );
+        }
+    }
+
+    // WO-281@v2: verify watch routes its parsed session assignment to the worker options.
+    #[test]
+    fn watch_accepts_worker_env() {
+        // WO-281@v2: parse a watched command with an explicit runtime directory.
+        let cli = Cli::try_parse_from([
+            "bulwark",
+            "watch",
+            "--worker-env",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "--",
+            "true",
+        ])
+        .unwrap();
+        // WO-281@v2: check the actual worker options on the Watch variant.
+        let Cmd::Watch { worker_env, .. } = cli.cmd else {
+            panic!("expected watch command");
+        };
+        assert_eq!(
+            worker_env.overrides,
+            [("XDG_RUNTIME_DIR".to_owned(), "/run/user/1000".to_owned())]
+        );
+    }
+
+    // WO-281@v2: verify named launches accept and preserve a session override.
+    #[test]
+    fn launch_accepts_worker_env() {
+        // WO-281@v2: use a bus address with an equals sign in the value.
+        let cli = Cli::try_parse_from([
+            "bulwark",
+            "launch",
+            "agent",
+            "--worker-env=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+        ])
+        .unwrap();
+        // WO-281@v2: check the actual worker options on the Launch variant.
+        let Cmd::Launch { worker_env, .. } = cli.cmd else {
+            panic!("expected launch command");
+        };
+        assert_eq!(
+            worker_env.overrides,
+            [(
+                "DBUS_SESSION_BUS_ADDRESS".to_owned(),
+                "unix:path=/run/user/1000/bus".to_owned()
+            )]
+        );
+    }
+
     // WO-224@v1: verify passwd and anonymous worker environments without a UID drop.
     // WO-224: exercise argv overrides and scrub inherited session values without NSS or root.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -6386,6 +6445,74 @@ sudo /usr/local/bin/bulwark run --hardened --allow '/var/log/**' -- 'claude'\n\
             )
         );
         assert!(prepare_worker(None, &worker_env, None).unwrap().is_none());
+    }
+
+    // WO-281@v2: check which HOME reaches the anonymous worker's prepared exec environment.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn anonymous_remote_worker_home_uses_absolute_prompt_parent_or_cwd() {
+        // WO-281@v2: isolate the fallback from tests that change the process working directory.
+        if std::env::var_os("BULWARK_TEST_REMOTE_HOME_CHILD").is_none() {
+            // WO-281@v2: re-exec only this test with a known working directory.
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::anonymous_remote_worker_home_uses_absolute_prompt_parent_or_cwd",
+                ])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .env("BULWARK_TEST_REMOTE_HOME_CHILD", "1")
+                .output()
+                .expect("spawn isolated worker HOME test");
+            // WO-281@v2: confirm the child ran the requested test and retain its diagnostics.
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed;"),
+                "isolated worker HOME test failed ({})\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+
+        // WO-281@v2: find a UID without a passwd entry in the remote dispatch range.
+        let uid = (60000..65000)
+            .find(|&uid| passwd_worker_identity(uid).unwrap().is_none())
+            .expect("unused UID in the anonymous worker range");
+        // WO-281@v2: use the existing working directory as the expected fallback.
+        let cwd = std::env::current_dir().unwrap();
+        // WO-281@v2: cover an absolute dispatch directory, a relative one, and an absent lane.
+        for (prompt_out, expected_home) in [
+            (
+                Some("/tmp/bulwark-remote-42/prompts"),
+                Path::new("/tmp/bulwark-remote-42"),
+            ),
+            (Some("bulwark-remote-42/prompts"), cwd.as_path()),
+            (None, cwd.as_path()),
+        ] {
+            // WO-281@v2: model how cmd_run selects an absolute parent for a remote prompt path.
+            let remote_run_dir = prompt_out
+                .map(Path::new)
+                .and_then(Path::parent)
+                .filter(|dir| dir.is_absolute());
+            // WO-281@v2: prepare the anonymous worker without spawning it or dropping credentials.
+            let worker = prepare_worker(
+                Some(gate::WorkerCreds { uid, gid: uid }),
+                &WorkerEnvArgs { overrides: vec![] },
+                remote_run_dir,
+            )
+            .unwrap()
+            .expect("prepared worker");
+            // WO-281@v2: read the exact HOME bytes prepared for exec.
+            let home = worker
+                ._entries
+                .iter()
+                .find_map(|entry| entry.as_bytes().strip_prefix(b"HOME="));
+            assert_eq!(
+                home,
+                Some(expected_home.as_os_str().as_encoded_bytes()),
+                "unexpected HOME for prompt lane {prompt_out:?}"
+            );
+        }
     }
 
     // WO-145@v2: the home-ownership predicate drives the refuse/pass call;

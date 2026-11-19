@@ -12,6 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the root integration tests because the image's `sudo` ignores `-E`.
   A unit test that assumed `/usr/bin/true` is a regular file now checks the resolved file
   (it is a symlink on that image).
+<!-- WO-281@v2: record regression coverage for worker identity and session inheritance. -->
+- Worker environment tests cover passwd identity and session scrubbing under Linux
+  Landlock, explicit session overrides and duplicate-key precedence under fanotify,
+  and CLI parsing and anonymous worker `HOME` selection.
 
 ### Fixed
 <!-- WO-224@v1: a dropped worker used to inherit root's home and login names. -->
