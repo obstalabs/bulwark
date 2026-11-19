@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and CLI parsing and anonymous worker `HOME` selection.
 
 ### Fixed
+<!-- WO-286@v1: the allow-list hardware check ran into the new receipts directory rule. -->
+- The macOS allow-list hardware check writes its receipts into a root-owned temporary
+  directory and copies them back afterwards. Its runs had been refused since root runs
+  stopped accepting a receipts directory a non-root user owns.
 <!-- WO-224@v1: a dropped worker used to inherit root's home and login names. -->
 <!-- WO-224: record the worker identity fix and explicit session opt-in. -->
 - Dropped workers on Linux and macOS get `HOME`, `USER`, and `LOGNAME` from their own

@@ -258,11 +258,20 @@ FOREIGN_INO=$(stat -f %i "$FOREIGN_FILE") || fail "cannot stat $FOREIGN_FILE"
 : > "$EVENT_RECEIPTS"
 
 # WO-41@v1: prove macOS default-deny allow-list behavior end to end.
-cleanup() { sudo pkill -f bulwark_es_gate 2>/dev/null; rm -rf "$WORK"; }
+cleanup() {
+  sudo pkill -f bulwark_es_gate 2>/dev/null; rm -rf "$WORK"
+  [ -n "${RCPT_DIR:-}" ] && sudo rm -rf "$RCPT_DIR"
+}
 trap cleanup EXIT
 
 echo "==> sudo needed (ES gate runs as root); authorize now:"
 sudo -v || fail "sudo auth failed"
+# WO-286@v1: a root run refuses receipts under a directory a non-root user owns (WO-268),
+# so the runs write into a root-owned directory and the evidence is copied back afterwards.
+RCPT_DIR="$(sudo mktemp -d /tmp/bulwark-allowlist-rcpt.XXXXXX)" || fail "cannot create a root-owned receipts directory"
+sudo chmod 755 "$RCPT_DIR" || fail "cannot set mode on $RCPT_DIR"
+EVENT_RCPT_LIVE="$RCPT_DIR/$EVENT_RECEIPTS"
+sudo /bin/sh -c ': > "$1"' _ "$EVENT_RCPT_LIVE" || fail "cannot create $EVENT_RCPT_LIVE"
 
 echo
 # WO-137@v1: TEST 4a joins the first supervised run (see the 4a note below).
@@ -272,7 +281,7 @@ SUP_ERR="$WORK/supervised.err"
 sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
-  --receipts "$PWD/$EVENT_RECEIPTS" \
+  --receipts "$EVENT_RCPT_LIVE" \
   -- /bin/bash -c "
     if out=\$(/bin/cat '$ALLOW_FILE' 2>&1); then echo \"ALLOW_FILE_OK:\$out\"; else echo \"ALLOW_FILE_DENIED:\$out\"; fi
     if /bin/cat '$DENY_FILE' >/dev/null 2>&1; then echo \"OUTSIDE_READABLE\"; else echo \"OUTSIDE_DENIED\"; fi
@@ -318,7 +327,7 @@ T4_ERR="$WORK/hardlink_in.err"
 sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
-  --receipts "$PWD/$EVENT_RECEIPTS" \
+  --receipts "$EVENT_RCPT_LIVE" \
   -- /bin/bash -c "
     echo RUN_STARTED
     for i in \$(seq 1 200); do [ -e '$FOREIGN_IN_GRANT' ] && break; /bin/sleep 0.1; done
@@ -336,7 +345,7 @@ if grep -q "^RUN_STARTED$" "$T4_OUT" 2>/dev/null; then
 fi
 wait "$T4_PID"
 T4_STATUS=$?
-T4_REASON=$(test4_verdict "$T4_OUT" "$T4_ERR" "$EVENT_RECEIPTS" "$FOREIGN_INO" "$LINKED_AFTER_LAUNCH")
+T4_REASON=$(test4_verdict "$T4_OUT" "$T4_ERR" "$EVENT_RCPT_LIVE" "$FOREIGN_INO" "$LINKED_AFTER_LAUNCH")
 [ "$T4_STATUS" = 0 ] && [ -z "$T4_REASON" ] && T4_FOREIGN_OK=1 || T4_FOREIGN_OK=0
 echo "   status=$T4_STATUS linked_after_launch=$LINKED_AFTER_LAUNCH foreign_hardlink_deny=$T4_FOREIGN_OK${T4_REASON:+ ($T4_REASON)}"
 while IFS= read -r line; do echo "     $line"; done < "$T4_OUT"
@@ -355,7 +364,8 @@ fi
 echo
 CLONE_C="$WORK/clone_probe.c"
 CLONE_BIN="$ALLOW_DIR/clone_probe"
-CLONE_RCPT="$PWD/allowlist-clone.jsonl"
+# WO-286: in the root-owned receipts directory, copied back after the runs.
+CLONE_RCPT="$RCPT_DIR/allowlist-clone.jsonl"
 CLONE_IN_GRANT_DST="$ALLOW_DIR/clone_in_grant.txt"
 CLONE_SIBLING_DST="$ALLOW_DIR/clone_sibling.txt"
 CLONE_DIR_DST="$ALLOW_DIR/clone_dir"
@@ -389,7 +399,7 @@ if [ "$CLONE_BUILD_OK" = 1 ]; then
   ALLOW_FILE_INO=$(stat -f %i "$ALLOW_FILE")
   DENY_FILE_INO=$(stat -f %i "$DENY_FILE")
   ALLOW_DIR_INO=$(stat -f %i "$ALLOW_DIR")
-  : > "$CLONE_RCPT"
+  sudo /bin/sh -c ': > "$1"' _ "$CLONE_RCPT"
   sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
     --deny-all --allow "$ALLOW_DIR/**" --receipts "$CLONE_RCPT" \
     -- "$ALLOW_DIR/clone_probe" "$ALLOW_FILE" "$CLONE_IN_GRANT_DST" "$DENY_FILE" "$CLONE_SIBLING_DST" "$ALLOW_DIR" "$CLONE_DIR_DST" \
@@ -427,7 +437,7 @@ LOAD_ERR="$WORK/load.err"
 sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
   --deny-all \
   --allow "$ALLOW_DIR/**" \
-  --receipts "$PWD/$EVENT_RECEIPTS" \
+  --receipts "$EVENT_RCPT_LIVE" \
   -- /bin/bash -c "
     n=0
     for i in \$(seq 1 1200); do /bin/cat '$ALLOW_FILE' >/dev/null 2>&1 && n=\$((n+1)); done
@@ -436,6 +446,9 @@ sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-
 LOAD_STATUS=$?
 cp "$LOAD_OUT" "$LOAD_OUT_KEEP"
 cp "$LOAD_ERR" "$LOAD_ERR_KEEP"
+# WO-286: keep the receipts the report names next to the other evidence.
+cp "$EVENT_RCPT_LIVE" "$EVENT_RECEIPTS"
+[ -f "$CLONE_RCPT" ] && cp "$CLONE_RCPT" allowlist-clone.jsonl
 LOAD_N=$(grep -oE 'opened [0-9]+' "$LOAD_OUT" | awk '{print $2}')
 [ "$LOAD_STATUS" = 0 ] && [ "${LOAD_N:-0}" -ge 1000 ] && LOAD_OK=1 || LOAD_OK=0
 echo "   status=$LOAD_STATUS opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL)"
