@@ -1047,36 +1047,239 @@ fn main() -> Result<()> {
 // ===== WO-258: root must never execute a binary a non-root uid can replace =====
 
 /// Why a single path component (the running executable, or one of its ancestor
-/// directories) can be modified by a non-root principal: a non-root owner, or a
-/// group/other write bit. `None` means root-owned and neither group- nor
-/// other-writable. The returned clause is the sentence fragment the warning (and
-/// only the warning) appends after the path.
-///
-/// WO-258 note: a macOS extended ACL can also grant write with no mode bit set.
-/// libc does not expose the ACL API, so this catches the load-bearing
-/// Homebrew/linuxbrew and world-writable shapes (`owner != 0`, group/other
-/// write); an extended-ACL write grant is a documented residual.
-fn writable_clause(meta: &std::fs::Metadata) -> Option<String> {
+/// directories) can be modified by a non-root principal. The returned clause
+/// is a sentence fragment to append after the offending path.
+// WO-276@v1: macOS extended ACLs can grant write independently of POSIX modes.
+// WO-276: check the component's ACL after ownership and mode checks pass.
+fn writable_clause(path: &Path, meta: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    if meta.uid() != 0 {
-        return Some(format!("is writable by uid {}", meta.uid()));
+
+    // WO-276@v1: an unsafe owner or mode is enough to reject the component.
+    // WO-276: pass the link type from lstat so link modes are ignored.
+    if let Some(clause) = writable_mode_clause(meta.uid(), meta.mode(), meta.is_symlink()) {
+        return Some(clause);
     }
-    let mode = meta.mode() & 0o7777;
-    if mode & 0o022 != 0 {
+    // WO-276: check Darwin ACLs through the link itself.
+    #[cfg(target_os = "macos")]
+    {
+        macos_acl::writable_clause(path)
+    }
+    // WO-276: POSIX ACL masks are already reflected in the mode bits.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+// WO-276@v1: a symlink's mode bits do not govern its replacement.
+// WO-276: isolate the owner and mode decision so it can be tested without chown.
+fn writable_mode_clause(uid: u32, mode: u32, is_symlink: bool) -> Option<String> {
+    // WO-276@v1: a link's owner can control the link even with a trusted parent.
+    // WO-276: require root to own every entry, including symlinks.
+    if uid != 0 {
+        return Some(format!("is writable by uid {uid}"));
+    }
+    // WO-276: report the permission bits without the file type bits.
+    let mode = mode & 0o7777;
+    // WO-276@v1: symlink replacement is controlled by the containing directory.
+    // WO-276: apply the group/other mode check to non-symlink entries.
+    if !is_symlink && mode & 0o022 != 0 {
         return Some(format!("has mode {mode:o} (group/other writable)"));
     }
     None
 }
 
+// WO-276: keep the Darwin ACL bindings and their return conventions on macOS.
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    use anyhow::{Context, Result};
+    use std::ffi::{c_char, c_int, c_uint, c_void, CString};
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    // WO-276: request the extended ACL type from Darwin's sys/acl.h.
+    const ACL_TYPE_EXTENDED: c_uint = 0x100;
+    // WO-276: only allow entries can grant write.
+    const ACL_EXTENDED_ALLOW: c_uint = 1;
+    // WO-276: start the Darwin entry walk at the first entry.
+    const ACL_FIRST_ENTRY: c_int = 0;
+    // WO-276: advance the walk using the ACL's internal cursor.
+    const ACL_NEXT_ENTRY: c_int = -1;
+    // WO-276: membership.h distinguishes a user ID from a group ID.
+    const ID_TYPE_UID: c_int = 0;
+    // WO-276: a grant to any group can reach a non-root member.
+    const ID_TYPE_GID: c_int = 1;
+    // WO-276: include every sys/acl.h right that can change the object or its security.
+    const ACL_WRITE_PERMISSIONS: u64 = (1 << 2) // write data / add file
+        | (1 << 4)  // delete
+        | (1 << 5)  // append data / add subdirectory
+        | (1 << 6)  // delete child
+        | (1 << 8)  // write attributes
+        | (1 << 10) // write extended attributes
+        | (1 << 12) // write security
+        | (1 << 13); // change owner
+
+    // WO-276: bind the Darwin ACL and membership APIs missing from libc.
+    extern "C" {
+        // WO-276: retrieve the named component's ACL without following a final symlink.
+        fn acl_get_link_np(path: *const c_char, acl_type: c_uint) -> *mut c_void;
+        // WO-276: validate the ACL before interpreting the iterator's end condition.
+        fn acl_valid(acl: *mut c_void) -> c_int;
+        // WO-276: borrow entries from the live ACL allocation.
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        // WO-276: distinguish grants from denials.
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_uint) -> c_int;
+        // WO-276: inspect the full permission set of a grant.
+        fn acl_get_permset_mask_np(entry: *mut c_void, mask: *mut u64) -> c_int;
+        // WO-276: obtain the UUID of the user or group named by a grant.
+        fn acl_get_qualifier(entry: *mut c_void) -> *mut c_void;
+        // WO-276: release both ACLs and qualifiers with their native allocator.
+        fn acl_free(object: *mut c_void) -> c_int;
+        // WO-276: distinguish a grant to uid 0 from one to gid 0 or another principal.
+        fn mbr_uuid_to_id(uuid: *const u8, id: *mut libc::id_t, id_type: *mut c_int) -> c_int;
+    }
+
+    // WO-276@v1: an unreadable ACL cannot establish that a path is safe.
+    // WO-276: identify the principal or the ACL API error in the refusal.
+    pub(super) fn writable_clause(path: &Path) -> Option<String> {
+        match read_write_grant(path) {
+            Ok(Some(principal)) => Some(format!("has an ACL entry allowing write to {principal}")),
+            Ok(None) => None,
+            Err(error) => Some(format!("has an ACL check error ({error:#})")),
+        }
+    }
+
+    // WO-276@v1: read each component's ACL without dereferencing symlinks.
+    // WO-276: release the ACL after the scan, including when the scan fails.
+    fn read_write_grant(path: &Path) -> Result<Option<String>> {
+        // WO-276: pass the filesystem's path bytes to Darwin losslessly.
+        let c_path = CString::new(path.as_os_str().as_bytes()).context("encode ACL path")?;
+        // WO-276: hold the returned ACL for the entire entry walk.
+        let acl = unsafe { acl_get_link_np(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+        // WO-276@v1: Darwin returns ENOENT for both an absent ACL and an absent path.
+        // WO-276: confirm the component still exists before accepting a missing ACL.
+        if acl.is_null() {
+            // WO-276: read errno before checking the path again.
+            let error = io::Error::last_os_error();
+            // WO-276: use lstat so a dangling link still counts as present.
+            if error.raw_os_error() == Some(libc::ENOENT) && path.symlink_metadata().is_ok() {
+                return Ok(None);
+            }
+            return Err(error).context("acl_get_link_np");
+        }
+
+        // WO-276: keep the scan result while releasing the non-null ACL handle.
+        let result = unsafe { scan_write_grants(acl) };
+        check_status(unsafe { acl_free(acl) }, "acl_free (ACL)")?;
+        result
+    }
+
+    // WO-276@v1: consider every allow entry that can modify a root path component.
+    // WO-276: the caller keeps the ACL handle alive throughout the scan.
+    unsafe fn scan_write_grants(acl: *mut c_void) -> Result<Option<String>> {
+        check_status(acl_valid(acl), "acl_valid")?;
+        // WO-276: Darwin writes a borrowed entry pointer on each successful call.
+        let mut entry = std::ptr::null_mut();
+        // WO-276: select the first entry before advancing the cursor.
+        let mut selector = ACL_FIRST_ENTRY;
+        loop {
+            // WO-276@v1: on a validated ACL, EINVAL for FIRST or NEXT marks the end.
+            // WO-276: report other iterator errors as unsafe.
+            if acl_get_entry(acl, selector, &mut entry) != 0 {
+                // WO-276: retain the iterator error for the refusal message.
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINVAL) {
+                    return Ok(None);
+                }
+                return Err(error).context("acl_get_entry");
+            }
+            selector = ACL_NEXT_ENTRY;
+
+            // WO-276: separate allow/deny tags from their permission masks.
+            let mut tag = 0;
+            check_status(acl_get_tag_type(entry, &mut tag), "acl_get_tag_type")?;
+            // WO-276@v1: a deny entry cannot grant any of the write rights.
+            if tag != ACL_EXTENDED_ALLOW {
+                continue;
+            }
+            // WO-276: only write-capable grants need a principal lookup.
+            let mut mask = 0;
+            check_status(
+                acl_get_permset_mask_np(entry, &mut mask),
+                "acl_get_permset_mask_np",
+            )?;
+            // WO-276@v1: read and search grants leave the component immutable.
+            // WO-276: continue past grants that contain none of the write rights.
+            if mask & ACL_WRITE_PERMISSIONS == 0 {
+                continue;
+            }
+
+            // WO-276: Darwin allocates a 16-byte UUID for an allow entry.
+            let qualifier = acl_get_qualifier(entry).cast::<[u8; 16]>();
+            // WO-276@v1: an unavailable qualifier prevents verifying the grant.
+            if qualifier.is_null() {
+                return Err(io::Error::last_os_error()).context("acl_get_qualifier");
+            }
+            // WO-276: copy the UUID so the qualifier can be freed before lookup.
+            let uuid = qualifier.read();
+            check_status(acl_free(qualifier.cast()), "acl_free (qualifier)")?;
+            // WO-276: require both uid type and value zero to exempt a root grant.
+            let (mut id, mut id_type) = (0, 0);
+            // WO-276: the membership API returns an error code directly.
+            let status = mbr_uuid_to_id(uuid.as_ptr(), &mut id, &mut id_type);
+            // WO-276@v1: the root exemption applies only to a resolved uid 0.
+            if status == 0 && id_type == ID_TYPE_UID && id == 0 {
+                continue;
+            }
+
+            // WO-276: keep the principal identifiable even on lookup failure.
+            let hex = format!("{:032x}", u128::from_be_bytes(uuid));
+            // WO-276@v1: a failed lookup cannot exclude a non-root principal.
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status))
+                    .with_context(|| format!("mbr_uuid_to_id for ACL principal {hex}"));
+            }
+            // WO-276: label the UUID with its principal type for the operator.
+            let kind = match id_type {
+                ID_TYPE_UID => "user",
+                ID_TYPE_GID => "group",
+                _ => "principal",
+            };
+            return Ok(Some(format!(
+                "{kind}:{}-{}-{}-{}-{}",
+                &hex[..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..],
+            )));
+        }
+    }
+
+    // WO-276@v1: fail closed when an ACL API reports an error.
+    // WO-276: retain the API name and its errno in the diagnostic.
+    fn check_status(status: c_int, operation: &'static str) -> Result<()> {
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error()).context(operation)
+        }
+    }
+}
+
 /// Walk the resolved executable and every ancestor directory up to `/`, returning
-/// the first writable component and the clause that names why it is unsafe, or
-/// `None` when the whole chain is root-owned and neither group- nor other-writable.
+/// the first writable component and the clause that names why it is unsafe.
 // WO-258@v1: find the first exe-or-ancestor component writable by a non-root uid.
+// WO-276@v1: macOS checks ACLs all the way up the resolved ancestor chain.
+// WO-276: supply the path of every component for the ACL query.
 fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
     let mut cur = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
     loop {
         if let Ok(meta) = std::fs::metadata(&cur) {
-            if let Some(clause) = writable_clause(&meta) {
+            // WO-276: query the ACL of this exact executable or directory.
+            if let Some(clause) = writable_clause(&cur, &meta) {
                 return Some((cur, clause));
             }
         }
@@ -1085,12 +1288,13 @@ fn first_user_writable_component(exe: &Path) -> Option<(PathBuf, String)> {
     }
 }
 
-/// Walk the raw (un-canonicalized) path component by component and return the first
-/// symlink whose containing directory is writable by a non-root uid: such a link can
-/// be retargeted at will, so the path it names is not root's to trust. The returned
-/// path is the RAW symlink, so the operator sees the component they configured.
+/// Walk the raw (un-canonicalized) path and return the first symlink that a non-root
+/// user controls directly or through its containing directory. The returned path
+/// is the RAW symlink, so the operator sees the component they configured.
 // WO-270@v1: name a user-retargetable symlink on the edge path, not just its target.
+// WO-276@v1: a root-owned directory can contain a non-root-owned symlink.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// WO-276: check the raw link itself as well as its containing directory.
 fn first_user_writable_symlink(raw: &Path) -> Option<(PathBuf, String)> {
     let mut prefix = PathBuf::new();
     for comp in raw.components() {
@@ -1112,6 +1316,11 @@ fn first_user_writable_symlink(raw: &Path) -> Option<(PathBuf, String)> {
                     holder.display()
                 ),
             ));
+        }
+        // WO-276@v1: a trusted parent alone cannot establish that the link is safe.
+        // WO-276: apply ownership and ACL checks to the link without dereferencing it.
+        if let Some(clause) = writable_clause(&prefix, &meta) {
+            return Some((prefix, clause));
         }
     }
     None
@@ -1183,9 +1392,11 @@ fn refusal_message(offender: &Path) -> String {
 }
 
 /// `bulwark install-root`: copy this engine (and on macOS the gate bundle) to a
-/// root-owned 0755 hierarchy, verify ownership and modes after the copy, and
-/// print the root invocation to use.
+/// root-owned 0755 hierarchy, check for non-root write access after the copy,
+/// and print the root invocation to use.
 // WO-258@v1: copy the engine (and the macOS gate) to a root-owned 0755 hierarchy.
+// WO-276@v1: a copied engine or ancestor can retain macOS ACL write grants.
+// WO-276: refuse an ACL-writable installation and report the offending path and grant.
 fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("install-root must run as root (sudo bulwark install-root)");
@@ -1208,7 +1419,8 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
         );
     }
     // WO-277@v1: a forced reinstall can repair the running engine in place.
-    // WO-277: copying an engine onto its own inode risks truncating it.
+    // WO-277: device and inode identify aliases of the running engine.
+    // WO-276: copying onto the running engine's inode can fail with ETXTBSY (text file busy).
     if !same_file(&exe, &engine) {
         std::fs::copy(&exe, &engine)
             .with_context(|| format!("copy engine to {}", engine.display()))?;
@@ -1224,10 +1436,18 @@ fn cmd_install_root(prefix: &Path, no_gate: bool, force: bool) -> Result<()> {
     // Verify the DESTINATION chain, not just the self-image: installing under a
     // user-writable ancestor (e.g. an Intel Homebrew-owned /usr/local) would be a
     // root-owned file under a user-owned directory, which the gate must refuse.
-    if let Some((offender, _clause)) = first_user_writable_component(&engine) {
+    // WO-276@v1: verify the written engine and its ancestors before installing the gate.
+    // WO-276: retain the macOS ACL diagnosis in the install refusal.
+    if let Some((offender, clause)) = first_user_writable_component(&engine) {
+        // WO-276: include the reason from the ACL-aware check on macOS.
+        let detail = if cfg!(target_os = "macos") {
+            format!(" ({clause})")
+        } else {
+            String::new()
+        };
         anyhow::bail!(
             "install would land under a user-writable hierarchy: {} is writable by a \
-             non-root uid; pick a root-owned --prefix",
+             non-root uid{detail}; pick a root-owned --prefix",
             offender.display()
         );
     }
@@ -1403,14 +1623,18 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Verify every entry under `root` (and `root` itself), without following
-/// symlinks, with the same rule the root-path refusal applies: root-owned and not
-/// group/other-writable. Fails naming the first offending path.
+/// symlinks, with the same owner, mode and ACL checks as the root-path refusal.
+/// Fails naming the first offending path.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 // WO-271@v1: install-root proves the WHOLE installed bundle, not just the engine.
+// WO-276@v1: a verifier must catch write grants even on files with clean modes.
+// WO-276: check each installed entry's own ACL and use link metadata for its ownership.
 fn verify_tree_root_owned(root: &Path) -> Result<()> {
     let meta =
         std::fs::symlink_metadata(root).with_context(|| format!("stat {}", root.display()))?;
-    if let Some(clause) = writable_clause(&meta) {
+    // WO-276@v1: verify every installed entry before accepting the bundle.
+    // WO-276: report the grant on an ACL-writable bundle entry.
+    if let Some(clause) = writable_clause(root, &meta) {
         anyhow::bail!(
             "installed gate bundle entry {} {clause}; install-root refuses to leave a \
              non-root-writable file in a root-owned install",
@@ -5308,11 +5532,78 @@ mod tests {
         assert!(err.contains("installed gate bundle entry"), "{err}");
         assert!(err.contains("x.app"), "{err}");
         // A fully root-owned system file verifies clean.
-        // WO-278@v1: resolve first; on ubuntu-26.04 /usr/bin/true is a symlink, and the
-        // check reads a symlink's own mode bits (always 0777 on Linux).
+        // WO-278@v1: on ubuntu-26.04 /usr/bin/true is a symlink.
+        // WO-276: resolve the path here to test verification of the actual system file.
         let system_file = std::fs::canonicalize("/usr/bin/true").unwrap();
         verify_tree_root_owned(&system_file).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    // WO-276@v1: exercise real Darwin ACLs without requiring a root-owned fixture.
+    // WO-276: verify clean files, root-only grants, and named non-root grants.
+    #[test]
+    fn macos_acl_names_a_non_root_write_grant() {
+        // WO-276: use the effective UID so chmod adds a real non-root grant.
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        // WO-276: isolate the ACL from existing files and ancestor permissions.
+        let dir = test_scratch_dir("wo276-acl");
+        // WO-276: exercise both kinds of ENOENT using the same path.
+        let file = dir.join("file");
+        assert!(macos_acl::writable_clause(&file)
+            .unwrap()
+            .contains("acl_get_link_np"));
+        std::fs::write(&file, b"test").unwrap();
+        assert!(macos_acl::writable_clause(&file).is_none());
+
+        // WO-276: a write grant limited to uid 0 is safe.
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "root allow write"])
+            .arg(&file)
+            .status()
+            .unwrap()
+            .success());
+        assert!(macos_acl::writable_clause(&file).is_none());
+
+        // WO-276: build the grant from the effective user's login name.
+        let mut grant = passwd_worker_identity(uid).unwrap().unwrap().name;
+        grant.push(" allow write");
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg(grant)
+            .arg(&file)
+            .status()
+            .unwrap()
+            .success());
+        // WO-276: the diagnostic identifies the user named by the write grant.
+        let clause = macos_acl::writable_clause(&file).expect("non-root ACL write grant");
+        assert!(
+            clause.starts_with("has an ACL entry allowing write to user:"),
+            "{clause}"
+        );
+
+        // WO-276: a grant on the target is not a grant on the symlink.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(macos_acl::writable_clause(&link).is_none());
+        assert_eq!(
+            writable_clause(&link, &link.symlink_metadata().unwrap()),
+            Some(format!("is writable by uid {uid}"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    // WO-276@v1: test a root-owned link's mode decision without creating one as root.
+    // WO-276: the same group/other bits still make a regular entry writable.
+    #[test]
+    fn root_owned_symlink_mode_does_not_grant_write() {
+        assert!(writable_mode_clause(0, 0o755, true).is_none());
+        assert!(writable_mode_clause(0, 0o777, true).is_none());
+        assert!(writable_mode_clause(0, 0o777, false).is_some());
     }
 
     #[cfg(target_os = "macos")]
