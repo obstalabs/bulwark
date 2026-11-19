@@ -68,6 +68,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bundle is signed by the release team with the expected bundle identifier. It removes
   the bundle and reports the signature verification error if the check fails, including
   on a forced reinstall.
+<!-- WO-284: record that macOS runs authenticate the gate before spawning it. -->
+- macOS: `bulwark run` and `bulwark launch` verify the Endpoint Security gate
+  bundle against the `install-root` signing requirement before starting the gate,
+  including when `--allow-user-writable-engine` is set.
 <!-- WO-273@v1: inherited open files could reach the agent without an open for the gate to decide. -->
 <!-- WO-273: record the descriptor cleanup in both supervised launch paths. -->
 - Linux and macOS supervised launches close inherited file descriptors above standard
