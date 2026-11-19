@@ -324,6 +324,60 @@ fn worker_uid_gets_its_passwd_environment() {
     );
 }
 
+// WO-281@v2: verify session overrides and duplicate-key precedence through a real worker exec.
+#[test]
+#[ignore = "requires Linux + root for fanotify + a 'nobody' account"]
+fn worker_uid_gets_explicit_session_environment() {
+    // WO-281@v2: check the two overrides both alone and after a conflicting runtime directory.
+    for earlier_args in [&[][..], &["--worker-env", "XDG_RUNTIME_DIR=/run/user/1"]] {
+        // WO-281@v2: isolate each launch's protected fixture and integrity state.
+        let dir = scratch("worker-env-overrides");
+        // WO-281@v2: use a known protected file to exercise the normal fanotify gate.
+        let protected = dir.join("protected");
+        fs::write(&protected, "protected\n").unwrap();
+
+        // WO-281@v2: print the dropped UID and both session values exactly as the worker sees them.
+        let out = Command::new(bin())
+            .args([
+                "run",
+                "--allow-user-writable-engine",
+                "--worker-uid",
+                "65534",
+                "--protect",
+            ])
+            .arg(&protected)
+            .arg("--state")
+            .arg(dir.join("state.toml"))
+            .args(earlier_args)
+            .args([
+                "--worker-env",
+                "XDG_RUNTIME_DIR=/run/user/65534",
+                "--worker-env",
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/65534/bus",
+                "--",
+                "/bin/sh",
+                "-c",
+                r#"id -u && printf '%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS""#,
+            ])
+            .env("XDG_RUNTIME_DIR", "/run/user/0")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+            .output()
+            .expect("spawn bulwark");
+        fs::remove_dir_all(dir).unwrap();
+
+        assert!(
+            out.status.success(),
+            "worker must run with earlier arguments {earlier_args:?}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            "65534\n/run/user/65534\nunix:path=/run/user/65534/bus\n",
+            "unexpected worker environment with earlier arguments {earlier_args:?}"
+        );
+    }
+}
+
 // WO-49@v1: a dropped worker cannot kill the root supervisor to force a fail-open.
 /// WO-49 headline: an unprivileged dropped agent CANNOT `SIGKILL` the root
 /// supervisor, so it cannot force the fanotify fail-open. The agent reads its own

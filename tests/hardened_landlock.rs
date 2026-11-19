@@ -485,6 +485,12 @@ fn run_hardened_as_root(
     c.env_remove("SUDO_UID").env_remove("SUDO_GID");
     if let Some((uid, gid)) = sudo {
         c.env("SUDO_UID", uid).env("SUDO_GID", gid);
+        // WO-281@v2: seed launcher values so replacement and scrubbing are observable.
+        c.env("HOME", "/root")
+            .env("USER", "root")
+            .env("LOGNAME", "root")
+            .env("XDG_RUNTIME_DIR", "/run/user/0")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus");
     }
     c.output().expect("spawn bulwark")
 }
@@ -544,15 +550,40 @@ fn hardened_drops_root_agent_to_sudo_uid() {
 }
 
 // WO-144@v1: an explicit --worker-uid is accepted with --hardened and wins over SUDO_UID.
+// WO-281@v2: check the environment at Landlock exec against the selected passwd account.
 #[test]
-#[ignore = "requires Linux + Landlock + root"]
+#[ignore = "requires Linux + Landlock + root + a 'nobody' account"]
 fn hardened_honours_explicit_worker_uid_over_sudo_uid() {
     let dir = fs::canonicalize(scratch("wuid")).unwrap();
+    // WO-281@v2: use the same UID for the independent passwd lookup and the drop.
+    const WORKER_UID: &str = "65534";
+    // WO-281@v2: get the VM's account values without relying on Bulwark's lookup.
+    let account = Command::new("getent")
+        .args(["passwd", WORKER_UID])
+        .output()
+        .expect("getent passwd");
+    assert!(
+        account.status.success(),
+        "uid {WORKER_UID} must have a passwd entry"
+    );
+    // WO-281@v2: use the login name and home recorded by the host.
+    let fields: Vec<_> = std::str::from_utf8(&account.stdout)
+        .unwrap()
+        .trim_end()
+        .splitn(7, ':')
+        .collect();
+    // WO-281@v2: report the identity and whether each session variable is set after exec.
     let out = run_hardened_as_root(
         &format!("{}/**", dir.display()),
         Some(("65533", "65533")),
-        &["--worker-uid", "65534", "--worker-gid", "65534"],
-        &["id", "-u"],
+        &["--worker-uid", WORKER_UID, "--worker-gid", "65534"],
+        &[
+            "/bin/sh",
+            "-c",
+            r#"id -u && printf '%s\n' "HOME=$HOME" "USER=$USER" "LOGNAME=$LOGNAME" \
+                "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR+set}" \
+                "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS+set}""#,
+        ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -561,10 +592,14 @@ fn hardened_honours_explicit_worker_uid_over_sudo_uid() {
         "--worker-uid must be accepted with --hardened; status {} stderr: {stderr}",
         out.status
     );
+    // WO-281@v2: require the explicit UID's identity and reject even empty session variables.
     assert_eq!(
-        stdout.trim(),
-        "65534",
-        "an explicit --worker-uid must win over SUDO_UID; stdout: {stdout:?} stderr: {stderr}"
+        stdout,
+        format!(
+            "{WORKER_UID}\nHOME={}\nUSER={}\nLOGNAME={}\nXDG_RUNTIME_DIR=\nDBUS_SESSION_BUS_ADDRESS=\n",
+            fields[5], fields[0], fields[0]
+        ),
+        "unexpected environment for the explicit worker UID\nstderr: {stderr}"
     );
 }
 
