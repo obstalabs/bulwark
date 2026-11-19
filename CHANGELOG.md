@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-19
+
 ### Changed
 <!-- WO-278: record the runner bump alongside the privileged test fix. -->
 - Linux CI moves to `ubuntu-26.04` and passes the Rust toolchain environment explicitly
