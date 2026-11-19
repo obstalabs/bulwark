@@ -779,3 +779,167 @@ fn launch_warns_once_for_a_user_writable_engine() {
         "{stderr}"
     );
 }
+
+// WO-283@v1: a descriptor the launcher leaves open must not survive into the agent (WO-273).
+#[test]
+#[ignore = "requires Linux + root for fanotify"]
+fn launcher_held_descriptor_is_closed_before_the_agent_runs() {
+    use std::os::fd::AsRawFd;
+
+    let dir = scratch("wo283-held");
+    let decoy = dir.join("decoy.env");
+    fs::write(&decoy, "DECOYVALUE=heldleak\n").unwrap();
+
+    // WO-283: opened by the test itself so bulwark inherits it, then made inheritable.
+    let held = fs::File::open(&decoy).unwrap();
+    let n = held.as_raw_fd();
+    assert!(n > 2, "descriptor must be above stdio, got {n}");
+    unsafe {
+        let flags = libc::fcntl(n, libc::F_GETFD);
+        assert!(flags >= 0, "F_GETFD failed");
+        assert_eq!(
+            libc::fcntl(n, libc::F_SETFD, flags & !libc::FD_CLOEXEC),
+            0,
+            "clearing close-on-exec failed"
+        );
+    }
+
+    // WO-283: bash, not sh, because dash cannot address a multi-digit descriptor.
+    let inner = format!(
+        "cat <&{n} 2>/dev/null; echo \"fd=$?\"; cat {} 2>&1; echo \"direct=$?\"",
+        decoy.display()
+    );
+    let out = Command::new(bin())
+        .args(["run", "--allow-user-writable-engine", "--allow-root"])
+        .arg("--state")
+        .arg(isolated_state("wo283-held"))
+        .arg("--protect")
+        .arg(&decoy)
+        .arg("--")
+        .args(["bash", "-c", &inner])
+        .output()
+        .expect("spawn bulwark");
+    drop(held);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_dir_all(&dir);
+
+    // WO-283: neither the inherited descriptor nor the direct path may yield content.
+    assert!(
+        !stdout.contains("DECOYVALUE"),
+        "decoy content reached the agent: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("fd=") && !stdout.contains("fd=0"),
+        "the inherited descriptor {n} must be unreadable in the agent: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("direct=") && !stdout.contains("direct=0"),
+        "the direct read must be denied: {stdout:?}"
+    );
+}
+
+// WO-283@v1: documents the known residual: a descriptor passed after launch by a process
+// outside the supervised tree (SCM_RIGHTS) is readable by the agent. Not a defect to fix here.
+#[test]
+#[ignore = "requires Linux + root for fanotify + python3 (skips itself without it)"]
+fn documented_residual_scm_rights_descriptor_from_outside_is_readable() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+
+    // WO-283: the receiver is python3; without it the residual cannot be built without new deps.
+    let has_python = Command::new("python3")
+        .args(["-c", "import socket; socket.recv_fds"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !has_python {
+        eprintln!("skipping: python3 with socket.recv_fds is unavailable");
+        return;
+    }
+
+    let dir = scratch("wo283-scm");
+    let decoy = dir.join("decoy.env");
+    let sock = dir.join("rx.sock");
+    fs::write(&decoy, "DECOYVALUE=scmresidual\n").unwrap();
+    // WO-283: close-on-exec (the Rust default) keeps this out of the launch-time inheritance.
+    let outside = fs::File::open(&decoy).unwrap();
+
+    let script = "import socket,os,sys\n\
+s=socket.socket(socket.AF_UNIX)\n\
+s.bind(sys.argv[1])\n\
+s.listen(1)\n\
+c,_=s.accept()\n\
+m,fds,fl,a=socket.recv_fds(c,16,4)\n\
+sys.stdout.write('RECV='+os.read(fds[0],4096).decode())\n\
+sys.stdout.flush()\n";
+    let mut child = Command::new(bin())
+        .args(["run", "--allow-user-writable-engine", "--allow-root"])
+        .arg("--state")
+        .arg(isolated_state("wo283-scm"))
+        .arg("--protect")
+        .arg(&decoy)
+        .arg("--")
+        .args(["python3", "-c", script])
+        .arg(&sock)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bulwark");
+
+    // WO-283: wait for the agent's listener; kill the run rather than hang if it never appears.
+    let mut waited = 0;
+    while !sock.exists() {
+        if waited >= 100 {
+            let _ = child.kill();
+            panic!("agent never created its receiving socket");
+        }
+        thread::sleep(Duration::from_millis(100));
+        waited += 1;
+    }
+    let conn = UnixStream::connect(&sock).expect("connect to agent socket");
+    unsafe {
+        let payload = [b'x'];
+        let mut iov = libc::iovec {
+            iov_base: payload.as_ptr() as *mut libc::c_void,
+            iov_len: 1,
+        };
+        let fd_size = std::mem::size_of::<libc::c_int>() as u32;
+        let space = libc::CMSG_SPACE(fd_size) as usize;
+        // u64 backing keeps the control buffer aligned for cmsghdr.
+        let mut control = vec![0u64; space.div_ceil(8)];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(fd_size) as _;
+        std::ptr::write_unaligned(
+            libc::CMSG_DATA(cmsg) as *mut libc::c_int,
+            outside.as_raw_fd(),
+        );
+        assert!(
+            libc::sendmsg(conn.as_raw_fd(), &msg, 0) >= 0,
+            "sendmsg failed"
+        );
+    }
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    let _ = child.wait();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        stdout.contains("RECV=DECOYVALUE=scmresidual"),
+        "known residual: an fd passed from outside the tree should be readable; got {stdout:?}"
+    );
+}

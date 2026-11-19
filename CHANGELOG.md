@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Worker environment tests cover passwd identity and session scrubbing under Linux
   Landlock, explicit session overrides and duplicate-key precedence under fanotify,
   and CLI parsing and anonymous worker `HOME` selection.
+<!-- WO-283@v1: pin the inherited-descriptor closure and its documented residual. -->
+- Linux root tests pin that a descriptor the launcher leaves open is closed before the
+  agent runs, and document that a descriptor passed later over a Unix socket from outside
+  the supervised tree remains readable.
 
 ### Fixed
 <!-- WO-286@v1: the allow-list hardware check ran into the new receipts directory rule. -->
