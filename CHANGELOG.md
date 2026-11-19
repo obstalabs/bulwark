@@ -51,6 +51,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linux and macOS supervised launches close inherited file descriptors above standard
   input, output and error before the agent runs. A protected file already open in the
   launcher could previously be read without an `open()` for the gate to decide.
+<!-- WO-268@v1: a writable directory allowed an agent to replace the receipts path mid-run. -->
+<!-- WO-268: document the directory requirement for privileged receipts. -->
+- When run as root, `bulwark run` and `bulwark launch` check the receipts path before
+  starting the agent. The receipts directory must be root-owned and writable only
+  by root. Ancestors must be root-owned and can be writable by group or others
+  only if they have the sticky bit and the next path component is root-owned.
 
 ## [0.11.1] - 2026-11-18
 

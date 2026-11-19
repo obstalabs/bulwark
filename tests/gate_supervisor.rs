@@ -34,6 +34,47 @@ fn isolated_state(tag: &str) -> PathBuf {
     dir.join("state.toml")
 }
 
+// WO-268@v1: the writable tmpfs root cannot directly hold run receipts.
+// WO-268: give each receipts test its own directory in a trusted hierarchy.
+struct TestReceiptsDir {
+    // WO-268: own the directory so its contents can be removed when the test ends.
+    path: PathBuf,
+}
+
+// WO-268@v1: create a fresh receipts directory without changing the test mount.
+// WO-268: keep the protected and allowed read fixtures on their isolated tmpfs.
+impl TestReceiptsDir {
+    // WO-268@v1: a private root-owned directory satisfies the receipts check.
+    // WO-268: use a unique name and fail if the directory already exists.
+    fn new() -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+
+        // WO-268: exercise the sticky-ancestor exception with a private child of /var/tmp.
+        let path = Path::new("/var/tmp").join(format!(
+            "bulwark-test-receipts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("create root-owned receipts directory");
+        Self { path }
+    }
+}
+
+// WO-268@v1: receipt fixtures need cleanup outside the tmpfs guard.
+// WO-268: remove the directory on success and when an assertion unwinds.
+impl Drop for TestReceiptsDir {
+    // WO-268: clean up only the private directory this fixture created.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Time a single open of `path` from OUTSIDE the supervised tree (a fresh `sh`
 /// process), bounded so a blocked open cannot hang the test thread — the
 /// stalled gate is recovered by the harness, releasing the open. Returns the
@@ -485,7 +526,11 @@ fn a_stalled_stderr_never_costs_the_receipts_file_a_line() {
     let fs = common::TestFs::new("wo154c");
     let protected = fs.path("secret");
     let allowed = fs.path("allowed.txt");
-    let receipts = fs.path("r.jsonl");
+    // WO-268@v1: keep the backpressure test's file sink available to the gate.
+    // WO-268: place receipts outside the writable tmpfs ancestry.
+    let evidence = TestReceiptsDir::new();
+    // WO-268: read back the file written inside the trusted fixture.
+    let receipts = evidence.path.join("r.jsonl");
     fs::write(&protected, "secret\n").unwrap();
     fs::write(&allowed, "ok\n").unwrap();
 
@@ -1255,7 +1300,11 @@ fn bounded_consent_queue_denies_beyond_the_cap_without_fd_growth() {
     let fs = common::TestFs::new("wo154q");
     let protected = fs.path("secret");
     let done = fs.path("done");
-    let receipts = fs.path("r.jsonl");
+    // WO-268@v1: preserve the receipt counts used to check the consent queue.
+    // WO-268: give the queue test a receipts path that passes startup validation.
+    let evidence = TestReceiptsDir::new();
+    // WO-268: collect the queue's receipts under the trusted directory.
+    let receipts = evidence.path.join("r.jsonl");
     fs::write(&protected, "secret\n").unwrap();
 
     // 600 concurrent opens of the protected inode, each deferred to a consent
@@ -1345,7 +1394,11 @@ fn graceful_shutdown_denies_all_deferred_consents() {
     let d2 = fs.path("d2");
     let d3 = fs.path("d3");
     let done = fs.path("ddone");
-    let receipts = fs.path("r.jsonl");
+    // WO-268@v1: the gate must be able to record the deferred denies during teardown.
+    // WO-268: move the file sink outside the writable fixture hierarchy.
+    let evidence = TestReceiptsDir::new();
+    // WO-268: retain the shutdown receipts in the trusted directory.
+    let receipts = evidence.path.join("r.jsonl");
     fs::write(&protected, "SECRET-BODY-MARKER-zz9\n").unwrap();
 
     // Each background reader marks its own completion after its (denied) read;
@@ -2446,8 +2499,9 @@ fn a_sigterm_cooperative_child_exits_before_the_reap_escalation() {
 }
 
 /// WO-156@v2: a receipts file that already exists and is owned by ANOTHER uid
-/// (planted in a sticky world-writable dir) is refused at startup — root must not
-/// append its audit trail to a file the attacker chose — and left unchanged.
+/// is refused at startup and left unchanged.
+// WO-268@v1: reach the file owner check by placing the file in a trusted directory.
+// WO-268: keep the test focused on the file's uid after adding directory validation.
 #[test]
 #[ignore = "requires Linux + root"]
 fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
@@ -2455,24 +2509,15 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
     let state = isolated_state("a_foreign_owned_receipts_file_is_refused_and_unchanged");
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
     let fs = common::TestFs::new("wo156uid");
     let protected = fs.path("secret");
     fs::write(&protected, "secret\n").unwrap();
 
-    // A sticky world-writable dir (like /tmp) holds a receipts file owned by
-    // nobody (65534) — root can open it but must refuse to adopt it.
-    let dir = std::env::temp_dir().join(format!(
-        "bulwark-uid-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
-    let receipts = dir.join("r.jsonl");
+    // WO-268@v1: the directory must pass before the gate examines the foreign-owned file.
+    // WO-268: isolate file ownership from the parent directory's permissions.
+    let evidence = TestReceiptsDir::new();
+    // WO-268: put the file owned by nobody under the root-owned parent.
+    let receipts = evidence.path.join("r.jsonl");
     std::fs::write(&receipts, "PLANTED\n").unwrap();
     let c = CString::new(receipts.as_os_str().as_bytes()).unwrap();
     let rc = unsafe { libc::chown(c.as_ptr(), 65534, 65534) };
@@ -2504,12 +2549,10 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
         "the gate must refuse a foreign-owned receipts file"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // On Linux the kernel's `fs.protected_regular` often refuses this open itself
-    // (EACCES, "cannot open receipts file … Permission denied") before the
-    // explicit ownership check runs; on macOS (no protected_regular) the check
-    // fires with "… not the effective uid …". Either refusal names the path.
+    // WO-268@v1: the private directory lets the receipts opener reach its uid check.
+    // WO-268: require the file ownership diagnostic specifically.
     assert!(
-        stderr.contains("effective uid") || stderr.contains("cannot open receipts file"),
+        stderr.contains("effective uid") && stderr.contains(receipts.to_string_lossy().as_ref()),
         "the refusal must name the ownership mismatch; stderr: {stderr}"
     );
     assert_eq!(
@@ -2517,7 +2560,6 @@ fn a_foreign_owned_receipts_file_is_refused_and_unchanged() {
         "PLANTED\n",
         "the foreign-owned file must be unchanged"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// WO-155@v1: on a successful cgroup.kill the watcher must NOT exit until it
@@ -2814,7 +2856,11 @@ fn a_blocked_receipts_sink_never_holds_the_gate_exit() {
     let fs = common::TestFs::new("wo155bk");
     let protected = fs.path("secret");
     let allowed = fs.path("allowed.txt");
-    let receipts = fs.path("r.jsonl");
+    // WO-268@v1: exercise the blocked writer after the gate passes receipt path validation.
+    // WO-268: keep the injected writer's file outside the writable tmpfs ancestry.
+    let evidence = TestReceiptsDir::new();
+    // WO-268: use a file in the trusted directory to initialize the writer.
+    let receipts = evidence.path.join("r.jsonl");
     let state = fs.path("state.toml");
     fs::write(&protected, "secret\n").unwrap();
     fs::write(&allowed, "ok\n").unwrap();

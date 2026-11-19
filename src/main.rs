@@ -3592,7 +3592,9 @@ fn reject_widening_hardened_grants(grants: &[String]) -> Result<()> {
 // WO-117@v1: enforce and measure the same file-backed policy snapshot.
 // WO-224@v1: prepare the environment once for whichever worker identity will exec.
 // WO-224: keep passwd lookup before any gate or Landlock restriction is installed.
-fn cmd_run(mut args: RunArgs) -> Result<i32> {
+// WO-268@v1: privileged runs open receipts using the path validated at startup.
+// WO-268: bind the checked receipts path to the run arguments before dispatch.
+fn cmd_run(args: RunArgs) -> Result<i32> {
     // WO-258@v1: root must never start the gate from a location a non-root uid
     // can modify — a trojaned binary owns the next root launch. Refuse before any
     // config is read or any gate process starts. The waiver warns once, marks the
@@ -3603,6 +3605,20 @@ fn cmd_run(mut args: RunArgs) -> Result<i32> {
         .engine_check
         .resolve(refuse_root_from_user_writable_path)?;
     receipt::set_engine_unverified(waived);
+
+    // WO-268@v1: a directory writer can replace the name of an open receipts file.
+    // WO-268: check the file sink before run or launch can start a worker.
+    let checked_receipts = if !args.watch && unsafe { libc::geteuid() } == 0 {
+        args.receipts.map(check_run_receipts_path).transpose()?
+    } else {
+        None
+    };
+    // WO-268: use the validated path so the opener need not follow the original aliases.
+    let mut args = RunArgs {
+        // WO-268: retain the supplied path for watch and non-root runs.
+        receipts: checked_receipts.as_deref().or(args.receipts),
+        ..args
+    };
 
     // Hardened mode: enforce the allowlist as a kernel Landlock floor, then
     // exec the agent. Crash-safe — no supervisor, the restriction is in the
@@ -4021,18 +4037,131 @@ const WATCH_RECEIPTS_DIR: &str = "/var/lib/bulwark/watch";
 // the report would then have no evidence to read.
 /// Require `dir` to be a real (non-symlink) root-owned directory that group and
 /// others cannot write.
+// WO-268: share the final-directory check with the existing watch validation.
 #[cfg(target_os = "linux")]
 fn check_watch_receipts_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let meta = std::fs::symlink_metadata(dir)
         .with_context(|| format!("cannot stat {}; nothing was run", dir.display()))?;
-    if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+    // WO-268@v1: share watch's directory rule with enforced runs.
+    // WO-268: keep the sticky-ancestor exception disabled for watch.
+    check_receipts_dir(dir, &meta, false)
+}
+
+// WO-268@v1: apply the WO-240 rule to each directory a privileged run traverses.
+// WO-268: require directory metadata as well as a trusted owner and mode.
+fn check_receipts_dir(dir: &Path, meta: &std::fs::Metadata, is_ancestor: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // WO-268@v1: reject non-directories and modes that allow an unsafe component.
+    // WO-268: keep the existing diagnostic for directories that fail the mode check.
+    if !meta.is_dir() || !receipts_dir_is_trusted(meta.uid(), meta.mode(), is_ancestor) {
         anyhow::bail!(
             "{} must be a root-owned directory not writable by group or others; nothing was run",
             dir.display()
         );
     }
     Ok(())
+}
+
+// WO-268@v1: a root-owned sticky ancestor protects the next root-owned entry from replacement.
+// WO-268: allow S_ISVTX only for ancestors whose next entry is checked by the walk.
+fn receipts_dir_is_trusted(uid: u32, mode: u32, is_ancestor: bool) -> bool {
+    uid == 0 && (mode & 0o022 == 0 || (is_ancestor && mode & 0o1000 != 0))
+}
+
+// WO-268@v1: a writable ancestor can move the whole receipts directory.
+// WO-268: resolve the receipt parent before the gate opens the file.
+fn check_run_receipts_path(path: &Path) -> Result<PathBuf> {
+    // WO-268: attach the configured path and placement advice to resolution failures.
+    let checked = || -> Result<PathBuf> {
+        // WO-268: leave the final filename for the receipts opener's file checks.
+        let filename = path.file_name().context("receipts path must name a file")?;
+        // WO-268: a bare filename uses the working directory.
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        // WO-268: begin the walk at the filesystem root even for relative paths.
+        let cwd = (!parent.is_absolute())
+            .then(std::env::current_dir)
+            .transpose()
+            .context("cannot resolve the current directory for receipts")?;
+        // WO-268: include the cwd's own ancestors in relative path validation.
+        let absolute = cwd
+            .as_ref()
+            .map_or_else(|| parent.to_path_buf(), |cwd| cwd.join(parent));
+        // WO-268: bound link resolution even when the configured path contains a cycle.
+        let mut links_left = 40;
+        // WO-268: require a final directory with no group or other write bits.
+        let checked_dir = check_receipts_ancestors(&absolute, &mut links_left, false)?;
+        // WO-268@v1: a cwd rename during validation must not select a different directory.
+        // WO-268: verify the checked absolute prefix still represents the real cwd.
+        if cwd
+            .as_deref()
+            .is_some_and(|cwd| !same_file(Path::new("."), cwd))
+        {
+            anyhow::bail!("the current directory changed while checking the receipts path");
+        }
+        Ok(checked_dir.join(filename))
+    };
+    checked().with_context(|| {
+        format!(
+            "refusing --receipts {} before starting the agent. Put receipts under a root-owned \
+             directory with root-owned ancestors and no group or other write access",
+            path.display()
+        )
+    })
+}
+
+// WO-268@v1: trusted system links such as macOS /var still need their targets checked.
+// WO-268: walk from the root so a writable component cannot hide behind a link or `..`.
+fn check_receipts_ancestors(
+    dir: &Path,
+    links_left: &mut u32,
+    followed_by_component: bool,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    // WO-268: extend only the prefix whose directories have already passed the check.
+    let mut checked = PathBuf::new();
+    // WO-268@v1: distinguish the final receipt directory from its ancestors.
+    // WO-268: look ahead without skipping any component the path traverses.
+    let mut components = dir.components().peekable();
+    // WO-268: check each entry in order so the sticky exception includes its next entry.
+    while let Some(component) = components.next() {
+        checked.push(component);
+        // WO-268: inspect the component itself before following a symlink.
+        let meta = checked
+            .symlink_metadata()
+            .with_context(|| format!("cannot stat receipts directory {}", checked.display()))?;
+        // WO-268: a link target can also be followed by components in the original path.
+        let is_ancestor = followed_by_component || components.peek().is_some();
+        // WO-268@v1: a sticky directory is safe only if the next entry is also trusted.
+        // WO-268: apply the mode exception before checking the next entry's ownership.
+        if !meta.is_symlink() {
+            check_receipts_dir(&checked, &meta, is_ancestor)?;
+            continue;
+        }
+        // WO-268@v1: a root-owned link is protected even inside a root-owned sticky directory.
+        // WO-268: require a trusted link entry before recursing into its target.
+        if meta.uid() != 0 || *links_left == 0 {
+            anyhow::bail!(
+                "cannot follow receipts directory symlink {}",
+                checked.display()
+            );
+        }
+        // WO-268: spend one entry from the shared link-resolution budget.
+        *links_left -= 1;
+        // WO-268: validate every directory reached via the link, including intermediate links.
+        let target = checked.read_link().with_context(|| {
+            format!(
+                "cannot read receipts directory symlink {}",
+                checked.display()
+            )
+        })?;
+        // WO-268: resolve relative link targets from their containing directory.
+        checked.pop();
+        checked.push(target);
+        // WO-268: keep the final-directory rule when a path ends at a link target.
+        checked = check_receipts_ancestors(&checked, links_left, is_ancestor)?;
+    }
+    Ok(checked)
 }
 
 // WO-240@v1: the default receipts directory passes the same check as a supplied one.
@@ -5012,6 +5141,69 @@ mod tests {
                 waived
             );
         }
+    }
+
+    // WO-268@v1: exercise sticky and non-sticky directory modes without root.
+    // WO-268: model each parent and child as a pair of uid and mode values.
+    #[test]
+    fn run_receipts_directory_modes_require_trusted_entries() {
+        // WO-268: cover protected sticky paths, unsafe ancestors and an unsafe final directory.
+        let cases = [
+            ([(0, 0o1777), (0, 0o700)], true),
+            ([(0, 0o1777), (1000, 0o700)], false),
+            ([(0, 0o1777), (0, 0o1777)], false),
+            ([(0, 0o0775), (0, 0o700)], false),
+            ([(1000, 0o1777), (0, 0o700)], false),
+            ([(0, 0o1770), (0, 0o700)], true),
+        ];
+        // WO-268: apply the ownership check to both entries in each pair.
+        for ([(parent_uid, parent_mode), (uid, mode)], accepted) in cases {
+            assert_eq!(
+                receipts_dir_is_trusted(parent_uid, parent_mode, true)
+                    && receipts_dir_is_trusted(uid, mode, false),
+                accepted,
+                "parent ({parent_uid}, {parent_mode:o}), child ({uid}, {mode:o})",
+            );
+        }
+    }
+
+    // WO-268@v1: exercise the directory decision without a privileged gate.
+    // WO-268: cover both a trusted directory and a path through a writable one.
+    #[test]
+    fn run_receipts_check_the_directory_chain() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // WO-268: a file in a trusted system directory can be opened after validation.
+        assert_eq!(
+            check_run_receipts_path(Path::new("/usr/bin/wo268-receipts.jsonl")).unwrap(),
+            Path::new("/usr/bin/wo268-receipts.jsonl")
+        );
+
+        // WO-268: keep the fixture writable by non-root users even if the test is run as root.
+        let dir = test_scratch_dir("wo268");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        // WO-268: use a file that has yet to be created, like a fresh run's receipts.
+        let receipts = dir.join("r.jsonl");
+        // WO-268: the error names the configured path and tells the operator where to put it.
+        let error = format!("{:#}", check_run_receipts_path(&receipts).unwrap_err());
+        // WO-268: retain the requested receipts path in the refusal.
+        assert!(
+            error.contains(receipts.to_string_lossy().as_ref()),
+            "{error}"
+        );
+        assert!(
+            error.contains("Put receipts under a root-owned directory"),
+            "{error}"
+        );
+
+        // WO-268: returning to the root through `..` still traverses the writable fixture.
+        let absolute = dir.canonicalize().unwrap();
+        // WO-268: the resolved parent is trusted, but a directory on the way to it is writable.
+        let through_writable = absolute
+            .join("../".repeat(absolute.components().count() - 1))
+            .join("r.jsonl");
+        assert!(check_run_receipts_path(&through_writable).is_err());
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     // WO-277@v1: exercise the in-place reinstall decision without running as root.
