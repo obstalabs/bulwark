@@ -680,12 +680,18 @@ fn launch_warns_once_for_a_user_writable_engine() {
 
     // WO-269: use an explicit path that stays absent for the unwaived launch.
     let policy = dir.join("Bulwark.toml");
+    // WO-268@v1: exercise launch's engine check with a trusted receipts directory.
+    // WO-268: put the launch audit file at an absolute path inside the private scratch directory.
+    let receipts = dir.canonicalize().unwrap().join("bulwark-audit.jsonl");
     // WO-269: share the same engine and policy path for both launch attempts.
     let launch = |waiver: Option<&str>| {
         Command::new(&engine)
             .current_dir(&dir)
             .args(["launch", "agent", "--policy"])
             .arg(&policy)
+            // WO-268: supply the file sink explicitly for both launch attempts.
+            .arg("--receipts")
+            .arg(&receipts)
             .arg("--state")
             .arg(dir.join("state.toml"))
             .args(waiver)
