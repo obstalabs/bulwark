@@ -40,6 +40,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is used, and SSH relays the warning. `bulwark ssh` writes no receipts.
 
 ### Security
+<!-- WO-276: record the ACL and symlink checks at the root execution boundary. -->
+- macOS: `bulwark install-root` and the root-path refusal now reject components
+  with ACL write grants to non-root principals and name the offending path.
+  Symlink checks use ownership, ACLs, and the containing directory's writability.
 <!-- WO-275@v1: an unsigned gate could be installed into a root-owned location. -->
 <!-- WO-275: record signature rejection and cleanup during fresh and forced installs. -->
 - macOS: `bulwark install-root` now verifies that the installed Endpoint Security gate

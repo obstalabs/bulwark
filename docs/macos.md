@@ -118,6 +118,12 @@ export BULWARK_MACOS_ES_GATE="$PWD/bulwark_es_gate.app/Contents/MacOS/bulwark_es
 The edge bundle must carry `com.apple.developer.endpoint-security.client`, be
 signed, notarized, stapled, and launched from a terminal with Full Disk Access.
 
+<!-- WO-276: explain which destination permissions the checks cover and where trust begins. -->
+`bulwark install-root` and the root-path refusal check for root ownership, group
+or other write mode bits on files and directories, and macOS ACL write grants to
+non-root principals. Symlink checks include the containing directory. The
+Homebrew source is the trust root for the installed engine.
+
 <!-- WO-275@v1: document the signature required for a root install. -->
 <!-- WO-275: explain which identity is checked and what happens on rejection. -->
 When installing a gate bundle, `bulwark install-root` checks the installed copy's
