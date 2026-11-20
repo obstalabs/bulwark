@@ -272,6 +272,8 @@ RCPT_DIR="$(sudo mktemp -d /tmp/bulwark-allowlist-rcpt.XXXXXX)" || fail "cannot 
 sudo chmod 755 "$RCPT_DIR" || fail "cannot set mode on $RCPT_DIR"
 EVENT_RCPT_LIVE="$RCPT_DIR/$EVENT_RECEIPTS"
 sudo /bin/sh -c ': > "$1"' _ "$EVENT_RCPT_LIVE" || fail "cannot create $EVENT_RCPT_LIVE"
+# WO-287@v1: the file's mode must not depend on the caller's umask; the checks read it as the caller.
+sudo chmod 0644 "$EVENT_RCPT_LIVE" || fail "cannot set mode on $EVENT_RCPT_LIVE"
 
 echo
 # WO-137@v1: TEST 4a joins the first supervised run (see the 4a note below).
@@ -399,7 +401,9 @@ if [ "$CLONE_BUILD_OK" = 1 ]; then
   ALLOW_FILE_INO=$(stat -f %i "$ALLOW_FILE")
   DENY_FILE_INO=$(stat -f %i "$DENY_FILE")
   ALLOW_DIR_INO=$(stat -f %i "$ALLOW_DIR")
-  sudo /bin/sh -c ': > "$1"' _ "$CLONE_RCPT"
+  sudo /bin/sh -c ': > "$1"' _ "$CLONE_RCPT" || fail "cannot create $CLONE_RCPT"
+  # WO-287: readable by the caller whatever its umask.
+  sudo chmod 0644 "$CLONE_RCPT" || fail "cannot set mode on $CLONE_RCPT"
   sudo BULWARK_MACOS_ES_GATE="$BULWARK_MACOS_ES_GATE" "$BULWARK" run --allow-user-writable-engine \
     --deny-all --allow "$ALLOW_DIR/**" --receipts "$CLONE_RCPT" \
     -- "$ALLOW_DIR/clone_probe" "$ALLOW_FILE" "$CLONE_IN_GRANT_DST" "$DENY_FILE" "$CLONE_SIBLING_DST" "$ALLOW_DIR" "$CLONE_DIR_DST" \
@@ -447,8 +451,12 @@ LOAD_STATUS=$?
 cp "$LOAD_OUT" "$LOAD_OUT_KEEP"
 cp "$LOAD_ERR" "$LOAD_ERR_KEEP"
 # WO-286: keep the receipts the report names next to the other evidence.
-cp "$EVENT_RCPT_LIVE" "$EVENT_RECEIPTS"
-[ -f "$CLONE_RCPT" ] && cp "$CLONE_RCPT" allowlist-clone.jsonl
+# WO-287@v1: a failed or empty copy must stop the check before any verdict is written.
+cp "$EVENT_RCPT_LIVE" "$EVENT_RECEIPTS" || fail "cannot copy $EVENT_RCPT_LIVE to $PWD/$EVENT_RECEIPTS"
+[ -s "$EVENT_RECEIPTS" ] || fail "copied event receipts are empty: $PWD/$EVENT_RECEIPTS"
+if [ -f "$CLONE_RCPT" ]; then
+  cp "$CLONE_RCPT" allowlist-clone.jsonl || fail "cannot copy $CLONE_RCPT to $PWD/allowlist-clone.jsonl"
+fi
 LOAD_N=$(grep -oE 'opened [0-9]+' "$LOAD_OUT" | awk '{print $2}')
 [ "$LOAD_STATUS" = 0 ] && [ "${LOAD_N:-0}" -ge 1000 ] && LOAD_OK=1 || LOAD_OK=0
 echo "   status=$LOAD_STATUS opens completed: ${LOAD_N:-0} (>=1000 required) -> $([ "$LOAD_OK" = 1 ] && echo PASS || echo FAIL)"

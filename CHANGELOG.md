@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The macOS allow-list hardware check writes its receipts into a root-owned temporary
   directory and copies them back afterwards. Its runs had been refused since root runs
   stopped accepting a receipts directory a non-root user owns.
+<!-- WO-287@v1: a failed copy could leave a sealed report naming an empty file. -->
+- The allow-list hardware check stops before writing its verdict when the receipts
+  cannot be copied back or the copy is empty, and its receipts are readable whatever
+  the caller's umask.
 <!-- WO-224@v1: a dropped worker used to inherit root's home and login names. -->
 <!-- WO-224: record the worker identity fix and explicit session opt-in. -->
 - Dropped workers on Linux and macOS get `HOME`, `USER`, and `LOGNAME` from their own
