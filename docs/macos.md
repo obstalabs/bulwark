@@ -135,6 +135,13 @@ verification fails, it removes the installed bundle and reports the error.
 Before starting the gate, `bulwark run` and `bulwark launch` apply the same strict
 signature check to the app bundle containing the resolved gate executable.
 `--allow-user-writable-engine` waives only the ownership and writability checks.
+There is no switch that relaxes the signature requirement: a gate you build and
+sign with your own Developer ID, or sign ad hoc, is refused with codesign's
+reason. This also applies to the hardware-seal scripts, which start the gate through
+`bulwark run`; a modified gate has to be signed by the release team before it can
+run under Bulwark. The check
+adds about 150 ms to each start (measured on an Apple Silicon Mac: 197 ms per run
+without it, 347 ms with it), small next to an agent session.
 
 <!-- WO-140@v1: make hardware-seal evidence a release requirement, not an optional ritual. -->
 A macOS release is publishable only when both hardware-seal receipts identify the
