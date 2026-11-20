@@ -900,7 +900,7 @@ sys.stdout.flush()\n";
     }
     let conn = UnixStream::connect(&sock).expect("connect to agent socket");
     unsafe {
-        let payload = [b'x'];
+        let payload = *b"x";
         let mut iov = libc::iovec {
             iov_base: payload.as_ptr() as *mut libc::c_void,
             iov_len: 1,
