@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.12.0] - 2026-11-19
+## [0.12.0] - 2026-11-20
 
 ### Changed
 <!-- WO-278: record the runner bump alongside the privileged test fix. -->
