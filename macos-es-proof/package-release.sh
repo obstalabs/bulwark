@@ -9,7 +9,8 @@
 # (security find-identity -v -p basic); notarytool keychain profile "bulwark-notary";
 # Full Disk Access for the terminal (re-check after every macOS update, else the
 # seals fail with "es_new_client failed: 4").
-# ORDER: stage -> sign -> seal (run the two printed sudo lines, both SEALED) -> repack
+# WO-296: run both hardware seals through one staged command.
+# ORDER: stage -> sign -> seal (run the printed command, both SEALED) -> repack
 #   -> APP_ID=... INSTALLER_ID=... pkg (about 1 min per arch) -> verify
 #   -> upload (PUBLIC) -> homebrew-tap bump (formula: version, 4 urls/sha256,
 #   darwin sums from $W/out; cask: version + 2 pkg sha256).
@@ -295,7 +296,15 @@ sign() {
   echo "==> Developer-ID-signed binaries staged in $W/signed"
 }
 
+# WO-296@v1: show the same seal command during staging and upload refusal.
+# WO-296: quote the configured staging path for pasting into a shell.
+print_seal_command() {
+  printf 'sudo bash %q\n' "$W/seal/run-seals.sh"
+}
+
 # WO-95@v2: the hardware seals must run on the exact binary + gate pair that ships.
+# WO-296@v1: stage a runnable handoff for the two hardware seals.
+# WO-296: pin the checked tag SHA inside the staged runner.
 seal() {
   # The seal scripts cd into their own directory and look for ./bulwark_es_gate.app,
   # so seal from a staging copy instead of swapping the app in the checkout.
@@ -313,9 +322,61 @@ seal() {
   source_sha=$(git -C "$SRC_REPO" rev-parse "v$VERSION^{commit}") \
     || die "cannot resolve v$VERSION to a source commit"
   [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die "v$VERSION source SHA is not 40 hex characters"
-  echo "Run both, expect SEALED from each:"
-  printf '  sudo BULWARK_SOURCE_SHA=%q BULWARK=%q %q\n' "$source_sha" "$s/bulwark" "$s/verify-gate.sh"
-  printf '  sudo BULWARK_SOURCE_SHA=%q BULWARK=%q %q\n' "$source_sha" "$s/bulwark" "$s/verify-allowlist-gate.sh"
+  # WO-296: generate the runner beside the exact staged verifier inputs.
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+# WO-296@v1: check privileges before running either hardware seal.
+if [ "$EUID" -ne 0 ]; then
+  echo '!! run-seals.sh requires root (use sudo bash)' >&2
+  exit 1
+fi
+
+# WO-296: locate the staged inputs when invoked from another directory.
+CDPATH='' cd -- "$(dirname -- "$0")" || exit 1
+# WO-296: pass the exact staged executable to each verifier.
+bulwark="$PWD/bulwark"
+# WO-296: use the tag commit captured by the seal phase in both receipts.
+SH
+    printf 'source_sha=%s\n' "$source_sha"
+    cat <<'SH'
+
+# WO-296@v1: require a fresh SEALED verdict from each invocation.
+# WO-296: preserve live verifier output while checking its verdict.
+run_seal() {
+  # WO-296: identify the verifier in the command and failure message.
+  local verifier="$1"
+  # WO-296@v1: fail on a nonzero command or a missing positive verdict.
+  if ! sudo BULWARK_SOURCE_SHA="$source_sha" BULWARK="$bulwark" \
+      "$PWD/$verifier" | awk '
+        { print; fflush() }
+        # WO-296: anchor the positive verdict to the receipt field.
+        /^verdict:[[:blank:]]*SEALED([[:blank:]]|$)/ { sealed = 1 }
+        END { exit !sealed }
+      '; then
+    printf '!! %s did not produce a SEALED verdict\n' "$verifier" >&2
+    return 1
+  fi
+}
+
+# WO-296@v1: run both verifiers before returning a failure.
+# WO-296: record whether either invocation failed.
+status=0
+run_seal verify-gate.sh || status=1
+run_seal verify-allowlist-gate.sh || status=1
+[ "$status" -eq 0 ] || exit "$status"
+
+# WO-296: show the identity and verdict from each receipt on success.
+grep -HE '^(verdict|bulwark_sha256|head_sha):' \
+  gate-receipt.txt allowlist-gate-receipt.txt
+SH
+  } > "$s/run-seals.sh"
+  chmod 0755 "$s/run-seals.sh"
+  echo "NOTHING IS SEALED YET"
+  print_seal_command
 }
 
 # WO-95@v2: rebuild the darwin tarballs with the gate app, in the layout release.yml uses.
@@ -373,6 +434,8 @@ verify() {
 
 # WO-95@v2: replace the CI darwin assets and add the pkgs on the tagged release.
 # WO-140@v1: validate identity from a fresh extract of the archive sent to GitHub.
+# WO-296@v1: show the seal command when upload refuses seal evidence.
+# WO-296: print the recovery command before exiting with the refusal status.
 upload() {
   # WO-140@v1: the shared upload point fails before gh sees any unsealed asset.
   local source_sha archive package extract_dir extracted_name sealed_binary sealed_app expected_cdhash
@@ -403,15 +466,21 @@ upload() {
     rm -rf "$extract_dir"
     die "macOS release upload refused: gate CDHash missing from extracted archive"
   fi
+  # WO-296@v1: name the runner after the archive seal refusal.
   if ! release_gate "$W/seal" "$source_sha" "$sealed_binary" "$expected_cdhash"; then
     rm -rf "$extract_dir"
-    die "macOS release upload refused: hardware seal evidence does not match v$VERSION"
+    echo "!! macOS release upload refused: hardware seal evidence does not match v$VERSION" >&2
+    print_seal_command >&2
+    exit 1
   fi
   # WO-174@v1: the arm64 package payload must be the same signed bytes the seals ran.
   package="$W/out/bulwark-$VERSION-aarch64-apple-darwin.pkg"
+  # WO-296@v1: name the runner after the package seal refusal.
   if ! release_pkg_gate "$W/seal" "$source_sha" "$package" "$expected_cdhash"; then
     rm -rf "$extract_dir"
-    die "macOS release upload refused: package payload does not match the hardware seal"
+    echo "!! macOS release upload refused: package payload does not match the hardware seal" >&2
+    print_seal_command >&2
+    exit 1
   fi
   rm -rf "$extract_dir"
   gh_ release upload "v$VERSION" --repo "$REPO" --clobber "$W"/out/*

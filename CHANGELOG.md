@@ -17,6 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI refuses a pull request that adds lines to an already-released changelog section.
 <!-- WO-295: record that required Rust checks and release builds use a fixed compiler. -->
 - CI and release builds use a pinned Rust toolchain.
+<!-- WO-296: record the single command for running both macOS release seals. -->
+- macOS release tooling writes the two hardware-seal commands to `run-seals.sh`.
 
 ### Security
 <!-- WO-284: record that macOS runs authenticate the gate before spawning it. -->
