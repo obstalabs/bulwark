@@ -11,6 +11,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linux root tests pin that a descriptor the launcher leaves open is closed before the
   agent runs, and document that a descriptor passed later over a Unix socket from outside
   the supervised tree remains readable.
+<!-- WO-291@v3: record the internal compiler ahead of its launch integration. -->
+- Added an internal read-floor profile compiler for the upcoming macOS hardened mode.
+<!-- WO-294@v1: record the pull-request check for published sections. -->
+- CI refuses a pull request that adds lines to an already-released changelog section.
+<!-- WO-295: record that required Rust checks and release builds use a fixed compiler. -->
+- CI and release builds use a pinned Rust toolchain.
+<!-- WO-296: record the single command for running both macOS release seals. -->
+- macOS release tooling writes the two hardware-seal commands to `run-seals.sh`.
 
 ### Security
 <!-- WO-284: record that macOS runs authenticate the gate before spawning it. -->

@@ -1,0 +1,15 @@
+# WO-295: select the repository toolchain when working in this checkout.
+[toolchain]
+# WO-295: keep local checks on the same compiler as CI and release builds.
+channel = "1.100.0"
+# WO-295: install the components used by the lint and format checks.
+components = ["clippy", "rustfmt"]
+# WO-295: install the standard libraries for the release build matrix.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]

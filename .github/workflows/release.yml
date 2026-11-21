@@ -42,10 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WO-295@v1: install the pinned compiler for every Linux release target.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          # WO-295: match the compiler and components in rust-toolchain.toml.
+          toolchain: 1.100.0
+          components: clippy, rustfmt
           targets: ${{ matrix.target }}
+
+      # WO-295@v1: record the compiler selected before the Linux build.
+      - name: Print Rust version
+        run: rustc --version
 
       - name: Install cross
         if: matrix.cross
@@ -55,9 +63,10 @@ jobs:
         if: ${{ !matrix.cross }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      # WO-295@v1: select the pinned host toolchain for the container build.
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross +1.100.0 build --release --target ${{ matrix.target }}
 
       # WO-135@v2: a gnu binary that needs a newer glibc than the floor fails at
       # load time on Debian 12 (2.36), Ubuntu 22.04 (2.35) and RHEL 9 (2.34),
@@ -126,10 +135,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WO-295@v1: install the pinned compiler for every macOS release target.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          # WO-295: match the compiler and components in rust-toolchain.toml.
+          toolchain: 1.100.0
+          components: clippy, rustfmt
           targets: ${{ matrix.target }}
+
+      # WO-295@v1: record the compiler selected before the macOS build.
+      - name: Print Rust version
+        run: rustc --version
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

@@ -152,6 +152,12 @@ commit-body line `Seal-required: acknowledged`. Any defect observed in use must
 produce a reproduction and a permanent automated or seal check; when it crossed
 the enforcement boundary, add its path to that list if it was missing.
 
+<!-- WO-296: give release operators the command for producing both receipts. -->
+The `seal` phase of `macos-es-proof/package-release.sh` writes `seal/run-seals.sh`
+in the staging directory and prints the command to run it. Run that command and
+confirm that both receipts report `SEALED` before repacking. If upload refuses
+missing or mismatched seal evidence, it prints the same command.
+
 <!-- WO-174@v1: state the release binding provided for every Darwin artifact. -->
 The arm64 tarball and arm64 `.pkg` carry the exact Developer-ID-signed Bulwark
 binary hash named by both hardware-seal receipts; upload rechecks the binary in

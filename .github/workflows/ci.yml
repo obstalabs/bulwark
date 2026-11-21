@@ -22,12 +22,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WO-295@v1: install the pinned compiler for the required Rust checks.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          # WO-295: match the compiler selected in rust-toolchain.toml.
+          toolchain: 1.100.0
           components: clippy, rustfmt
           # WO-135@v2: aarch64 gnu is cross-built below for the glibc floor check.
           targets: x86_64-apple-darwin, x86_64-unknown-linux-musl, aarch64-unknown-linux-gnu
+
+      # WO-295@v1: record the compiler selected in the checkout before the checks run.
+      - name: Print Rust version
+        run: rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -88,10 +95,11 @@ jobs:
       - name: Install cross (gnu floor check)
         run: cargo install cross --locked
 
+      # WO-295@v1: select the pinned host toolchain for both container builds.
       - name: Build gnu targets via cross (release shape)
         run: |
-          cross build --release --target x86_64-unknown-linux-gnu
-          cross build --release --target aarch64-unknown-linux-gnu
+          cross +1.100.0 build --release --target x86_64-unknown-linux-gnu
+          cross +1.100.0 build --release --target aarch64-unknown-linux-gnu
 
       - name: Assert glibc floor (gnu, cross builds)
         run: |
@@ -207,6 +215,33 @@ jobs:
             exit 1
           }
 
+  # WO-295: surface new stable lints before a toolchain bump.
+  clippy-next-stable:
+    runs-on: ubuntu-latest
+    env:
+      # WO-295: override the repository pin for this job.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      # WO-295@v1: lint the same revision as the pinned checks.
+      - uses: actions/checkout@v4
+
+      # WO-295@v1: install the latest stable compiler with its Clippy component.
+      - name: Install latest stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # WO-295@v1: log the stable compiler and surface any new lint failures.
+      # WO-295: a new lint is a warning annotation here, never a red check run that would block merges.
+      - name: Clippy
+        continue-on-error: true
+        run: |
+          rustc --version
+          cargo clippy --all-targets -- -D warnings || {
+            echo "::warning title=clippy-next-stable::latest stable reports new lints; fix them in the next toolchain bump"
+            exit 1
+          }
+
   # WO-140@v1: flag pull requests that cross the hardware-sealed boundary.
   hardware-seal-ack:
     name: hardware seal acknowledgement
@@ -233,6 +268,29 @@ jobs:
             git show "HEAD:scripts/run-seal-ack.sh" > "$runner"
           fi
           bash "$runner" "origin/$BASE_REF"
+
+  # WO-294@v1: enforce changelog placement before merging pull requests.
+  changelog-placement:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      # WO-294@v1: full history gives the guard the branch fork and release commits.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # WO-294@v1: exercise the placement rules in isolated repositories before checking the pull request.
+      - name: Test changelog placement guard
+        run: bash scripts/changelog-placement-guard_test.sh
+
+      # WO-294@v1: validate the committed changelog using the event's base and head revisions.
+      - name: Check changelog placement
+        env:
+          # WO-294@v1: the current base tip identifies sections published after the fork.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # WO-294@v1: the actual head supplies the pull request's changes and subjects.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/changelog-placement-guard.sh "$PR_BASE_SHA" "$PR_HEAD_SHA"
 
   supply-chain:
     name: supply-chain (cargo-deny)
