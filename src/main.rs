@@ -40,6 +40,9 @@ mod protect;
 mod receipt;
 // WO-9@v1: expose remote prompt and verdict lane handling.
 mod remote;
+// WO-291@v3: build and test the portable read-floor compiler ahead of its caller.
+#[allow(dead_code)]
+mod sandbox_floor;
 
 // WO-28/WO-23: split the platform gate behind cfg-gated modules.
 // Linux uses fanotify. macOS uses Endpoint Security. Other platforms keep a
