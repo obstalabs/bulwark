@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added an internal read-floor profile compiler for the upcoming macOS hardened mode.
 <!-- WO-294@v1: record the pull-request check for published sections. -->
 - CI refuses a pull request that adds lines to an already-released changelog section.
+<!-- WO-295: record that required Rust checks and release builds use a fixed compiler. -->
+- CI and release builds use a pinned Rust toolchain.
 
 ### Security
 <!-- WO-284: record that macOS runs authenticate the gate before spawning it. -->
