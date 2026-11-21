@@ -33,6 +33,13 @@ check runs from the base branch, so a pull request cannot weaken the control tha
 it; workflow edits remain protected by branch protection and required approval, not by
 this job.
 
+<!-- WO-295: explain how toolchain bumps keep local checks and CI aligned. -->
+## Rust toolchain
+
+The Rust version is pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+Bump it in a dedicated pull request that updates the workflow pins and fixes
+any new lints. The `clippy-next-stable` job warns about new lints ahead of time.
+
 ## Sign your commits (DCO)
 
 We use the **Developer Certificate of Origin** — no CLA, no copyright assignment.
