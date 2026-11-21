@@ -234,6 +234,29 @@ jobs:
           fi
           bash "$runner" "origin/$BASE_REF"
 
+  # WO-294@v1: enforce changelog placement before merging pull requests.
+  changelog-placement:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      # WO-294@v1: full history gives the guard the branch fork and release commits.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # WO-294@v1: exercise the placement rules in isolated repositories before checking the pull request.
+      - name: Test changelog placement guard
+        run: bash scripts/changelog-placement-guard_test.sh
+
+      # WO-294@v1: validate the committed changelog using the event's base and head revisions.
+      - name: Check changelog placement
+        env:
+          # WO-294@v1: the current base tip identifies sections published after the fork.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # WO-294@v1: the actual head supplies the pull request's changes and subjects.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/changelog-placement-guard.sh "$PR_BASE_SHA" "$PR_HEAD_SHA"
+
   supply-chain:
     name: supply-chain (cargo-deny)
     # Audits the dependency tree on every PR: RustSec security advisories, yanked

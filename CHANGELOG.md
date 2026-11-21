@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the supervised tree remains readable.
 <!-- WO-291@v3: record the internal compiler ahead of its launch integration. -->
 - Added an internal read-floor profile compiler for the upcoming macOS hardened mode.
+<!-- WO-294@v1: record the pull-request check for published sections. -->
+- CI refuses a pull request that adds lines to an already-released changelog section.
 
 ### Security
 <!-- WO-284: record that macOS runs authenticate the gate before spawning it. -->
