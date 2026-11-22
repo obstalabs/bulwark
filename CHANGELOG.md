@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linux root tests pin that a descriptor the launcher leaves open is closed before the
   agent runs, and document that a descriptor passed later over a Unix socket from outside
   the supervised tree remains readable.
+<!-- WO-289@v2: record the stronger Linux denial assertion and the macOS waiver guidance. -->
+- The Linux inherited-descriptor test checks the direct-read denial text, and the macOS guide explains why the engine waiver is for development only.
 <!-- WO-291@v3: record the internal compiler ahead of its launch integration. -->
 - Added an internal read-floor profile compiler for the upcoming macOS hardened mode.
 <!-- WO-294@v1: record the pull-request check for published sections. -->

@@ -143,6 +143,13 @@ run under Bulwark. The check
 adds about 150 ms to each start (measured on an Apple Silicon Mac: 197 ms per run
 without it, 347 ms with it), small next to an agent session.
 
+<!-- WO-289@v2: the signature check is point-in-time under the ownership waiver. -->
+With `--allow-user-writable-engine`, the signature check is point-in-time.
+Anyone with write access to the gate bundle's directories can replace the executable
+between the check and the gate's start, so the gate that runs need not be the one
+that was verified.
+Use this waiver only for development harnesses and keep it disabled for protected runs.
+
 <!-- WO-140@v1: make hardware-seal evidence a release requirement, not an optional ritual. -->
 A macOS release is publishable only when both hardware-seal receipts identify the
 exact Bulwark binary, source commit, and signed gate used, and the shared upload
