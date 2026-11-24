@@ -836,6 +836,11 @@ fn launcher_held_descriptor_is_closed_before_the_agent_runs() {
         stdout.contains("direct=") && !stdout.contains("direct=0"),
         "the direct read must be denied: {stdout:?}"
     );
+    // WO-289@v2: require the gate's EPERM text, so another nonzero cat exit cannot pass as a denial.
+    assert!(
+        stdout.contains("Operation not permitted"),
+        "the direct read must report Operation not permitted: {stdout:?}"
+    );
 }
 
 // WO-283@v1: documents the known residual: a descriptor passed after launch by a process
